@@ -1,0 +1,4 @@
+keepa
+python-dotenv
+pandas
+requests

@@ -1,0 +1,31 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.venv/
+
+# Local credentials and generated data
+*.sqlite3
+amazon_headers.txt
+amazon_jp_headers.txt
+price_comparison.csv
+
+# Saved HTML/debug captures
+data/samples/*.html
+data/samples/*.txt
+
+# Frontend dependencies and build output
+keepa-csv-dashboard/node_modules/
+keepa-csv-dashboard/dist/
+keepa-csv-dashboard/.env
+
+# Dropbox and macOS metadata
+.DS_Store
+.dropbox/
+.dropbox.cache/
+.dropboxignore
+.dropbox.attr
+**/.~*
+**/~$*
