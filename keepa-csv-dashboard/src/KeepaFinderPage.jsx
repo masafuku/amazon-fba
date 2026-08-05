@@ -16,13 +16,26 @@ const formatPrice = (value, currency) => {
 
 const getMarketPrice = (market) => market?.currentBuyBoxPrice ?? market?.currentNewPrice ?? market?.currentAmazonPrice;
 
+const getProfitRate = (market) => {
+    const price = getMarketPrice(market);
+    if (!Number.isFinite(Number(price)) || Number(price) <= 0) return null;
+
+    const referralFee = Number(market?.referralFeePercentage);
+    const pickAndPackFee = Number(market?.fbaPickAndPackFee);
+    if (!Number.isFinite(referralFee) && !Number.isFinite(pickAndPackFee)) return null;
+
+    const referralFeeAmount = Number.isFinite(referralFee) ? Number(price) * (referralFee / 100) : 0;
+    const fixedFee = Number.isFinite(pickAndPackFee) ? pickAndPackFee : 0;
+    return ((Number(price) - referralFeeAmount - fixedFee) / Number(price)) * 100;
+};
+
 export default function KeepaFinderPage() {
-    const [keyword, setKeyword] = useState('TAMASHII NATIONS');
+    const [keyword, setKeyword] = useState('Japan Import');
     const [minNewPriceYen, setMinNewPriceYen] = useState(0);
     const [maxSalesRank, setMaxSalesRank] = useState(99999999);
     const [domain, setDomain] = useState(1);
     const [page, setPage] = useState(0);
-    const [perPage, setPerPage] = useState(50);
+    const [perPage, setPerPage] = useState(2000);
     const [stats, setStats] = useState(false);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
@@ -77,11 +90,23 @@ export default function KeepaFinderPage() {
             const details = productDetails[asin] || {};
             const usPrice = getMarketPrice(details.US);
             const jpPrice = getMarketPrice(details.JP);
+            if (sortKey === 'asin') return String(asin).toLowerCase();
             if (sortKey === 'priceDiffJpy' && usPrice !== null && usPrice !== undefined && jpPrice !== null && jpPrice !== undefined) {
                 return usPrice * exchangeRate - jpPrice;
             }
             if (sortKey === 'usPrice') return usPrice ?? -Infinity;
             if (sortKey === 'jpPrice') return jpPrice ?? -Infinity;
+            if (sortKey === 'usProfitRate') return getProfitRate(details.US) ?? -Infinity;
+            if (sortKey === 'jpProfitRate') return getProfitRate(details.JP) ?? -Infinity;
+            if (sortKey === 'usFee') {
+                const referralFee = Number(details.US?.referralFeePercentage);
+                const pickAndPackFee = Number(details.US?.fbaPickAndPackFee);
+                if (!Number.isFinite(referralFee) && !Number.isFinite(pickAndPackFee)) return -Infinity;
+                const referralFeeAmount = Number.isFinite(referralFee) && Number.isFinite(Number(usPrice))
+                    ? Number(usPrice) * (referralFee / 100)
+                    : 0;
+                return referralFeeAmount + (Number.isFinite(pickAndPackFee) ? pickAndPackFee : 0);
+            }
             return details.US?.monthlySold ?? -Infinity;
         };
 
@@ -96,7 +121,14 @@ export default function KeepaFinderPage() {
             })
             .filter((asin) => !excludeZeroSales || (productDetails[asin]?.US?.monthlySold ?? 0) > 0)
             .sort((left, right) => {
-                const difference = getSortValue(left) - getSortValue(right);
+                const leftValue = getSortValue(left);
+                const rightValue = getSortValue(right);
+                if (leftValue === rightValue) return 0;
+                if (typeof leftValue === 'string' || typeof rightValue === 'string') {
+                    const difference = String(leftValue).localeCompare(String(rightValue), 'ja');
+                    return sortOrder === 'asc' ? difference : -difference;
+                }
+                const difference = leftValue - rightValue;
                 return sortOrder === 'asc' ? difference : -difference;
             });
     }, [asinList, filterText, onlyFetched, excludeMissingPrices, excludeZeroSales, productDetails, sortKey, sortOrder, exchangeRate]);
@@ -109,16 +141,19 @@ export default function KeepaFinderPage() {
         }
     }, [result]);
 
-    const minNewPriceKeepa = useMemo(() => Math.max(0, Number(minNewPriceYen) || 0) * 100, [minNewPriceYen]);
     const debugPayload = useMemo(() => ({
-        keyword,
-        minNewPriceYen: Number(minNewPriceYen) || 0,
-        maxSalesRank: Number(maxSalesRank) || 99999999,
+        title: keyword,
+        productType: ['0'],
+        current_AMAZON_gte: -1,
+        current_AMAZON_lte: -1,
+        current_BUY_BOX_SHIPPING_gte: 3000,
+        monthlySoldPeak_gte: 10,
+        sort: [['current_SALES', 'asc'], ['monthlySold', 'desc']],
         page: Number(page) || 0,
-        perPage: Number(perPage) || 50,
+        perPage: Number(perPage) || 2000,
         domain: Number(domain) || 1,
         stats,
-    }), [keyword, minNewPriceYen, maxSalesRank, page, perPage, domain, stats]);
+    }), [keyword, page, perPage, domain, stats]);
 
     const domainLabel = useMemo(() => (Number(domain) === 5 ? 'co.jp (5)' : 'com (1)'), [domain]);
 
@@ -184,6 +219,30 @@ export default function KeepaFinderPage() {
         setError('');
         setShowConfirm(true);
     };
+
+    const selectSortKey = (nextSortKey) => {
+        if (sortKey === nextSortKey) {
+            setSortOrder((current) => current === 'desc' ? 'asc' : 'desc');
+            return;
+        }
+        setSortKey(nextSortKey);
+        setSortOrder('desc');
+    };
+
+    const renderSortHeader = (label, key) => (
+        <th className="px-4 py-3 font-medium text-slate-400">
+            <button
+                type="button"
+                onClick={() => selectSortKey(key)}
+                className="inline-flex items-center gap-1 whitespace-nowrap text-left hover:text-cyan-300"
+            >
+                {label}
+                <span className="text-xs text-cyan-300" aria-hidden="true">
+                    {sortKey === key ? (sortOrder === 'desc' ? '▼' : '▲') : '↕'}
+                </span>
+            </button>
+        </th>
+    );
 
     return (
         <div className="space-y-6">
@@ -393,6 +452,8 @@ export default function KeepaFinderPage() {
                             <option value="priceDiffJpy">価格差順</option>
                             <option value="usPrice">US価格順</option>
                             <option value="jpPrice">JP価格順</option>
+                            <option value="usProfitRate">US利益率順</option>
+                            <option value="jpProfitRate">JP利益率順</option>
                         </select>
                         <button type="button" onClick={() => setSortOrder((current) => current === 'desc' ? 'asc' : 'desc')} className="rounded-xl bg-slate-800 px-3 py-2 text-sm font-semibold text-slate-200">
                             並び替え: {sortOrder === 'desc' ? '高い順' : '低い順'}
@@ -406,12 +467,14 @@ export default function KeepaFinderPage() {
                         <thead className="bg-slate-950/90">
                             <tr>
                                 <th className="px-4 py-3 font-medium text-slate-400">#</th>
-                                <th className="px-4 py-3 font-medium text-slate-400">ASIN</th>
-                                <th className="px-4 py-3 font-medium text-slate-400">先月販売数</th>
-                                <th className="px-4 py-3 font-medium text-slate-400">US価格</th>
-                                <th className="px-4 py-3 font-medium text-slate-400">JP価格</th>
-                                <th className="px-4 py-3 font-medium text-slate-400">価格差 (円)</th>
-                                <th className="px-4 py-3 font-medium text-slate-400">US手数料</th>
+                                {renderSortHeader('ASIN', 'asin')}
+                                {renderSortHeader('先月販売数', 'monthlySold')}
+                                {renderSortHeader('US価格', 'usPrice')}
+                                {renderSortHeader('JP価格', 'jpPrice')}
+                                {renderSortHeader('価格差 (円)', 'priceDiffJpy')}
+                                {renderSortHeader('US利益率', 'usProfitRate')}
+                                {renderSortHeader('JP利益率', 'jpProfitRate')}
+                                {renderSortHeader('US手数料', 'usFee')}
                                 <th className="px-4 py-3 font-medium text-slate-400">Product API</th>
                                 <th className="px-4 py-3 font-medium text-slate-400">リンク</th>
                             </tr>
@@ -439,6 +502,12 @@ export default function KeepaFinderPage() {
                                                 '￥',
                                             )
                                             : '-'}
+                                    </td>
+                                    <td className="px-4 py-3 text-emerald-300">
+                                        {getProfitRate(productDetails[asin]?.US) === null ? '-' : `${getProfitRate(productDetails[asin]?.US).toFixed(1)}%`}
+                                    </td>
+                                    <td className="px-4 py-3 text-emerald-300">
+                                        {getProfitRate(productDetails[asin]?.JP) === null ? '-' : `${getProfitRate(productDetails[asin]?.JP).toFixed(1)}%`}
                                     </td>
                                     <td className="px-4 py-3 text-slate-300">
                                         {productDetails[asin]?.US?.referralFeePercentage == null && productDetails[asin]?.US?.fbaPickAndPackFee == null
@@ -498,7 +567,7 @@ export default function KeepaFinderPage() {
                             ))}
                             {filteredAsins.length === 0 ? (
                                 <tr>
-                                    <td className="px-4 py-6 text-slate-500" colSpan={10}>検索結果はまだありません。</td>
+                                    <td className="px-4 py-6 text-slate-500" colSpan={12}>検索結果はまだありません。</td>
                                 </tr>
                             ) : null}
                         </tbody>

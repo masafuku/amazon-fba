@@ -413,12 +413,43 @@ export default function App() {
             .filter((row) => !excludeMissingPrices || ((row.buyBoxUsd ?? 0) > 0 && (row.jpCost ?? 0) > 0))
             .filter((row) => !excludeZeroSales || (row.lastMonthSales ?? 0) > 0)
             .sort((a, b) => {
-                const aValue = a[sortKey] ?? 0;
-                const bValue = b[sortKey] ?? 0;
-                if (sortOrder === 'asc') return aValue - bValue;
-                return bValue - aValue;
+                const aValue = a[sortKey];
+                const bValue = b[sortKey];
+                if (aValue === bValue) return 0;
+                if (typeof aValue === 'string' || typeof bValue === 'string') {
+                    const difference = String(aValue ?? '').localeCompare(String(bValue ?? ''), 'ja');
+                    return sortOrder === 'asc' ? difference : -difference;
+                }
+                const numericA = Number.isFinite(Number(aValue)) ? Number(aValue) : -Infinity;
+                const numericB = Number.isFinite(Number(bValue)) ? Number(bValue) : -Infinity;
+                const difference = numericA - numericB;
+                return sortOrder === 'asc' ? difference : -difference;
             });
     }, [visibleRows, profitOnly, excludeAmazonSeller, excludeMissingPrices, excludeZeroSales, sortKey, sortOrder]);
+
+    const selectSortKey = (nextSortKey) => {
+        if (sortKey === nextSortKey) {
+            setSortOrder((current) => current === 'desc' ? 'asc' : 'desc');
+            return;
+        }
+        setSortKey(nextSortKey);
+        setSortOrder('desc');
+    };
+
+    const renderSortHeader = (label, key) => (
+        <th key={key} className="px-4 py-3 font-medium text-slate-400">
+            <button
+                type="button"
+                onClick={() => selectSortKey(key)}
+                className="inline-flex items-center gap-1 whitespace-nowrap text-left hover:text-cyan-300"
+            >
+                {label}
+                <span className="text-xs text-cyan-300" aria-hidden="true">
+                    {sortKey === key ? (sortOrder === 'desc' ? '▼' : '▲') : '↕'}
+                </span>
+            </button>
+        </th>
+    );
 
     const summary = useMemo(() => {
         const validRows = filteredRows.filter((row) => row.profit !== null);
@@ -659,37 +690,6 @@ export default function App() {
                             <div className="grid gap-2 sm:grid-cols-2">
                                 <button
                                     type="button"
-                                    onClick={() => setSortKey('profit')}
-                                    className={`rounded-2xl px-4 py-3 text-sm font-semibold ${sortKey === 'profit' ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-300'}`}
-                                >
-                                    純利益順
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={() => setSortKey('profitRate')}
-                                    className={`rounded-2xl px-4 py-3 text-sm font-semibold ${sortKey === 'profitRate' ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-300'}`}
-                                >
-                                    利益率順
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={() => setSortKey('priceDiffJpy')}
-                                    className={`rounded-2xl px-4 py-3 text-sm font-semibold ${sortKey === 'priceDiffJpy' ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-300'}`}
-                                >
-                                    差額順
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={() => setSortKey('lastMonthSales')}
-                                    className={`rounded-2xl px-4 py-3 text-sm font-semibold ${sortKey === 'lastMonthSales' ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-300'}`}
-                                >
-                                    先月売上順
-                                </button>
-                            </div>
-
-                            <div className="grid gap-2 sm:grid-cols-2">
-                                <button
-                                    type="button"
                                     onClick={() => setSortOrder(sortOrder === 'desc' ? 'asc' : 'desc')}
                                     className="rounded-2xl bg-slate-800 px-4 py-3 text-sm font-semibold text-slate-200"
                                 >
@@ -853,36 +853,6 @@ export default function App() {
                                     <p className="text-sm text-slate-400">ASIN突合済みのUS価格、JP価格、差額、純利益、利益率を確認できます。</p>
                                 </div>
                                 <p className="text-sm text-slate-400">表示中: <span className="font-semibold text-cyan-300">{filteredRows.length}</span> 件</p>
-                                <div className="flex flex-wrap gap-2">
-                                    <button
-                                        type="button"
-                                        onClick={() => setSortKey('profit')}
-                                        className={`rounded-2xl px-4 py-2 text-sm font-semibold ${sortKey === 'profit' ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-300'}`}
-                                    >
-                                        純利益順
-                                    </button>
-                                    <button
-                                        type="button"
-                                        onClick={() => setSortKey('profitRate')}
-                                        className={`rounded-2xl px-4 py-2 text-sm font-semibold ${sortKey === 'profitRate' ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-300'}`}
-                                    >
-                                        利益率順
-                                    </button>
-                                    <button
-                                        type="button"
-                                        onClick={() => setSortKey('priceDiffJpy')}
-                                        className={`rounded-2xl px-4 py-2 text-sm font-semibold ${sortKey === 'priceDiffJpy' ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-300'}`}
-                                    >
-                                        差額順
-                                    </button>
-                                    <button
-                                        type="button"
-                                        onClick={() => setSortKey('lastMonthSales')}
-                                        className={`rounded-2xl px-4 py-2 text-sm font-semibold ${sortKey === 'lastMonthSales' ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-300'}`}
-                                    >
-                                        先月売上順
-                                    </button>
-                                </div>
                             </div>
 
                             <div className="overflow-hidden rounded-3xl border border-slate-800">
@@ -890,9 +860,19 @@ export default function App() {
                                     <table className="min-w-full border-collapse text-left text-sm">
                                         <thead className="bg-slate-950/90">
                                             <tr>
-                                                {['画像', 'ASIN', 'タイトル', '商品カテゴリ', 'US価格($)', 'US価格(円)', 'JP価格(円)', '差額(円)', '手数料合計(円)', '先月売上', 'Amazonセラー', '純利益(円)', '利益率(%)'].map((name) => (
-                                                    <th key={name} className="px-4 py-3 font-medium text-slate-400">{name}</th>
-                                                ))}
+                                                <th className="px-4 py-3 font-medium text-slate-400">画像</th>
+                                                {renderSortHeader('ASIN', 'asin')}
+                                                {renderSortHeader('タイトル', 'title')}
+                                                {renderSortHeader('商品カテゴリ', 'productCategory')}
+                                                {renderSortHeader('US価格($)', 'buyBoxUsd')}
+                                                {renderSortHeader('US価格(円)', 'usPriceJpy')}
+                                                {renderSortHeader('JP価格(円)', 'jpCost')}
+                                                {renderSortHeader('差額(円)', 'priceDiffJpy')}
+                                                {renderSortHeader('手数料合計(円)', 'amazonFee')}
+                                                {renderSortHeader('先月売上', 'lastMonthSales')}
+                                                {renderSortHeader('Amazonセラー', 'amazonSeller')}
+                                                {renderSortHeader('純利益(円)', 'profit')}
+                                                {renderSortHeader('利益率(%)', 'profitRate')}
                                             </tr>
                                         </thead>
                                         <tbody>

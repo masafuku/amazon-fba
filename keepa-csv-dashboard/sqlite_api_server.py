@@ -12,7 +12,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
-HOST = '127.0.0.1'
+HOST = os.getenv('API_HOST', '0.0.0.0')
 PORT = 8001
 DB_PATH = Path(__file__).resolve().parent / 'keepa_imports.sqlite3'
 KEEPA_QUERY_URL = 'https://api.keepa.com/query'
@@ -27,17 +27,14 @@ def to_int_or_default(value, default_value):
 
 
 def build_keepa_finder_selection(keyword, min_new_price_jpy, max_sales_rank, per_page, page):
-    # Keepa finder prices are passed as integer minor units. The requested rule here is 3,000 yen -> 300,000.
-    min_new_price_keepa = max(0, min_new_price_jpy) * 100
-
     return {
+        'productType': ['0'],
         'title': keyword,
-        'current_NEW_gte': min_new_price_keepa,
-        'current_SALES_lte': max(1, max_sales_rank),
-        'availabilityAmazon': [1, 2, 3, 4],
-        'buyBoxIsPreorder': False,
-        'buyBoxIsBackorder': False,
-        'sort': [['current_SALES', 'asc']],
+        'current_AMAZON_gte': -1,
+        'current_AMAZON_lte': -1,
+        'current_BUY_BOX_SHIPPING_gte': 3000,
+        'monthlySoldPeak_gte': 10,
+        'sort': [['current_SALES', 'asc'], ['monthlySold', 'desc']],
         'perPage': max(50, min(10000, per_page)),
         'page': max(0, page),
     }
@@ -48,9 +45,9 @@ def keepa_product_finder_search(payload):
     if not api_key:
         raise ValueError('KEEPA_API_KEY is not set on the API server environment')
 
-    keyword = str(payload.get('keyword') or '').strip()
+    keyword = str(payload.get('title') or payload.get('keyword') or '').strip()
     if not keyword:
-        raise ValueError('keyword is required')
+        raise ValueError('title is required')
 
     domain = to_int_or_default(payload.get('domain'), 5)
     min_new_price_jpy = to_int_or_default(payload.get('minNewPriceYen'), 3000)
