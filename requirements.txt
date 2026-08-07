@@ -1,3 +1,4 @@
 requests
 beautifulsoup4
 python-dotenv
+mcp[cli]>=1.2.0,<2.0.0
