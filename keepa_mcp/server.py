@@ -8,13 +8,23 @@ Registered as a stdio MCP server in ../.mcp.json under the name "keepa".
 """
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Optional
 
 from mcp.server.fastmcp import FastMCP
 
 from . import analysis
 from .config import settings
-from .keepa_client import KeepaError, find_products, get_products, lookup_by_code, search_categories
+from .keepa_client import (
+    KeepaError,
+    estimate_finder_cost,
+    estimate_product_request_cost,
+    find_products,
+    get_products,
+    get_token_status,
+    lookup_by_code,
+    search_categories,
+)
 
 mcp = FastMCP("keepa-arbitrage-finder")
 
@@ -26,6 +36,23 @@ def _require_api_key() -> str:
             "(see .env.example) and restart the MCP server."
         )
     return settings.keepa_api_key
+
+
+def _wait_estimate(shortfall: float, refill_rate_per_minute: Optional[int]) -> str:
+    if not refill_rate_per_minute or refill_rate_per_minute <= 0:
+        return "unknown (check your plan's refill rate on the Keepa dashboard)"
+    minutes = max(1, math.ceil(shortfall / refill_rate_per_minute))
+    return f"~{minutes} min at {refill_rate_per_minute} token/min"
+
+
+@mcp.tool()
+def check_token_balance() -> Dict[str, Any]:
+    """Check the current Keepa API token balance. This call itself is free
+    (0 tokens) - use it before running find_candidates / find_arbitrage_candidates
+    to see whether you have enough budget, especially on low refill-rate plans.
+    """
+    api_key = _require_api_key()
+    return get_token_status(api_key)
 
 
 def _summarize_product(product: Dict[str, Any], domain: str) -> Dict[str, Any]:
@@ -86,6 +113,17 @@ def find_candidates(
         domain: Amazon marketplace code. Default "US".
     """
     api_key = _require_api_key()
+    estimated_cost = estimate_finder_cost(max_results)
+    status = get_token_status(api_key)
+    tokens_left = status["tokens_left"]
+    if tokens_left is not None and tokens_left <= 0:
+        return {
+            "error": "Insufficient Keepa token balance to run this query.",
+            "tokens_left": tokens_left,
+            "estimated_cost": estimated_cost,
+            "estimated_wait": _wait_estimate(estimated_cost - tokens_left, status["refill_rate_per_minute"]),
+            "hint": "Call check_token_balance() to monitor recovery.",
+        }
     result = find_products(
         api_key,
         domain=domain,
@@ -176,23 +214,63 @@ def find_arbitrage_candidates(
     api_key = _require_api_key()
     rate = usd_to_jpy if usd_to_jpy is not None else settings.usd_to_jpy
 
-    finder = find_products(
-        api_key,
-        domain=sell_domain,
-        category_id=category_id,
-        sales_rank_min=sales_rank_min,
-        sales_rank_max=sales_rank_max,
-        review_count_max=review_count_max,
-        per_page=max_candidates,
-    )
+    # Preflight: this pipeline makes 1 Finder call + 1 batched product-detail
+    # call + up to max_candidates JP lookup calls. On low refill-rate plans a
+    # partial run can drain the bucket negative mid-pipeline (each Keepa call
+    # only checks that the balance is *positive*, not that it can afford the
+    # call), which previously surfaced as a raw 429 error. Check budget up
+    # front and bail out cleanly instead.
+    worst_case_cost = estimate_finder_cost(max_candidates) + 2 * estimate_product_request_cost(max_candidates)
+    status = get_token_status(api_key)
+    tokens_left = status["tokens_left"] or 0
+    if tokens_left <= 0:
+        return {
+            "candidates": [], "evaluated": 0,
+            "error": "Insufficient Keepa token balance to start this pipeline.",
+            "tokens_left": tokens_left,
+            "estimated_cost": worst_case_cost,
+            "estimated_wait": _wait_estimate(worst_case_cost - tokens_left, status["refill_rate_per_minute"]),
+        }
+    budget_note = None
+    if tokens_left < worst_case_cost:
+        budget_note = (
+            f"Only {tokens_left} tokens available (worst case needs ~{worst_case_cost}); "
+            "will run as far as the budget allows and stop early if it runs out."
+        )
+
+    try:
+        finder = find_products(
+            api_key,
+            domain=sell_domain,
+            category_id=category_id,
+            sales_rank_min=sales_rank_min,
+            sales_rank_max=sales_rank_max,
+            review_count_max=review_count_max,
+            per_page=max_candidates,
+        )
+    except KeepaError as exc:
+        return {"candidates": [], "evaluated": 0, "error": f"Product Finder call failed: {exc}"}
+
     asins = finder["asins"][:max_candidates]
     if not asins:
         return {"candidates": [], "evaluated": 0, "note": "Product Finder returned no ASINs for these filters."}
 
-    sell_products = get_products(api_key, domain=sell_domain, asins=asins, stats_days=90)
+    try:
+        sell_products = get_products(api_key, domain=sell_domain, asins=asins, stats_days=90)
+    except KeepaError as exc:
+        return {
+            "candidates": [], "evaluated": 0,
+            "error": f"Product detail fetch failed (likely token budget ran out after the Finder call): {exc}",
+            "note": budget_note,
+        }
+
+    # Re-check the real balance (free call) before the per-candidate JP
+    # lookup loop, so early-stop decisions use actual data, not estimates.
+    budget = get_token_status(api_key)["tokens_left"] or 0
 
     results = []
     skipped = []
+    stopped_early = False
     for product in sell_products:
         sell_summary = _summarize_product(product, sell_domain)
         sell_summary["currency"] = _currency_for(sell_domain)
@@ -209,7 +287,19 @@ def find_arbitrage_candidates(
             skipped.append({"asin": sell_summary["asin"], "reason": "no UPC/EAN to cross-reference against Amazon Japan"})
             continue
 
-        jp_matches = lookup_by_code(api_key, code, domain="JP")
+        if budget < estimate_product_request_cost(1):
+            skipped.append({"asin": sell_summary["asin"], "reason": "stopped early: Keepa token budget ran out"})
+            stopped_early = True
+            continue
+
+        try:
+            jp_matches = lookup_by_code(api_key, code, domain="JP")
+        except KeepaError as exc:
+            skipped.append({"asin": sell_summary["asin"], "reason": f"JP lookup failed (token budget likely exhausted): {exc}"})
+            stopped_early = True
+            continue
+        budget -= estimate_product_request_cost(1)
+
         if not jp_matches:
             skipped.append({"asin": sell_summary["asin"], "reason": f"no Amazon Japan listing found for code {code}"})
             continue
@@ -244,6 +334,8 @@ def find_arbitrage_candidates(
         "evaluated": len(sell_products),
         "matched": len(results),
         "skipped": skipped,
+        "stopped_early_for_tokens": stopped_early,
+        "note": budget_note,
     }
 
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import math
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -110,6 +111,38 @@ def _request(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
         raise KeepaError(f"Keepa API error: {data['error']}")
 
     return data
+
+
+def get_token_status(api_key: str) -> Dict[str, Any]:
+    """Check the current token bucket balance. Costs 0 tokens (per Keepa docs).
+
+    Returns tokensLeft, refillIn (ms until the bucket is full again), and
+    refillRate (tokens generated per minute by the plan).
+    """
+    data = _request("/token", {"key": api_key})
+    return {
+        "tokens_left": data.get("tokensLeft"),
+        "refill_in_ms": data.get("refillIn"),
+        "refill_rate_per_minute": data.get("refillRate"),
+    }
+
+
+# --- Token cost estimators (see https://keepa.com/api-docs/), used for
+# preflight balance checks before running multi-call pipelines. These are
+# best-effort estimates based on Keepa's published cost formulas, not exact
+# guarantees - actual cost can differ slightly (e.g. rounding of "per 100
+# ASINs in the result set").
+
+def estimate_finder_cost(per_page: int) -> int:
+    """Product Finder (/query): 10 tokens base + 1 token per 100 ASINs
+    in the returned page (Keepa enforces a minimum page size of 50)."""
+    keepa_per_page = max(MIN_FINDER_PER_PAGE, min(per_page, 200))
+    return 10 + math.ceil(keepa_per_page / 100)
+
+
+def estimate_product_request_cost(count: int) -> int:
+    """Product Request (/product): 1 token per ASIN/code requested."""
+    return max(0, count)
 
 
 def search_categories(api_key: str, term: str, domain: str = "US") -> List[Dict[str, Any]]:
