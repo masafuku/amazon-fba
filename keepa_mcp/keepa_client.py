@@ -57,6 +57,10 @@ class CsvType:
 
 NO_DATA_SENTINELS = (-1, -2)
 
+# Keepa's Product Finder rejects perPage < 50 with a 400 "combination of
+# perPage and page exeeds limit or is too small" error (verified empirically).
+MIN_FINDER_PER_PAGE = 50
+
 
 class KeepaError(RuntimeError):
     """Raised when the Keepa API returns an error or an unexpected payload."""
@@ -81,8 +85,19 @@ def _request(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
             if "gzip" in response.headers.get("Content-Encoding", "").lower():
                 body = gzip.decompress(body)
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="ignore")
-        raise KeepaError(f"Keepa API HTTP {exc.code}: {detail[:500]}") from exc
+        raw = exc.read()
+        if "gzip" in exc.headers.get("Content-Encoding", "").lower():
+            try:
+                raw = gzip.decompress(raw)
+            except OSError:
+                pass  # not actually gzip-encoded; fall through and decode as-is
+        detail = raw.decode("utf-8", errors="ignore")
+        try:
+            parsed = json.loads(detail)
+            message = parsed.get("error", {}).get("message") or parsed.get("error") or detail
+        except json.JSONDecodeError:
+            message = detail
+        raise KeepaError(f"Keepa API HTTP {exc.code}: {message[:500]}") from exc
     except urllib.error.URLError as exc:
         raise KeepaError(f"Keepa API request failed: {exc.reason}") from exc
 
@@ -131,10 +146,16 @@ def find_products(
     per_page: int = 50,
 ) -> Dict[str, Any]:
     """Product Finder: cheap, coarse filtering by category / rank / review count.
-    Does not return price data - fetch full product details separately."""
+    Does not return price data - fetch full product details separately.
+
+    Keepa requires perPage >= 50 (a 400 error otherwise); the result is
+    trimmed back down to the caller's requested `per_page` before returning.
+    """
+    requested = max(1, per_page)
+    keepa_per_page = max(MIN_FINDER_PER_PAGE, min(requested, 200))
     selection: Dict[str, Any] = {
         "page": page,
-        "perPage": min(per_page, 200),
+        "perPage": keepa_per_page,
         "sort": [["current_SALES", "asc"]],
     }
     if category_id is not None:
@@ -154,7 +175,7 @@ def find_products(
         "selection": json.dumps(selection),
     })
     return {
-        "asins": data.get("asinList") or [],
+        "asins": (data.get("asinList") or [])[:requested],
         "total_results": data.get("totalResults"),
     }
 
@@ -167,7 +188,12 @@ def get_products(
     stats_days: int = 90,
     history: bool = False,
 ) -> List[Dict[str, Any]]:
-    """Fetch full product data (price stats, identifiers, rank, reviews)."""
+    """Fetch full product data (price stats, identifiers, rank, reviews).
+
+    Note: `offers` is intentionally omitted - Keepa rejects `offers=0` with a
+    400 invalidParameter error (verified empirically); leaving it out avoids
+    fetching/paying for live marketplace offers we don't use.
+    """
     if not asins and not codes:
         return []
     params = {
@@ -176,7 +202,6 @@ def get_products(
         "stats": stats_days,
         "history": 1 if history else 0,
         "buybox": 1,
-        "offers": 0,
         "rating": 1,
     }
     if asins:
