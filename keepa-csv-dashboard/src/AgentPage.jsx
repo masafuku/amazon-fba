@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Star } from 'lucide-react';
 import { loadAgentCandidates, saveFavorite } from './db';
+import { formatDateTime } from './formatters';
 
 export default function AgentPage() {
     const [candidates, setCandidates] = useState([]);
@@ -125,6 +126,7 @@ export default function AgentPage() {
                                     <th className="px-4 py-3 font-medium text-slate-400">1個あたり利益($)</th>
                                     <th className="px-4 py-3 font-medium text-slate-400">ランキング</th>
                                     <th className="px-4 py-3 font-medium text-slate-400">レビュー数</th>
+                                    <th className="px-4 py-3 font-medium text-slate-400">調査日時</th>
                                     <th className="px-4 py-3 font-medium text-slate-400">リンク</th>
                                     <th className="px-4 py-3 font-medium text-slate-400">操作</th>
                                 </tr>
@@ -171,6 +173,7 @@ export default function AgentPage() {
                                         </td>
                                         <td className="px-4 py-3 text-slate-200">{candidate.salesRank ?? '-'}</td>
                                         <td className="px-4 py-3 text-slate-200">{candidate.reviewCount ?? '-'}</td>
+                                        <td className="px-4 py-3 text-slate-400">{formatDateTime(candidate.createdAt)}</td>
                                         <td className="px-4 py-3">
                                             <div className="flex flex-wrap gap-2">
                                                 <a

@@ -245,6 +245,7 @@ def keepa_product_request(payload):
         'markets': fields_by_market,
         'products': products_by_market,
         'tokensConsumed': {market: responses[market].get('tokensConsumed') for market in responses},
+        'fetchedAt': fetched_at,
     }
 
 
@@ -363,6 +364,7 @@ def load_finder_run(run_id):
     markets_by_asin = {}
     debug_by_asin = {}
     errors_by_asin = {}
+    fetched_at_by_asin = {}
     for asin, product_json, product_fetched_at, product_error in item_rows:
         if product_json:
             try:
@@ -379,6 +381,8 @@ def load_finder_run(run_id):
                 }
             except Exception:
                 pass
+        if product_fetched_at:
+            fetched_at_by_asin[asin] = product_fetched_at
         if product_error:
             errors_by_asin[asin] = product_error
 
@@ -394,6 +398,7 @@ def load_finder_run(run_id):
         'marketsByAsin': markets_by_asin,
         'debugByAsin': debug_by_asin,
         'errorsByAsin': errors_by_asin,
+        'fetchedAtByAsin': fetched_at_by_asin,
     }
 
 
@@ -780,6 +785,7 @@ def load_latest_market_rows(market):
         try:
             parsed = json.loads(raw_json)
             if isinstance(parsed, dict):
+                parsed['importedAt'] = row_imported_at
                 rows.append(parsed)
                 seen_asins.add(asin_key)
                 batch_ids.add(row_batch_id)

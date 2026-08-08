@@ -14,6 +14,7 @@ import {
 import { Download, FileText, UploadCloud } from 'lucide-react';
 import { loadDbStatsFromDb, loadRowsFromDb, saveRowsToDb } from './db';
 import FavoriteButton from './FavoriteButton';
+import { formatDateTime } from './formatters';
 
 const SAMPLE_CSV = `ASIN,Title,Buy Box Price,Amazon Price,Merchant Price,Sales Rank,Condition,Buy Box Price (USD),List Price (USD),"Buy Box: Amazon (USD)","Buy Box: Merchant (USD)","Buy Box: Amazon (JPY)","Buy Box: Merchant (JPY)","Amazon Price (JPY)","Merchant Price (JPY)","Country"
 B08N5WRWNW,Sample Product A,29.99,34.99,28.99,12345,New,29.99,32.99,29.99,0.00,4498,0,4498,0,US
@@ -184,6 +185,12 @@ const pickLatestRowsByAsin = (rows) => {
     return Array.from(latestByAsin.values());
 };
 
+const getLatestTimestamp = (...values) => {
+    const valid = values.filter(Boolean).map((value) => new Date(value)).filter((date) => !Number.isNaN(date.getTime()));
+    if (!valid.length) return null;
+    return valid.reduce((latest, date) => (date > latest ? date : latest)).toISOString();
+};
+
 const mergeRowsByAsin = (usRows, jpRows) => {
     const latestUsRows = pickLatestRowsByAsin(usRows);
     const latestJpRows = pickLatestRowsByAsin(jpRows);
@@ -203,6 +210,7 @@ const mergeRowsByAsin = (usRows, jpRows) => {
                 asin,
                 title: getTitle(usRow) || getTitle(jpRow) || '',
                 productCategory: getProductCategory(usRow) || getProductCategory(jpRow) || '',
+                importedAt: getLatestTimestamp(usRow.importedAt, jpRow.importedAt),
                 usRow,
                 jpRow,
             };
@@ -874,6 +882,7 @@ export default function App() {
                                                 {renderSortHeader('Amazonセラー', 'amazonSeller')}
                                                 {renderSortHeader('純利益(円)', 'profit')}
                                                 {renderSortHeader('利益率(%)', 'profitRate')}
+                                                {renderSortHeader('更新日時', 'importedAt')}
                                                 <th className="px-4 py-3 font-medium text-slate-400">リンク</th>
                                                 <th className="px-4 py-3 font-medium text-slate-400">お気に入り</th>
                                             </tr>
@@ -917,6 +926,7 @@ export default function App() {
                                                     <td className="px-4 py-3 text-slate-100">{row.amazonSeller ? 'Yes' : 'No'}</td>
                                                     <td className={`px-4 py-3 font-semibold ${row.profit >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{row.profit !== null ? row.profit.toFixed(0) : '-'}</td>
                                                     <td className={`px-4 py-3 font-semibold ${row.profitRate >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{row.profitRate !== null ? row.profitRate.toFixed(1) : '-'}</td>
+                                                    <td className="px-4 py-3 text-slate-400">{formatDateTime(row.importedAt)}</td>
                                                     <td className="px-4 py-3">
                                                         <div className="flex flex-wrap gap-2">
                                                             <a
@@ -1001,6 +1011,7 @@ export default function App() {
                                                 <p className="text-sm text-slate-400">Amazonセラー: {row.amazonSeller ? 'Yes' : 'No'}</p>
                                                 <p className={`text-sm font-semibold ${row.profit >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>純利益: ¥{row.profit !== null ? row.profit.toFixed(0) : '-'}</p>
                                                 <p className="text-sm text-slate-400">利益率: {row.profitRate !== null ? `${row.profitRate.toFixed(1)}%` : '-'}</p>
+                                                <p className="text-sm text-slate-500">更新日時: {formatDateTime(row.importedAt)}</p>
                                             </div>
                                         </div>
                                     ))}

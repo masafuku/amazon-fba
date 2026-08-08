@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Search } from 'lucide-react';
 import { fetchKeepaProduct, loadKeepaFinderRun, searchKeepaProductFinder } from './db';
 import FavoriteButton from './FavoriteButton';
+import { formatDateTime } from './formatters';
 
 const formatNumber = (value) => {
     if (value === null || value === undefined) return '-';
@@ -43,6 +44,7 @@ export default function KeepaFinderPage() {
     const [result, setResult] = useState(null);
     const [showConfirm, setShowConfirm] = useState(false);
     const [productDetails, setProductDetails] = useState({});
+    const [productFetchedAt, setProductFetchedAt] = useState({});
     const [productLoading, setProductLoading] = useState({});
     const [productErrors, setProductErrors] = useState({});
     const [productDebug, setProductDebug] = useState({});
@@ -69,6 +71,7 @@ export default function KeepaFinderPage() {
                 setProductDetails(savedResult.marketsByAsin || {});
                 setProductDebug(savedResult.debugByAsin || {});
                 setProductErrors(savedResult.errorsByAsin || {});
+                setProductFetchedAt(savedResult.fetchedAtByAsin || {});
             })
             .catch((loadError) => {
                 if (!cancelled) {
@@ -99,6 +102,10 @@ export default function KeepaFinderPage() {
             if (sortKey === 'jpPrice') return jpPrice ?? -Infinity;
             if (sortKey === 'usProfitRate') return getProfitRate(details.US) ?? -Infinity;
             if (sortKey === 'jpProfitRate') return getProfitRate(details.JP) ?? -Infinity;
+            if (sortKey === 'fetchedAt') {
+                const raw = productFetchedAt[asin];
+                return raw ? new Date(raw).getTime() : -Infinity;
+            }
             if (sortKey === 'usFee') {
                 const referralFee = Number(details.US?.referralFeePercentage);
                 const pickAndPackFee = Number(details.US?.fbaPickAndPackFee);
@@ -132,7 +139,7 @@ export default function KeepaFinderPage() {
                 const difference = leftValue - rightValue;
                 return sortOrder === 'asc' ? difference : -difference;
             });
-    }, [asinList, filterText, onlyFetched, excludeMissingPrices, excludeZeroSales, productDetails, sortKey, sortOrder, exchangeRate]);
+    }, [asinList, filterText, onlyFetched, excludeMissingPrices, excludeZeroSales, productDetails, productFetchedAt, sortKey, sortOrder, exchangeRate]);
     const rawResponseText = useMemo(() => {
         if (!result) return '';
         try {
@@ -202,6 +209,7 @@ export default function KeepaFinderPage() {
             });
             setProductDetails((current) => ({ ...current, [asin]: response.markets || response.fields || {} }));
             setProductDebug((current) => ({ ...current, [asin]: response.debug }));
+            setProductFetchedAt((current) => ({ ...current, [asin]: response.fetchedAt || new Date().toISOString() }));
         } catch (productError) {
             setProductErrors((current) => ({
                 ...current,
@@ -476,6 +484,7 @@ export default function KeepaFinderPage() {
                                 {renderSortHeader('US利益率', 'usProfitRate')}
                                 {renderSortHeader('JP利益率', 'jpProfitRate')}
                                 {renderSortHeader('US手数料', 'usFee')}
+                                {renderSortHeader('取得日時', 'fetchedAt')}
                                 <th className="px-4 py-3 font-medium text-slate-400">Product API</th>
                                 <th className="px-4 py-3 font-medium text-slate-400">リンク</th>
                                 <th className="px-4 py-3 font-medium text-slate-400">お気に入り</th>
@@ -516,6 +525,7 @@ export default function KeepaFinderPage() {
                                             ? '-'
                                             : `${productDetails[asin]?.US?.referralFeePercentage ?? '-'}% + ${formatPrice(productDetails[asin]?.US?.fbaPickAndPackFee, '$')}`}
                                     </td>
+                                    <td className="px-4 py-3 text-slate-400">{formatDateTime(productFetchedAt[asin])}</td>
                                     <td className="px-4 py-3">
                                         <button
                                             type="button"
@@ -577,7 +587,7 @@ export default function KeepaFinderPage() {
                             ))}
                             {filteredAsins.length === 0 ? (
                                 <tr>
-                                    <td className="px-4 py-6 text-slate-500" colSpan={12}>検索結果はまだありません。</td>
+                                    <td className="px-4 py-6 text-slate-500" colSpan={13}>検索結果はまだありません。</td>
                                 </tr>
                             ) : null}
                         </tbody>

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Star, Trash2 } from 'lucide-react';
 import { deleteFavorite, fetchKeepaProduct, loadFavorites, saveFavorite } from './db';
 import { getShippingPerItem, loadShippingSettings, saveShippingSettings } from './calculationSettings';
+import { formatDateTime } from './formatters';
 
 const EXCHANGE_RATE = 150;
 
@@ -151,13 +152,49 @@ export default function FavoritesPage() {
         }
     };
 
+    const selectSortKey = (nextSortKey) => {
+        if (sortKey === nextSortKey) {
+            setSortOrder((current) => (current === 'desc' ? 'asc' : 'desc'));
+            return;
+        }
+        setSortKey(nextSortKey);
+        setSortOrder('desc');
+    };
+
+    const renderSortHeader = (label, key) => (
+        <th key={key} className="px-4 py-3 font-medium text-slate-400">
+            <button
+                type="button"
+                onClick={() => selectSortKey(key)}
+                className="inline-flex items-center gap-1 whitespace-nowrap text-left hover:text-cyan-300"
+            >
+                {label}
+                <span className="text-xs text-cyan-300" aria-hidden="true">
+                    {sortKey === key ? (sortOrder === 'desc' ? '▼' : '▲') : '↕'}
+                </span>
+            </button>
+        </th>
+    );
+
+    // 「登録元」「ASIN」のように favorite 自体に載っているフィールドと、
+    // getCalculatedRow() が計算した数値フィールドの両方をソート対象にする。
+    const getSortValue = (row, key) => {
+        if (key === 'asin') return row.favorite.asin;
+        if (key === 'source') return row.favorite.source;
+        if (key === 'updatedAt') {
+            const raw = row.favorite.updatedAt || row.favorite.createdAt;
+            return raw ? new Date(raw).getTime() : null;
+        }
+        return row.calculated[key];
+    };
+
     const rows = useMemo(() => {
         const calculatedRows = favorites.map((favorite) => ({ favorite, calculated: getCalculatedRow(favorite, shippingCost) }));
         return calculatedRows.sort((left, right) => {
-            const leftValue = left.calculated[sortKey];
-            const rightValue = right.calculated[sortKey];
-            const leftMissing = leftValue === null || leftValue === undefined || leftValue === '';
-            const rightMissing = rightValue === null || rightValue === undefined || rightValue === '';
+            const leftValue = getSortValue(left, sortKey);
+            const rightValue = getSortValue(right, sortKey);
+            const leftMissing = leftValue === null || leftValue === undefined || leftValue === '' || Number.isNaN(leftValue);
+            const rightMissing = rightValue === null || rightValue === undefined || rightValue === '' || Number.isNaN(rightValue);
             if (leftMissing || rightMissing) {
                 if (leftMissing && rightMissing) return 0;
                 return leftMissing ? 1 : -1;
@@ -244,19 +281,20 @@ export default function FavoritesPage() {
                             <thead className="bg-slate-950/90">
                                 <tr>
                                     <th className="px-4 py-3 font-medium text-slate-400">画像</th>
-                                    <th className="px-4 py-3 font-medium text-slate-400">ASIN</th>
-                                    <th className="px-4 py-3 font-medium text-slate-400">商品名</th>
-                                    <th className="px-4 py-3 font-medium text-slate-400">商品カテゴリ</th>
-                                    <th className="px-4 py-3 font-medium text-slate-400">US価格($)</th>
-                                    <th className="px-4 py-3 font-medium text-slate-400">US価格(円)</th>
-                                    <th className="px-4 py-3 font-medium text-slate-400">JP価格(円)</th>
-                                    <th className="px-4 py-3 font-medium text-slate-400">差額(円)</th>
-                                    <th className="px-4 py-3 font-medium text-slate-400">手数料合計(円)</th>
-                                    <th className="px-4 py-3 font-medium text-slate-400">先月売上</th>
-                                    <th className="px-4 py-3 font-medium text-slate-400">Amazonセラー</th>
-                                    <th className="px-4 py-3 font-medium text-slate-400">純利益(円)</th>
-                                    <th className="px-4 py-3 font-medium text-slate-400">利益率(%)</th>
-                                    <th className="px-4 py-3 font-medium text-slate-400">登録元</th>
+                                    {renderSortHeader('ASIN', 'asin')}
+                                    {renderSortHeader('商品名', 'title')}
+                                    {renderSortHeader('商品カテゴリ', 'category')}
+                                    {renderSortHeader('US価格($)', 'usPrice')}
+                                    {renderSortHeader('US価格(円)', 'usPriceJpy')}
+                                    {renderSortHeader('JP価格(円)', 'jpPrice')}
+                                    {renderSortHeader('差額(円)', 'priceDiffJpy')}
+                                    {renderSortHeader('手数料合計(円)', 'fee')}
+                                    {renderSortHeader('先月売上', 'sales')}
+                                    {renderSortHeader('Amazonセラー', 'amazonSeller')}
+                                    {renderSortHeader('純利益(円)', 'profit')}
+                                    {renderSortHeader('利益率(%)', 'profitRate')}
+                                    {renderSortHeader('登録元', 'source')}
+                                    {renderSortHeader('登録日時', 'updatedAt')}
                                     <th className="px-4 py-3 font-medium text-slate-400">リンク</th>
                                     <th className="px-4 py-3 font-medium text-slate-400">操作</th>
                                 </tr>
@@ -291,6 +329,7 @@ export default function FavoritesPage() {
                                         <td className="px-4 py-3 text-slate-400">
                                             {favorite.source === 'finder' ? 'Keepa Finder' : favorite.source === 'agent' ? '🤖 エージェント' : 'CSV分析'}
                                         </td>
+                                        <td className="px-4 py-3 text-slate-400">{formatDateTime(favorite.updatedAt || favorite.createdAt)}</td>
                                         <td className="px-4 py-3">
                                             <div className="flex flex-wrap gap-2">
                                                 <a href={`https://www.amazon.com/dp/${favorite.asin}`} target="_blank" rel="noreferrer" className="rounded-lg bg-slate-800 px-2 py-1 text-xs font-semibold text-slate-200 hover:bg-slate-700">US</a>
