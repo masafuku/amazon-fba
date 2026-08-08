@@ -19,9 +19,6 @@ const formatElapsedSince = (startedAt) => {
     return formatDuration((Date.now() - startedMs) / 1000);
 };
 
-// 実行中(status='running')の間だけ有効なポーリング間隔。
-const RUNNING_POLL_INTERVAL_MS = 10000;
-
 export default function AgentPage() {
     const [candidates, setCandidates] = useState([]);
     const [runs, setRuns] = useState([]);
@@ -66,19 +63,10 @@ export default function AgentPage() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [days]);
 
+    // 実行中の検索があれば状態表示に使う(バナー・実行履歴の「実行中」
+    // バッジ)。自動ポーリングはしない(CEOの希望) - 最新状況を見たい
+    // ときは「再読み込み」ボタンを押す。
     const runningRun = useMemo(() => runs.find((run) => run.status === 'running'), [runs]);
-
-    // 実行中の検索がある間は、状況が分かるように自動でポーリングする
-    // (完了したら自然にポーリングが止まる)。
-    useEffect(() => {
-        if (!runningRun) return undefined;
-        const timer = setInterval(() => {
-            refresh(days);
-            refreshTokenStatus();
-        }, RUNNING_POLL_INTERVAL_MS);
-        return () => clearInterval(timer);
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [runningRun?.runId, days]);
 
     const selectSortKey = (nextSortKey) => {
         if (sortKey === nextSortKey) {
@@ -193,7 +181,7 @@ export default function AgentPage() {
                             <span className="ml-2 text-cyan-300">経過 {formatElapsedSince(runningRun.startedAt)}</span>
                         </p>
                     </div>
-                    <p className="text-xs text-cyan-400">{RUNNING_POLL_INTERVAL_MS / 1000}秒ごとに自動更新中</p>
+                    <p className="text-xs text-cyan-400">最新状況は「再読み込み」で更新してください</p>
                 </div>
             ) : null}
 
