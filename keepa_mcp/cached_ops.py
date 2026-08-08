@@ -53,6 +53,7 @@ def cached_search_categories(
 def cached_find_products(
     api_key: str,
     domain: str,
+    keyword: Optional[str],
     category_id: Optional[int],
     sales_rank_min: Optional[int],
     sales_rank_max: Optional[int],
@@ -62,7 +63,7 @@ def cached_find_products(
     force_refresh: bool = False,
 ) -> Tuple[Dict[str, Any], CacheInfo]:
     key = json.dumps({
-        "domain": domain.upper(), "category_id": category_id,
+        "domain": domain.upper(), "keyword": keyword, "category_id": category_id,
         "sales_rank_min": sales_rank_min, "sales_rank_max": sales_rank_max,
         "review_count_max": review_count_max, "review_count_min": review_count_min,
         "per_page": per_page,
@@ -75,7 +76,7 @@ def cached_find_products(
             return value, _hit_info(age)
 
     result = find_products(
-        api_key, domain=domain, category_id=category_id,
+        api_key, domain=domain, keyword=keyword, category_id=category_id,
         sales_rank_min=sales_rank_min, sales_rank_max=sales_rank_max,
         review_count_max=review_count_max, review_count_min=review_count_min,
         per_page=per_page,

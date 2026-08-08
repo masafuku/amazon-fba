@@ -16,6 +16,7 @@ what was cached earlier.
 from __future__ import annotations
 
 import math
+import time
 from typing import Any, Dict, List, Optional
 
 from mcp.server.fastmcp import FastMCP
@@ -53,6 +54,33 @@ def _wait_estimate(shortfall: float, refill_rate_per_minute: Optional[int]) -> s
         return "unknown (check your plan's refill rate on the Keepa dashboard)"
     minutes = max(1, math.ceil(shortfall / refill_rate_per_minute))
     return f"~{minutes} min at {refill_rate_per_minute} token/min"
+
+
+# Keep any single wait-mode batch small enough to fit comfortably under a
+# low-refill-rate plan's bucket cap (capacity = refill_rate_per_minute x 60,
+# e.g. 60 tokens on a 1 token/min plan) - see cached_get_products calls in
+# find_arbitrage_candidates(wait_for_tokens=True).
+_WAIT_MODE_BATCH_SIZE = 20
+
+
+def _wait_for_budget(api_key: str, needed: int, current_budget: int) -> int:
+    """Block until at least `needed` live-call tokens are available, polling
+    the real balance (check_token_balance costs nothing) and sleeping
+    between checks. Returns the fresh real balance once satisfied. Only
+    call this when the caller has opted into wait_for_tokens=True - it can
+    block for a long time on a slow-refill plan."""
+    budget = current_budget
+    if budget >= needed:
+        return budget
+    while True:
+        status = get_token_status(api_key)
+        budget = status["tokens_left"] or 0
+        if budget >= needed:
+            return budget
+        refill_rate = status["refill_rate_per_minute"] or 1
+        shortfall = needed - budget
+        wait_seconds = min(60, max(5, math.ceil(shortfall * 60 / refill_rate)))
+        time.sleep(wait_seconds)
 
 
 @mcp.tool()
@@ -124,7 +152,8 @@ def search_category(term: str, domain: str = "US", force_refresh: bool = False) 
 
 @mcp.tool()
 def find_candidates(
-    category_id: int,
+    keyword: str,
+    category_id: Optional[int] = None,
     sales_rank_min: int = 1000,
     sales_rank_max: int = 20000,
     review_count_max: int = 200,
@@ -134,14 +163,19 @@ def find_candidates(
 ) -> Dict[str, Any]:
     """Coarse, cheap product search via Keepa's Product Finder.
 
-    Filters only by category / sales rank range / max review count - no price
+    Filters by keyword (matched against the product title, same as the
+    dashboard's manual Finder search) plus sales rank range / max review
+    count, with an optional category as additional narrowing - no price
     data yet (call get_product_detail or find_arbitrage_candidates for that).
     Results are cached (default 6h; see KEEPA_CACHE_TTL_FINDER_HOURS) since
     rankings/review counts do not change minute to minute; pass
     force_refresh=True to force a live re-query.
 
     Args:
-        category_id: Keepa category id (from search_category).
+        keyword: Search term(s) matched against the product title (space-separated,
+            all terms required - e.g. "kitchen gadget").
+        category_id: Optional Keepa category id (from search_category) to further
+            narrow the keyword search.
         sales_rank_min: Minimum current sales rank (lower rank = better seller).
         sales_rank_max: Maximum current sales rank.
         review_count_max: Maximum current review count.
@@ -152,7 +186,7 @@ def find_candidates(
     api_key = _require_api_key()
     try:
         result, cache_info = cached_find_products(
-            api_key, domain=domain, category_id=category_id,
+            api_key, domain=domain, keyword=keyword, category_id=category_id,
             sales_rank_min=sales_rank_min, sales_rank_max=sales_rank_max,
             review_count_max=review_count_max, review_count_min=None,
             per_page=max_results, force_refresh=force_refresh,
@@ -212,7 +246,8 @@ def find_jp_price(code: str, force_refresh: bool = False) -> Dict[str, Any]:
 
 @mcp.tool()
 def find_arbitrage_candidates(
-    category_id: int,
+    keyword: str,
+    category_id: Optional[int] = None,
     sales_rank_min: int = 1000,
     sales_rank_max: int = 20000,
     review_count_max: int = 200,
@@ -222,13 +257,14 @@ def find_arbitrage_candidates(
     sell_domain: str = "US",
     usd_to_jpy: Optional[float] = None,
     force_refresh: bool = False,
+    wait_for_tokens: bool = False,
 ) -> Dict[str, Any]:
-    """End-to-end search: find products in a category/rank/review-count band
-    on the sell-side marketplace (default US), cross-reference their JPY cost
-    on Amazon Japan by ASIN (assumes the same ASIN is listed on both
-    marketplaces - not always true, see the per-candidate skip reasons),
-    and return only those clearing the requested price-gap and
-    price-stability thresholds.
+    """End-to-end search: find products by keyword (plus rank/review-count
+    band, and an optional category) on the sell-side marketplace (default
+    US), cross-reference their JPY cost on Amazon Japan by ASIN (assumes
+    the same ASIN is listed on both marketplaces - not always true, see the
+    per-candidate skip reasons), and return only those clearing the
+    requested price-gap and price-stability thresholds.
 
     Pipeline: Product Finder (cheap) -> per-ASIN detail fetch (price/rank/
     reviews/volatility) -> JP cross-domain lookup by the same ASIN -> filter.
@@ -239,7 +275,10 @@ def find_arbitrage_candidates(
     rankings do genuinely move over time).
 
     Args:
-        category_id: Keepa category id on the sell-side marketplace (from search_category).
+        keyword: Search term(s) matched against the product title (space-separated,
+            all terms required - e.g. "kitchen gadget").
+        category_id: Optional Keepa category id (from search_category) to further
+            narrow the keyword search.
         sales_rank_min: Minimum current sales rank on the sell side.
         sales_rank_max: Maximum current sales rank on the sell side.
         review_count_max: Maximum current review count on the sell side.
@@ -251,6 +290,14 @@ def find_arbitrage_candidates(
             (defaults to USD_TO_JPY from .env, currently used only when
             sell_domain="US"; the cost side is assumed to be Amazon Japan).
         force_refresh: Bypass the cache everywhere in this pipeline.
+        wait_for_tokens: On a low-refill-rate plan, instead of stopping early
+            when the live-call budget runs out, sleep and poll the real
+            balance (see check_token_balance) until enough tokens have
+            regenerated, then keep going until every candidate is evaluated.
+            This can block the call for a long time (minutes, possibly tens
+            of minutes on a 1 token/min plan) - fine for an unattended script
+            like daily_scan.py, but usually leave this False in an
+            interactive chat session.
     """
     api_key = _require_api_key()
     rate = usd_to_jpy if usd_to_jpy is not None else settings.usd_to_jpy
@@ -263,16 +310,33 @@ def find_arbitrage_candidates(
     worst_case_cost = estimate_finder_cost(max_candidates) + 2 * estimate_product_request_cost(max_candidates)
     budget_note = None
     if tokens_left < worst_case_cost:
-        budget_note = (
-            f"Only {tokens_left} tokens available (worst case needs ~{worst_case_cost} if nothing is "
-            "cached); will use cached data where possible and stop early if live calls run out. "
-            f"Estimated wait for full budget: {_wait_estimate(worst_case_cost - tokens_left, status['refill_rate_per_minute'])}."
-        )
+        if wait_for_tokens:
+            budget_note = (
+                f"Only {tokens_left} tokens available (worst case needs ~{worst_case_cost} if nothing is "
+                "cached); wait_for_tokens=True, so this run will pause and wait for the token bucket to "
+                "refill as needed rather than stopping early."
+            )
+        else:
+            budget_note = (
+                f"Only {tokens_left} tokens available (worst case needs ~{worst_case_cost} if nothing is "
+                "cached); will use cached data where possible and stop early if live calls run out. "
+                f"Estimated wait for full budget: {_wait_estimate(worst_case_cost - tokens_left, status['refill_rate_per_minute'])}. "
+                "Pass wait_for_tokens=True to wait it out instead of stopping early."
+            )
     budget = tokens_left  # tracks *live-call* budget only; cache hits are free and don't touch this
+
+    if wait_for_tokens:
+        # Pass current_budget=0 (not the locally tracked `budget`) to force a
+        # fresh real-balance check every time - the local estimate can drift
+        # from the real Keepa balance (actual token costs aren't always
+        # exactly what estimate_finder_cost/estimate_product_request_cost
+        # predict), and in wait mode correctness matters more than avoiding
+        # one extra free check_token_balance call.
+        budget = _wait_for_budget(api_key, estimate_finder_cost(max_candidates), 0)
 
     try:
         finder, finder_cache_info = cached_find_products(
-            api_key, domain=sell_domain, category_id=category_id,
+            api_key, domain=sell_domain, keyword=keyword, category_id=category_id,
             sales_rank_min=sales_rank_min, sales_rank_max=sales_rank_max,
             review_count_max=review_count_max, review_count_min=None,
             per_page=max_candidates, force_refresh=force_refresh,
@@ -286,17 +350,44 @@ def find_arbitrage_candidates(
     if not asins:
         return {"candidates": [], "evaluated": 0, "note": "Product Finder returned no ASINs for these filters."}
 
-    try:
-        sell_products, sell_cache_meta = cached_get_products(
-            api_key, domain=sell_domain, asins=asins, stats_days=90, force_refresh=force_refresh
-        )
-    except KeepaError as exc:
-        return {
-            "candidates": [], "evaluated": 0,
-            "error": f"Product detail fetch failed (likely token budget ran out after the Finder call): {exc}",
-            "note": budget_note,
-        }
-    budget -= sum(1 for info in sell_cache_meta.values() if not info["hit"])
+    sell_products: List[Dict[str, Any]] = []
+    sell_cache_meta: Dict[str, Dict[str, Any]] = {}
+    if wait_for_tokens:
+        # The token bucket has a hard cap (plan refill-rate x 60 minutes), so
+        # a single huge batched request can need more tokens than the bucket
+        # can ever hold. Fetch in small chunks instead, waiting for budget
+        # before each one - this also means work starts on whatever's
+        # already cached/affordable rather than blocking on the whole batch.
+        for i in range(0, len(asins), _WAIT_MODE_BATCH_SIZE):
+            chunk = asins[i:i + _WAIT_MODE_BATCH_SIZE]
+            to_fetch_estimate = sum(1 for a in chunk if force_refresh or not is_product_cached(a, sell_domain))
+            if to_fetch_estimate:
+                budget = _wait_for_budget(api_key, to_fetch_estimate, 0)  # force real check, see note above
+            try:
+                chunk_products, chunk_meta = cached_get_products(
+                    api_key, domain=sell_domain, asins=chunk, stats_days=90, force_refresh=force_refresh
+                )
+            except KeepaError as exc:
+                return {
+                    "candidates": [], "evaluated": 0,
+                    "error": f"Product detail fetch failed: {exc}",
+                    "note": budget_note,
+                }
+            budget -= sum(1 for info in chunk_meta.values() if not info["hit"])
+            sell_products.extend(chunk_products)
+            sell_cache_meta.update(chunk_meta)
+    else:
+        try:
+            sell_products, sell_cache_meta = cached_get_products(
+                api_key, domain=sell_domain, asins=asins, stats_days=90, force_refresh=force_refresh
+            )
+        except KeepaError as exc:
+            return {
+                "candidates": [], "evaluated": 0,
+                "error": f"Product detail fetch failed (likely token budget ran out after the Finder call): {exc}",
+                "note": budget_note,
+            }
+        budget -= sum(1 for info in sell_cache_meta.values() if not info["hit"])
 
     results = []
     skipped = []
@@ -321,7 +412,11 @@ def find_arbitrage_candidates(
         # such ASIN in the JP catalog it still returns a near-empty stub
         # (no price/stats), which the price check below skips.
         needs_live_call = force_refresh or not is_product_cached(asin, "JP")
-        if needs_live_call and budget < estimate_product_request_cost(1):
+        if needs_live_call and wait_for_tokens:
+            # Force a real-balance check every time (current_budget=0) rather
+            # than trusting the locally tracked estimate - see note above.
+            budget = _wait_for_budget(api_key, estimate_product_request_cost(1), 0)
+        elif needs_live_call and budget < estimate_product_request_cost(1):
             skipped.append({"asin": sell_summary["asin"], "reason": "stopped early: Keepa token budget ran out"})
             stopped_early = True
             continue

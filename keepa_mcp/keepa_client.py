@@ -170,6 +170,7 @@ def search_categories(api_key: str, term: str, domain: str = "US") -> List[Dict[
 def find_products(
     api_key: str,
     domain: str = "US",
+    keyword: Optional[str] = None,
     category_id: Optional[int] = None,
     sales_rank_min: Optional[int] = None,
     sales_rank_max: Optional[int] = None,
@@ -178,8 +179,14 @@ def find_products(
     page: int = 0,
     per_page: int = 50,
 ) -> Dict[str, Any]:
-    """Product Finder: cheap, coarse filtering by category / rank / review count.
-    Does not return price data - fetch full product details separately.
+    """Product Finder: cheap, coarse filtering by keyword / category / rank /
+    review count. Does not return price data - fetch full product details
+    separately.
+
+    `keyword` is the primary filter (matched against the product title,
+    space-separated terms all required, Keepa keyword search - same as the
+    dashboard's manual Finder search); `category_id` is an optional
+    additional narrowing filter, combined with AND when both are given.
 
     Keepa requires perPage >= 50 (a 400 error otherwise); the result is
     trimmed back down to the caller's requested `per_page` before returning.
@@ -191,6 +198,8 @@ def find_products(
         "perPage": keepa_per_page,
         "sort": [["current_SALES", "asc"]],
     }
+    if keyword:
+        selection["title"] = keyword
     if category_id is not None:
         selection["categories_include"] = [category_id]
     if sales_rank_min is not None:
