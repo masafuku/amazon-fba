@@ -10,13 +10,15 @@ daily_scan.py — 毎朝1回実行するだけで完結するスクリプト。
      (キーワード検索 + 価格差率・ランキング・レビュー数・価格変動で絞り込み)
   3. ops_finance.evaluate_mcp_candidates() でFBA手数料・国際送料込みの
      実質利益率を計算し、閾値未満を除外
-  4. 合格した候補をメールに通知(notify_email.py を再利用)
+  4. 合格した候補をLINEに通知(notify_line.py、LINE Messaging API経由)
   5. 予算アラート(check_budget_alert)もあわせて通知
   6. プールから選んだキーワードだった場合、使用実績(times_used等)を記録
 
-  注: 当初は notify_line.py (LINE Notify) を使う想定だったが、LINE Notify は
-  2025年3月末でサービス終了済み(notify-api.line.me は名前解決すら不可)の
-  ため、既存の notify_email.py に切り替えている。
+  注: 旧LINE Notifyは2025年3月末でサービス終了済み(notify-api.line.me は
+  名前解決すら不可)。後継のLINE Messaging APIを使用しており、
+  LINE公式アカウントの「チャネルアクセストークン(長期)」が必要
+  (詳細はnotify_line.pyのモジュールdocstring参照)。一時的にメール通知
+  (notify_email.py)を使っていたが、LINEに切り替えた。
 
   Keepaのトークンは低レート帯のプランだと1分に1トークン程度しか回復しない。
   デフォルトでは wait_for_tokens=True で実行するため、予算が足りない場面では
@@ -63,7 +65,7 @@ from datetime import datetime, timezone
 from config import Settings
 from keepa_mcp.keepa_client import KeepaError
 from keepa_mcp.server import expand_keyword, find_arbitrage_candidates, search_category
-from notify_email import send_email
+from notify_line import send_line_message
 from ops_finance import (
     add_keywords,
     build_qualified_line_message,
@@ -205,26 +207,22 @@ def run_daily_scan(
     notify_status = "skipped"
     notify_error = None
     settings = Settings.load()
-    if settings.email_smtp_host and settings.email_username and settings.email_to:
+    if settings.line_channel_access_token:
         try:
-            send_email(
-                smtp_host=settings.email_smtp_host,
-                smtp_port=settings.email_smtp_port,
-                username=settings.email_username,
-                password=settings.email_password,
-                from_addr=settings.email_from,
-                to_addr=settings.email_to,
-                subject=f"【本日の候補】{label}",
-                body=full_message,
+            send_line_message(
+                channel_access_token=settings.line_channel_access_token,
+                message=f"【本日の候補】{label}\n\n{full_message}",
+                user_id=settings.line_user_id or None,
             )
-            print(f"[INFO] メール通知を送信しました ({settings.email_to})。")
+            target = settings.line_user_id or "友だち全員へbroadcast"
+            print(f"[INFO] LINE通知を送信しました ({target})。")
             notify_status = "sent"
         except Exception as exc:
-            print(f"[ERROR] メール通知送信失敗: {exc}")
+            print(f"[ERROR] LINE通知送信失敗: {exc}")
             notify_status = "failed"
             notify_error = str(exc)
     else:
-        print("[WARN] EMAIL_* が未設定のため、通知はスキップしました。")
+        print("[WARN] LINE_CHANNEL_ACCESS_TOKEN が未設定のため、通知はスキップしました。")
         print("--- 通知予定だった内容 ---")
         print(full_message)
 

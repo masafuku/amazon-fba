@@ -35,6 +35,8 @@ class Settings:
     email_from: str
     email_to: str
     line_notify_token: str
+    line_channel_access_token: str
+    line_user_id: str
     search_keyword: str
     search_category: str
     us_max_results: int
@@ -53,6 +55,8 @@ class Settings:
             email_from=os.getenv("EMAIL_FROM", ""),
             email_to=os.getenv("EMAIL_TO", ""),
             line_notify_token=os.getenv("LINE_NOTIFY_TOKEN", ""),
+            line_channel_access_token=os.getenv("LINE_CHANNEL_ACCESS_TOKEN", ""),
+            line_user_id=os.getenv("LINE_USER_ID", ""),
             search_keyword=os.getenv("SEARCH_KEYWORD", "import japan"),
             search_category=os.getenv("SEARCH_CATEGORY", "All"),
             us_max_results=int(os.getenv("US_MAX_RESULTS", "20")),
