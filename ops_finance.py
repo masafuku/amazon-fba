@@ -446,13 +446,64 @@ def evaluate_mcp_candidates(
 
     qualified.sort(key=lambda e: e['margin_pct'], reverse=True)
 
+    # keepa_mcp.find_arbitrage_candidates() の粗選別(価格変動・JP一致・
+    # 価格差率など)で落ちた候補も「不合格」として表示する。ここまでは
+    # 実利益計算(calc_unit_profit)にすら到達していないので、
+    # unit_profit_usd/margin_pct はNoneのまま、reasonだけ日本語化して残す。
+    for skip in mcp_result.get('skipped', []):
+        asin = skip.get('asin')
+        if not asin:
+            continue
+        rejected.append({
+            'asin': asin,
+            'title': skip.get('title'),
+            'url': skip.get('url'),
+            'image_url': skip.get('image_url'),
+            'jp_asin': skip.get('jp_asin'),
+            'jp_url': skip.get('jp_url'),
+            'sales_rank': skip.get('sales_rank'),
+            'review_count': skip.get('review_count'),
+            'price_diff_rate_gross': None,
+            'price_volatility_90d': skip.get('price_volatility_90d'),
+            'weight_kg': skip.get('weight_kg'),
+            'weight_estimated': False,
+            'fee_estimated': False,
+            'us_price_usd': skip.get('price'),
+            'jp_cost_jpy': skip.get('jp_price'),
+            'unit_profit_usd': None,
+            'margin_pct': None,
+            'reason': f"粗選別で除外: {_translate_skip_reason(skip.get('reason', ''))}",
+        })
+
     return {
         'qualified': qualified,
         'rejected': rejected,
         'weight_missing': weight_missing,
         'fee_missing': fee_missing,
-        'evaluated': len(mcp_result.get('candidates', [])),
+        'evaluated': len(mcp_result.get('candidates', [])) + len(mcp_result.get('skipped', [])),
     }
+
+
+_SKIP_REASON_TRANSLATIONS = (
+    ('no current price for this ASIN on Amazon Japan', '日本のAmazonに価格データなし(未取扱の可能性)'),
+    ('no current price', '価格データなし'),
+    ('price volatility', '価格変動が大きすぎる'),
+    ('stopped early: Keepa token budget ran out', 'Keepaトークン予算切れで打ち切り'),
+    ('JP lookup failed', '日本側の商品取得に失敗(トークン切れの可能性)'),
+    ('ASIN not found in Amazon Japan catalog', '日本のAmazonにこのASINが見つからない(別ASINの可能性)'),
+    ('price diff rate', '価格差率が閾値未満'),
+    ('could not compute price diff rate', '価格差率を計算できなかった'),
+)
+
+
+def _translate_skip_reason(reason: str) -> str:
+    """keepa_mcp.find_arbitrage_candidates()のskip理由(英語)を、元の数値
+    情報を保ったまま日本語ラベルに置き換える(完全一致ではなく前方一致的な
+    キーワードマッチなので、新しいreason文言が増えても壊れにくい)。"""
+    for needle, label in _SKIP_REASON_TRANSLATIONS:
+        if needle in reason:
+            return f"{label} ({reason})" if reason else label
+    return reason or '理由不明'
 
 
 def build_qualified_line_message(evaluation: dict, max_items: int = 5) -> str:

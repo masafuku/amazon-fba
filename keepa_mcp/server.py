@@ -512,11 +512,11 @@ def find_arbitrage_candidates(
         sell_summary = _summarize_product(product, sell_domain, sell_cache_meta.get(asin))
 
         if sell_summary["price"] is None:
-            skipped.append({"asin": sell_summary["asin"], "reason": "no current price"})
+            skipped.append({**sell_summary, "reason": "no current price"})
             continue
         volatility = sell_summary["price_volatility_90d"]
         if volatility is not None and volatility > price_volatility_max:
-            skipped.append({"asin": sell_summary["asin"], "reason": f"price volatility {volatility:.2%} exceeds limit"})
+            skipped.append({**sell_summary, "reason": f"price volatility {volatility:.2%} exceeds limit"})
             continue
 
         # ASIN-based cross-domain match: assumes the same ASIN is used on
@@ -532,14 +532,14 @@ def find_arbitrage_candidates(
             # than trusting the locally tracked estimate - see note above.
             budget = _wait_for_budget(api_key, estimate_product_request_cost(1), 0)
         elif needs_live_call and budget < estimate_product_request_cost(1):
-            skipped.append({"asin": sell_summary["asin"], "reason": "stopped early: Keepa token budget ran out"})
+            skipped.append({**sell_summary, "reason": "stopped early: Keepa token budget ran out"})
             stopped_early = True
             continue
 
         try:
             jp_matches, jp_cache_meta = cached_get_products(api_key, domain="JP", asins=[asin], stats_days=90, force_refresh=force_refresh)
         except KeepaError as exc:
-            skipped.append({"asin": sell_summary["asin"], "reason": f"JP lookup failed (token budget likely exhausted): {exc}"})
+            skipped.append({**sell_summary, "reason": f"JP lookup failed (token budget likely exhausted): {exc}"})
             stopped_early = True
             continue
         jp_cache_info = jp_cache_meta.get(asin, {"hit": False})
@@ -547,12 +547,12 @@ def find_arbitrage_candidates(
             budget -= estimate_product_request_cost(1)
 
         if not jp_matches:
-            skipped.append({"asin": sell_summary["asin"], "reason": "ASIN not found in Amazon Japan catalog"})
+            skipped.append({**sell_summary, "reason": "ASIN not found in Amazon Japan catalog"})
             continue
 
         jp_summary = _summarize_product(jp_matches[0], "JP", jp_cache_info)
         if jp_summary["price"] is None:
-            skipped.append({"asin": sell_summary["asin"], "reason": "no current price for this ASIN on Amazon Japan (may not exist in the JP catalog)"})
+            skipped.append({**sell_summary, "reason": "no current price for this ASIN on Amazon Japan (may not exist in the JP catalog)"})
             continue
 
         diff_rate = analysis.price_diff_rate(
@@ -560,7 +560,10 @@ def find_arbitrage_candidates(
         )
         if diff_rate is None or diff_rate < price_diff_min:
             skipped.append({
-                "asin": sell_summary["asin"],
+                **sell_summary,
+                "jp_price": jp_summary["price"],
+                "jp_asin": jp_summary.get("asin"),
+                "jp_url": jp_summary.get("url"),
                 "reason": f"price diff rate {diff_rate:.2%} below {price_diff_min:.0%}" if diff_rate is not None else "could not compute price diff rate",
             })
             continue
