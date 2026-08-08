@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Search } from 'lucide-react';
 import { fetchKeepaProduct, loadKeepaFinderRun, searchKeepaProductFinder } from './db';
+import FavoriteButton from './FavoriteButton';
 
 const formatNumber = (value) => {
     if (value === null || value === undefined) return '-';
@@ -477,6 +478,7 @@ export default function KeepaFinderPage() {
                                 {renderSortHeader('US手数料', 'usFee')}
                                 <th className="px-4 py-3 font-medium text-slate-400">Product API</th>
                                 <th className="px-4 py-3 font-medium text-slate-400">リンク</th>
+                                <th className="px-4 py-3 font-medium text-slate-400">お気に入り</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -562,6 +564,14 @@ export default function KeepaFinderPage() {
                                                 Keepa
                                             </a>
                                         </div>
+                                    </td>
+                                    <td className="px-4 py-3">
+                                        <FavoriteButton
+                                            asin={asin}
+                                            title={productDetails[asin]?.US?.title || productDetails[asin]?.JP?.title || ''}
+                                            source="finder"
+                                            data={productDetails[asin] || {}}
+                                        />
                                     </td>
                                 </tr>
                             ))}

@@ -9,3 +9,31 @@ html {
 body {
     @apply bg-slate-950 text-slate-100;
 }
+
+button,
+a,
+input,
+select {
+    -webkit-tap-highlight-color: transparent;
+}
+
+button,
+a {
+    touch-action: manipulation;
+}
+
+.overflow-x-auto {
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+}
+
+@media (max-width: 640px) {
+    table {
+        font-size: 0.75rem;
+    }
+
+    th,
+    td {
+        white-space: nowrap;
+    }
+}

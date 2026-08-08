@@ -2,6 +2,7 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App.jsx';
 import KeepaFinderPage from './KeepaFinderPage.jsx';
+import FavoritesPage from './FavoritesPage.jsx';
 import './index.css';
 
 function Root() {
@@ -14,25 +15,32 @@ function Root() {
     }, []);
 
     const isFinder = hash === '#finder';
+    const isFavorites = hash === '#favorites';
 
     return (
         <div className="min-h-screen bg-slate-950 text-slate-100">
-            <div className="mx-auto max-w-7xl px-4 py-4 sm:px-6 lg:px-8">
-                <div className="mb-4 flex flex-wrap items-center gap-2">
+            <div className="mx-auto max-w-7xl px-3 py-3 sm:px-6 sm:py-4 lg:px-8">
+                <nav className="mb-4 grid grid-cols-3 gap-2" aria-label="メインメニュー">
                     <a
                         href="#dashboard"
-                        className={`rounded-xl px-4 py-2 text-sm font-semibold ${!isFinder ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-100'}`}
+                        className={`min-h-11 rounded-xl px-2 py-2 text-center text-xs font-semibold sm:px-4 sm:text-sm ${!isFinder ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-100'}`}
                     >
                         CSV分析
                     </a>
                     <a
                         href="#finder"
-                        className={`rounded-xl px-4 py-2 text-sm font-semibold ${isFinder ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-100'}`}
+                        className={`min-h-11 rounded-xl px-2 py-2 text-center text-xs font-semibold sm:px-4 sm:text-sm ${isFinder ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-100'}`}
                     >
                         Keepa Finder
                     </a>
-                </div>
-                {isFinder ? <KeepaFinderPage /> : <App />}
+                    <a
+                        href="#favorites"
+                        className={`min-h-11 rounded-xl px-2 py-2 text-center text-xs font-semibold sm:px-4 sm:text-sm ${isFavorites ? 'bg-amber-400 text-slate-950' : 'bg-slate-800 text-slate-100'}`}
+                    >
+                        お気に入り
+                    </a>
+                </nav>
+                {isFinder ? <KeepaFinderPage /> : isFavorites ? <FavoritesPage /> : <App />}
             </div>
         </div>
     );

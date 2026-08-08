@@ -141,8 +141,16 @@ def extract_product_fields(product, domain):
         sales_rank = decode_keepa_history(rank_history)
 
     category_tree = product.get('categoryTree') or []
+    images = product.get('imagesCSV') or product.get('images') or ''
+    if isinstance(images, list):
+        images = ';'.join(str(image) for image in images)
+    image_value = str(images).split(';')[0].strip()
+    image_url = image_value if image_value.startswith(('http://', 'https://')) else (
+        f'https://images-na.ssl-images-amazon.com/images/I/{image_value}.jpg' if image_value else ''
+    )
     return {
         'title': product.get('title') or '',
+        'imageUrl': image_url,
         'productType': product.get('productType'),
         'brand': product.get('brand'),
         'manufacturer': product.get('manufacturer'),
@@ -462,6 +470,18 @@ def init_db() -> None:
         )
         conn.execute(
             '''
+            CREATE TABLE IF NOT EXISTS favorites (
+                asin TEXT PRIMARY KEY,
+                title TEXT,
+                source TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            '''
+        )
+        conn.execute(
+            '''
             CREATE TABLE IF NOT EXISTS keepa_finder_items (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 run_id TEXT NOT NULL,
@@ -567,6 +587,62 @@ def insert_rows(rows, metadata):
         )
 
     return {'insertedCount': len(records), 'batchId': batch_id}
+
+
+def save_favorite(payload):
+    asin = str(payload.get('asin') or '').strip().upper()
+    if not asin:
+        raise ValueError('asin is required')
+
+    title = str(payload.get('title') or '').strip()
+    source = str(payload.get('source') or 'unknown').strip()
+    data = payload.get('data') if isinstance(payload.get('data'), dict) else {}
+    now = datetime.now(timezone.utc).isoformat()
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            '''
+            INSERT INTO favorites (asin, title, source, data_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(asin) DO UPDATE SET
+                title = excluded.title,
+                source = excluded.source,
+                data_json = excluded.data_json,
+                updated_at = excluded.updated_at
+            ''',
+            (asin, title, source, json.dumps(data, ensure_ascii=False), now, now),
+        )
+    return {'ok': True, 'asin': asin}
+
+
+def load_favorites():
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            'SELECT asin, title, source, data_json, created_at, updated_at FROM favorites ORDER BY updated_at DESC'
+        ).fetchall()
+
+    favorites = []
+    for asin, title, source, data_json, created_at, updated_at in rows:
+        try:
+            data = json.loads(data_json)
+        except Exception:
+            data = {}
+        favorites.append({
+            'asin': asin,
+            'title': title,
+            'source': source,
+            'data': data,
+            'createdAt': created_at,
+            'updatedAt': updated_at,
+        })
+    return favorites
+
+
+def delete_favorite(asin):
+    asin = str(asin or '').strip().upper()
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute('DELETE FROM favorites WHERE asin = ?', (asin,))
+    return {'ok': True, 'deleted': cursor.rowcount > 0, 'asin': asin}
 
 
 def load_latest_market_rows(market):
@@ -702,6 +778,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, {'ok': True, **stats})
             return
 
+        if parsed.path == '/api/favorites':
+            self._send_json(200, {'ok': True, 'favorites': load_favorites()})
+            return
+
         if parsed.path == '/api/latest':
             us_data = load_latest_market_rows('US')
             jp_data = load_latest_market_rows('JP')
@@ -751,6 +831,18 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(404, {'error': 'Not found'})
 
     def do_POST(self):
+        if self.path == '/api/favorites':
+            length = int(self.headers.get('Content-Length', '0'))
+            raw = self.rfile.read(length)
+            try:
+                payload = json.loads(raw.decode('utf-8')) if raw else {}
+                self._send_json(200, save_favorite(payload))
+            except ValueError as exc:
+                self._send_json(400, {'error': str(exc)})
+            except Exception as exc:
+                self._send_json(500, {'error': str(exc)})
+            return
+
         if self.path == '/api/keepa/product-finder':
             length = int(self.headers.get('Content-Length', '0'))
             raw = self.rfile.read(length)
@@ -794,6 +886,15 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, result)
         except Exception as exc:
             self._send_json(500, {'error': str(exc)})
+
+    def do_DELETE(self):
+        parsed = urlparse(self.path)
+        if parsed.path != '/api/favorites':
+            self._send_json(404, {'error': 'Not found'})
+            return
+
+        asin = (parse_qs(parsed.query).get('asin') or [''])[0]
+        self._send_json(200, delete_favorite(asin))
 
 
 if __name__ == '__main__':

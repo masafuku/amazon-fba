@@ -34,6 +34,29 @@ export const loadRowsFromDb = async () => {
     return response.json();
 };
 
+export const loadFavorites = async () => {
+    const response = await fetch(`${API_BASE}/api/favorites`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const json = await response.json();
+    return json.favorites || [];
+};
+
+export const saveFavorite = async (favorite) => {
+    const response = await fetch(`${API_BASE}/api/favorites`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(favorite),
+    });
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    return response.json();
+};
+
+export const deleteFavorite = async (asin) => {
+    const response = await fetch(`${API_BASE}/api/favorites?asin=${encodeURIComponent(asin)}`, { method: 'DELETE' });
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    return response.json();
+};
+
 export const loadDbStatsFromDb = async () => {
     const response = await fetch(`${API_BASE}/api/health`);
     if (!response.ok) {
