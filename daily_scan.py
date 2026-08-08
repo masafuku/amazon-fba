@@ -3,13 +3,16 @@
 daily_scan.py — 毎朝1回実行するだけで完結するスクリプト。
 
 処理の流れ:
-  1. キーワードを決める(KEYWORD_ROTATIONで曜日ごとに自動選択、または--keywordで指定)
+  1. キーワードを決める(--keyword未指定ならKeyword/Categoryエージェントの
+     キーワードプールから自動選択。プールが空ならKEYWORD_ROTATIONで曜日ごとに
+     自動選択)
   2. keepa_mcp.server.find_arbitrage_candidates() でMCPの粗いスクリーニング
      (キーワード検索 + 価格差率・ランキング・レビュー数・価格変動で絞り込み)
   3. ops_finance.evaluate_mcp_candidates() でFBA手数料・国際送料込みの
      実質利益率を計算し、閾値未満を除外
   4. 合格した候補をメールに通知(notify_email.py を再利用)
   5. 予算アラート(check_budget_alert)もあわせて通知
+  6. プールから選んだキーワードだった場合、使用実績(times_used等)を記録
 
   注: 当初は notify_line.py (LINE Notify) を使う想定だったが、LINE Notify は
   2025年3月末でサービス終了済み(notify-api.line.me は名前解決すら不可)の
@@ -21,13 +24,32 @@ daily_scan.py — 毎朝1回実行するだけで完結するスクリプト。
   進める(そのぶん実行時間は長くなる - 無人実行のcron向けの挙動)。
   対話的に手早く試したいときは --no-wait を付ける。
 
+Keyword/Categoryエージェント(キーワードプールの管理):
+  お気に入りに登録した商品(CEOが「良い」と判断した実績)や、Keepaの
+  カテゴリツリー(関連カテゴリ・トップブランド)からキーワード候補を集めて
+  プールに貯め、毎回のスキャンで使い回す。以下のコマンドはスキャンを実行
+  せず、プールの更新のみ行って終了する:
+
+    python3 daily_scan.py --seed-from-favorites
+        お気に入り登録済み商品のブランド名・カテゴリ名を抽出してプールに追加
+        (オフライン処理、Keepaトークン消費なし)
+
+    python3 daily_scan.py --expand "G-Shock"
+        指定したキーワードをKeepa Category Lookupで関連キーワード
+        (サブカテゴリ名・関連カテゴリ名・トップブランド名)に拡張してプールに追加
+        (Keepaトークンを消費する: 概算 1 + カテゴリ数 トークン)
+
+    python3 daily_scan.py --list-keywords
+        プールの内容(使用回数・最終使用日時・合格件数)を一覧表示
+
 使い方:
     python3 daily_scan.py
     python3 daily_scan.py --keyword "kitchen gadget"
     python3 daily_scan.py --keyword "kitchen gadget" --category "Kitchen Utensils & Gadgets"
     python3 daily_scan.py --keyword "kitchen gadget" --max-candidates 20 --no-wait
 
-キーワードのローテーションは KEYWORD_ROTATION を編集して調整する。
+キーワードのローテーションは KEYWORD_ROTATION を編集して調整する
+(プールが空の場合のフォールバックとしてのみ使われる)。
 毎朝 cron で実行する場合の例(平日7時に実行):
     0 7 * * 1-5 cd /path/to/amazon-fba && .venv/bin/python daily_scan.py >> logs/daily_scan.log 2>&1
 """
@@ -39,16 +61,22 @@ import time
 from datetime import datetime, timezone
 
 from config import Settings
-from keepa_mcp.server import find_arbitrage_candidates, search_category
+from keepa_mcp.keepa_client import KeepaError
+from keepa_mcp.server import expand_keyword, find_arbitrage_candidates, search_category
 from notify_email import send_email
 from ops_finance import (
+    add_keywords,
     build_qualified_line_message,
     check_budget_alert,
     evaluate_mcp_candidates,
     init_ops_tables,
+    list_keyword_pool,
     log_agent_run,
     new_agent_run_id,
     persist_agent_run,
+    pick_next_keyword,
+    record_keyword_used,
+    seed_keyword_pool_from_favorites,
 )
 
 # ---------------------------------------------------------------------------
@@ -98,10 +126,18 @@ def run_daily_scan(
     started_at = datetime.now(timezone.utc).isoformat()
     start_time = time.monotonic()
 
+    keyword_from_pool = False
     if keyword is None:
-        weekday = datetime.now(timezone.utc).weekday()
-        keyword = KEYWORD_ROTATION.get(weekday, "kitchen gadget")
-    print(f"[INFO] 本日のキーワード: {keyword}")
+        keyword = pick_next_keyword()  # Keyword/Categoryエージェント: 未使用/最も久しく使っていないものを優先
+        if keyword:
+            keyword_from_pool = True
+            print(f"[INFO] キーワードプールから選択: {keyword}")
+        else:
+            weekday = datetime.now(timezone.utc).weekday()
+            keyword = KEYWORD_ROTATION.get(weekday, "kitchen gadget")
+            print(f"[INFO] キーワードプールが空のため、曜日ローテーションを使用: {keyword}")
+    else:
+        print(f"[INFO] 指定されたキーワード: {keyword}")
 
     if category_id is None and category_name:
         category_id = resolve_category_id(category_name)
@@ -153,6 +189,9 @@ def run_daily_scan(
     persist_agent_run(label, evaluation, run_id=run_id)
     print(f"[INFO] 「エージェント」ページ用に保存しました (run_id={run_id})。ダッシュボードで確認できます。")
 
+    if keyword_from_pool:
+        record_keyword_used(keyword, qualified_count=len(evaluation["qualified"]))
+
     # 候補の通知
     candidate_message = build_qualified_line_message(evaluation)
     full_message = f"【本日の候補: {label}】\n{candidate_message}"
@@ -198,10 +237,66 @@ def run_daily_scan(
     )
 
 
+def cmd_seed_from_favorites() -> None:
+    """お気に入りに登録済みの商品からブランド名・カテゴリ名を抽出し、キーワード
+    プールに追加する(Keepa APIを一切呼ばないオフライン処理、トークン消費なし)。"""
+    init_ops_tables()
+    result = seed_keyword_pool_from_favorites()
+    seeds = result.get("seeds_found", [])
+    added = result.get("added", 0)
+    print(f"[INFO] お気に入りから{len(seeds)}個のキーワード候補を抽出しました。")
+    print(f"[INFO] 新規追加: {added}件 (既存キーワードは重複追加しません)")
+    for kw in seeds:
+        print(f"  - {kw}")
+
+
+def cmd_expand(seed_keyword: str, max_categories: int) -> None:
+    """1個のキーワードをKeepa Category Lookupで関連キーワードに拡張し、
+    プールに追加する(Keepa APIを呼ぶのでトークンを消費する: 概算 1 + カテゴリ数)。"""
+    init_ops_tables()
+    print(f"[INFO] '{seed_keyword}' を関連キーワードに拡張中 (max_categories={max_categories}) ...")
+    try:
+        result = expand_keyword(keyword=seed_keyword, max_categories=max_categories)
+    except KeepaError as exc:
+        print(f"[ERROR] 拡張失敗: {exc}")
+        sys.exit(1)
+    if not result.get("matched_categories"):
+        print(f"[WARN] '{seed_keyword}' に一致するKeepaカテゴリが見つかりませんでした。")
+        return
+
+    print(f"[INFO] 一致カテゴリ: {[c['name'] for c in result['matched_categories']]}")
+    new_keywords = (
+        result.get("subcategory_keywords", [])
+        + result.get("related_category_keywords", [])
+        + result.get("brand_keywords", [])
+    )
+    added = add_keywords(new_keywords, source="expanded", seed_keyword=seed_keyword)
+    print(f"[INFO] サブカテゴリ: {result.get('subcategory_keywords', [])}")
+    print(f"[INFO] 関連カテゴリ: {result.get('related_category_keywords', [])}")
+    print(f"[INFO] ブランド: {result.get('brand_keywords', [])}")
+    print(f"[INFO] キーワードプールに{added}件を新規追加しました(合計候補{len(new_keywords)}件、重複除く)。")
+
+
+def cmd_list_keywords() -> None:
+    init_ops_tables()
+    rows = list_keyword_pool()
+    if not rows:
+        print("[INFO] キーワードプールは空です。--seed-from-favorites または --expand で追加してください。")
+        return
+    print(f"[INFO] キーワードプール ({len(rows)}件):")
+    for row in rows:
+        used = row.get("timesUsed", 0)
+        qualified = row.get("totalQualified", 0)
+        last_used = row.get("lastUsedAt") or "未使用"
+        print(f"  - {row['keyword']:<30} source={row['source']:<10} "
+              f"used={used:>3} qualified={qualified:>3} last_used={last_used}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="毎朝の候補スキャン + 実質利益率フィルタ + メール通知")
     parser.add_argument("--keyword", type=str, default=None,
-                         help="検索キーワード(例: 'kitchen gadget')。省略時はKEYWORD_ROTATIONから曜日で自動選択")
+                         help="検索キーワード(例: 'kitchen gadget')。省略時はキーワードプールから自動選択"
+                              "(プールが空ならKEYWORD_ROTATIONで曜日ごとに自動選択)")
     parser.add_argument("--category", type=str, default=None, help="Keepaカテゴリ名で追加絞り込み(任意)")
     parser.add_argument("--category-id", type=int, default=None, help="Keepaカテゴリ ID を直接指定(--category より優先)")
     parser.add_argument("--max-candidates", type=int, default=DEFAULT_SEARCH_PARAMS["max_candidates"],
@@ -209,7 +304,31 @@ def main() -> None:
     parser.add_argument("--no-wait", dest="wait_for_tokens", action="store_false",
                          help="トークン不足時に待たず、その時点までの結果で打ち切る(デフォルトは待つ)")
     parser.set_defaults(wait_for_tokens=True)
+
+    # --- Keyword/Categoryエージェント: キーワードプールの管理コマンド ---
+    # いずれかが指定された場合は通常のスキャンを実行せず、プールの更新のみ行って終了する。
+    parser.add_argument("--seed-from-favorites", action="store_true",
+                         help="お気に入りの商品からブランド/カテゴリ名を抽出してキーワードプールに追加する"
+                              "(オフライン処理、トークン消費なし)")
+    parser.add_argument("--expand", type=str, default=None, metavar="KEYWORD",
+                         help="指定したキーワードをKeepa Category Lookupで関連キーワードに拡張し、"
+                              "プールに追加する(トークンを消費する)")
+    parser.add_argument("--max-categories", type=int, default=3,
+                         help="--expand で見る一致カテゴリ数の上限(デフォルト3、多いほどトークン消費増)")
+    parser.add_argument("--list-keywords", action="store_true",
+                         help="キーワードプールの内容を表示して終了する")
+
     args = parser.parse_args()
+
+    if args.list_keywords:
+        cmd_list_keywords()
+        return
+    if args.seed_from_favorites:
+        cmd_seed_from_favorites()
+        return
+    if args.expand:
+        cmd_expand(args.expand, args.max_categories)
+        return
 
     run_daily_scan(
         keyword=args.keyword,

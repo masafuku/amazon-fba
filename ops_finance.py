@@ -141,6 +141,23 @@ def init_ops_tables():
             CREATE INDEX IF NOT EXISTS idx_agent_candidates_created_at ON agent_candidates(created_at);
             CREATE INDEX IF NOT EXISTS idx_agent_runs_started_at ON agent_runs(started_at);
             CREATE INDEX IF NOT EXISTS idx_agent_candidates_asin ON agent_candidates(asin);
+
+            -- Keyword/Categoryエージェント: daily_scan.py が使うキーワードの
+            -- プール。手動シード・お気に入りから抽出したブランド/カテゴリ・
+            -- Keepaのカテゴリツリー(children/relatedCategories/topBrands)で
+            -- 自動拡張したキーワード、をまとめて管理する。
+            CREATE TABLE IF NOT EXISTS keyword_pool (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                keyword TEXT NOT NULL UNIQUE,
+                source TEXT NOT NULL,        -- manual/favorite/expanded
+                seed_keyword TEXT,           -- source=expandedの場合、展開元のキーワード
+                added_at TEXT NOT NULL,
+                last_used_at TEXT,
+                times_used INTEGER NOT NULL DEFAULT 0,
+                total_qualified INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'active'  -- active/paused
+            );
+            CREATE INDEX IF NOT EXISTS idx_keyword_pool_status ON keyword_pool(status);
             '''
         )
         # 既存DBに対する後方互換マイグレーション(CREATE TABLE IF NOT EXISTSは
@@ -570,6 +587,127 @@ def log_agent_run(
                 error, notify_status, notify_error,
             ),
         )
+
+
+# ---------------------------------------------------------------------------
+# 7. Keyword/Categoryエージェント: キーワードプール管理
+# ---------------------------------------------------------------------------
+
+def add_keywords(keywords, source: str, seed_keyword: str = None) -> int:
+    """キーワードをプールに追加する(既存のものはスキップ)。追加できた件数を返す。"""
+    init_ops_tables()
+    keywords = [str(k).strip() for k in keywords if str(k or '').strip()]
+    if not keywords:
+        return 0
+
+    now = datetime.now(timezone.utc).isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.executemany(
+            '''
+            INSERT OR IGNORE INTO keyword_pool (keyword, source, seed_keyword, added_at, times_used, total_qualified, status)
+            VALUES (?, ?, ?, ?, 0, 0, 'active')
+            ''',
+            [(keyword, source, seed_keyword, now) for keyword in keywords],
+        )
+        return cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+
+
+def seed_keyword_pool_from_favorites() -> dict:
+    """お気に入り登録済みの商品からブランド名・カテゴリ名を抽出し、
+    キーワードプールの種にする。CEOが実際に「良い」と判断した商品が
+    最も強いシグナルなので、Keyword/Categoryエージェントの起点として使う。
+    """
+    init_ops_tables()
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            rows = conn.execute('SELECT data_json FROM favorites').fetchall()
+    except sqlite3.OperationalError:
+        return {'seeds_found': [], 'added': 0}  # favoritesテーブルがまだ無い
+
+    seeds = set()
+    for (data_json,) in rows:
+        try:
+            data = json.loads(data_json) if data_json else {}
+        except Exception:
+            continue
+        us = data.get('US') if isinstance(data.get('US'), dict) else {}
+        jp = data.get('JP') if isinstance(data.get('JP'), dict) else {}
+
+        for candidate in (data.get('brand'), us.get('brand'), jp.get('brand')):
+            if candidate:
+                seeds.add(str(candidate).strip())
+
+        for candidate in (data.get('productCategory'), data.get('category'), us.get('productCategory')):
+            if candidate and str(candidate).strip() not in ('未分類', ''):
+                seeds.add(str(candidate).strip())
+
+    seeds_list = sorted(seeds)
+    added = add_keywords(seeds_list, source='favorite')
+    return {'seeds_found': seeds_list, 'added': added}
+
+
+def pick_next_keyword() -> str:
+    """次にdaily_scan.pyで使うキーワードを選ぶ。一度も使っていないものを
+    優先し、次に最後に使ってから時間が経っているものを優先する。
+    プールが空の場合は None を返す(呼び出し側でフォールバックする)。
+    """
+    init_ops_tables()
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            '''
+            SELECT keyword FROM keyword_pool
+            WHERE status = 'active'
+            ORDER BY times_used ASC, COALESCE(last_used_at, '') ASC
+            LIMIT 1
+            '''
+        ).fetchone()
+    return row[0] if row else None
+
+
+def record_keyword_used(keyword: str, qualified_count: int = 0) -> None:
+    """キーワードプール内のキーワードを実際に使った後、使用実績を記録する。
+    プールに無いキーワード(--keywordで直接指定した等)なら何もしない。
+    """
+    init_ops_tables()
+    now = datetime.now(timezone.utc).isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            '''
+            UPDATE keyword_pool
+            SET times_used = times_used + 1,
+                last_used_at = ?,
+                total_qualified = total_qualified + ?
+            WHERE keyword = ?
+            ''',
+            (now, qualified_count, keyword),
+        )
+
+
+def list_keyword_pool() -> list:
+    """ダッシュボード表示用に、キーワードプール全体を返す。"""
+    init_ops_tables()
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            '''
+            SELECT keyword, source, seed_keyword, added_at, last_used_at,
+                   times_used, total_qualified, status
+            FROM keyword_pool
+            ORDER BY times_used ASC, COALESCE(last_used_at, '') ASC
+            '''
+        ).fetchall()
+    return [
+        {
+            'keyword': keyword,
+            'source': source,
+            'seedKeyword': seed_keyword,
+            'addedAt': added_at,
+            'lastUsedAt': last_used_at,
+            'timesUsed': times_used,
+            'totalQualified': total_qualified,
+            'status': status,
+        }
+        for keyword, source, seed_keyword, added_at, last_used_at, times_used, total_qualified, status in rows
+    ]
 
 
 if __name__ == '__main__':

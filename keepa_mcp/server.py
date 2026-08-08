@@ -24,6 +24,7 @@ from mcp.server.fastmcp import FastMCP
 from . import analysis, cache
 from .cached_ops import (
     cached_find_products,
+    cached_get_categories,
     cached_get_products,
     cached_lookup_by_code,
     cached_search_categories,
@@ -149,6 +150,87 @@ def search_category(term: str, domain: str = "US", force_refresh: bool = False) 
     api_key = _require_api_key()
     results, cache_info = cached_search_categories(api_key, term, domain=domain, force_refresh=force_refresh)
     return {"categories": results, "_cache": cache_info}
+
+
+@mcp.tool()
+def expand_keyword(
+    keyword: str,
+    domain: str = "US",
+    max_categories: int = 3,
+    force_refresh: bool = False,
+) -> Dict[str, Any]:
+    """Expand one seed keyword into related search-keyword candidates using
+    Keepa's category tree - subcategory names, Keepa's own "related
+    categories" for the matched category, and that category's top brands.
+    Intended to grow a keyword pool (see ops_finance.py's keyword_pool
+    table / daily_scan.py --expand) from a small set of seeds - e.g. a
+    brand or product type pulled from a favorited product - rather than
+    relying on a fixed, manually-maintained keyword list.
+
+    Cheap: 1 category search + up to ~3 batched category lookups (each
+    batch is up to 10 category ids for 1 token, regardless of how many of
+    the 10 are used), all cached (see KEEPA_CACHE_TTL_CATEGORY_HOURS,
+    default 30 days, since category trees barely change).
+
+    Args:
+        keyword: Seed keyword/category name to expand from.
+        domain: Amazon marketplace code. Default "US".
+        max_categories: How many of the top category-search matches to
+            expand from (each costs one batched category-lookup token).
+        force_refresh: Bypass the cache and query Keepa live.
+    """
+    api_key = _require_api_key()
+    matches, search_cache = cached_search_categories(api_key, keyword, domain=domain, force_refresh=force_refresh)
+    if not matches:
+        return {
+            "seed_keyword": keyword,
+            "matched_categories": [],
+            "subcategory_keywords": [],
+            "related_category_keywords": [],
+            "brand_keywords": [],
+            "_cache": search_cache,
+        }
+
+    top_matches = matches[:max_categories]
+    seed_ids = [m["category_id"] for m in top_matches]
+    seed_cats, _ = cached_get_categories(api_key, seed_ids, domain=domain, force_refresh=force_refresh)
+
+    child_ids: List[int] = []
+    related_ids: List[int] = []
+    brands = set()
+    for cat in seed_cats.values():
+        child_ids.extend(cat.get("children") or [])
+        related_ids.extend(cat.get("relatedCategories") or [])
+        for brand in (cat.get("topBrands") or []):
+            if brand:
+                brands.add(brand)
+
+    # Dedup while preserving order, then resolve names in batches of 10
+    # (each batch = 1 token; already-cached ids in a batch are free).
+    combined_ids = list(dict.fromkeys(child_ids + related_ids))
+    resolved: Dict[int, Dict[str, Any]] = {}
+    for i in range(0, len(combined_ids), 10):
+        chunk = combined_ids[i:i + 10]
+        chunk_result, _ = cached_get_categories(api_key, chunk, domain=domain, force_refresh=force_refresh)
+        resolved.update(chunk_result)
+
+    def _names(ids: List[int]) -> List[str]:
+        seen = set()
+        names = []
+        for cat_id in ids:
+            name = resolved.get(cat_id, {}).get("name")
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+        return names
+
+    return {
+        "seed_keyword": keyword,
+        "matched_categories": [{"category_id": m["category_id"], "name": m["name"]} for m in top_matches],
+        "subcategory_keywords": _names(child_ids),
+        "related_category_keywords": _names(related_ids),
+        "brand_keywords": sorted(brands),
+    }
 
 
 @mcp.tool()

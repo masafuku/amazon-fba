@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import cache
 from .config import settings
-from .keepa_client import find_products, get_products, lookup_by_code, search_categories
+from .keepa_client import find_products, get_categories, get_products, lookup_by_code, search_categories
 
 CacheInfo = Dict[str, Any]
 
@@ -48,6 +48,38 @@ def cached_search_categories(
     if settings.cache_enabled:
         cache.set("category_search", key, result)
     return result, _miss_info()
+
+
+def cached_get_categories(
+    api_key: str, category_ids: List[int], domain: str = "US", force_refresh: bool = False
+) -> Tuple[Dict[int, Dict[str, Any]], CacheInfo]:
+    """Per-category cache, mirrors cached_get_products: only the ids not
+    already cached get fetched live (still batched into one call)."""
+    ttl = _ttl(settings.cache_ttl_category_hours)
+    result: Dict[int, Dict[str, Any]] = {}
+    to_fetch: List[int] = []
+    any_hit = False
+
+    for cat_id in category_ids:
+        key = f"{domain.upper()}:{cat_id}"
+        if settings.cache_enabled and not force_refresh:
+            hit = cache.get("category_lookup", key, ttl)
+            if hit is not None:
+                value, _age = hit
+                result[cat_id] = value
+                any_hit = True
+                continue
+        to_fetch.append(cat_id)
+
+    if to_fetch:
+        fetched = get_categories(api_key, to_fetch, domain=domain)
+        for cat_id, cat in fetched.items():
+            result[cat_id] = cat
+            if settings.cache_enabled:
+                cache.set("category_lookup", f"{domain.upper()}:{cat_id}", cat)
+
+    cache_info = _hit_info(0) if (any_hit and not to_fetch) else _miss_info()
+    return result, cache_info
 
 
 def cached_find_products(

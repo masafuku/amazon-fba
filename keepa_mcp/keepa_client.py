@@ -167,6 +167,24 @@ def search_categories(api_key: str, term: str, domain: str = "US") -> List[Dict[
     return results
 
 
+def get_categories(api_key: str, category_ids: List[int], domain: str = "US") -> Dict[int, Dict[str, Any]]:
+    """Category Lookup: full category objects (children, relatedCategories,
+    topBrands, etc.) for up to 10 ids per call - all for 1 token regardless
+    of how many ids are batched in. Used to expand a seed keyword/category
+    into related search terms (see server.py's expand_keyword)."""
+    if not category_ids:
+        return {}
+    ids = category_ids[:10]
+    data = _request("/category", {
+        "key": api_key,
+        "domain": resolve_domain(domain),
+        "category": ",".join(str(i) for i in ids),
+        "parents": 0,
+    })
+    categories = data.get("categories") or {}
+    return {int(cat_id): cat for cat_id, cat in categories.items() if cat}
+
+
 def find_products(
     api_key: str,
     domain: str = "US",
