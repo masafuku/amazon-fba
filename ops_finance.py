@@ -265,14 +265,20 @@ def evaluate_mcp_candidates(
     MCP側の price_diff_rate は FBA手数料・送料・関税を含まないため、
     ここで初めて「本当に儲かるか」を判定する。
 
+    Amazon販売手数料率・FBA Pick&Packピック手数料は、Keepaが商品ごとに
+    返す referralFeePercentage / fbaFees.pickAndPackFee があればそれを
+    使い、無い場合のみ calc_unit_profit() のデフォルト仮値にフォールバック
+    する(国際送料は仮値のまま。Keepaは国際配送費までは持っていない)。
+
     Returns:
         {
           'qualified': [利益率が閾値以上の候補 + profit詳細],
           'rejected':  [利益率が閾値未満だった候補 + 理由],
           'weight_missing': [重量データが無く仮値で計算した候補のASIN一覧],
+          'fee_missing': [手数料データが無く仮値で計算した候補のASIN一覧],
         }
     """
-    qualified, rejected, weight_missing = [], [], []
+    qualified, rejected, weight_missing, fee_missing = [], [], [], []
 
     for candidate in mcp_result.get('candidates', []):
         sell = candidate['sell']
@@ -285,12 +291,31 @@ def evaluate_mcp_candidates(
             weight_kg = DEFAULT_WEIGHT_KG_FALLBACK
             weight_missing.append(asin)
 
+        # Keepa returns per-product referralFeePercentage / fbaFees for many
+        # ASINs - real, category/size-specific figures beat the flat
+        # defaults in calc_unit_profit() whenever they're available.
+        fee_kwargs = {}
+        used_fallback_fee = False
+        referral_pct = sell.get('referral_fee_percent')
+        if referral_pct is not None:
+            fee_kwargs['amazon_fee_rate'] = referral_pct / 100
+        else:
+            used_fallback_fee = True
+        fba_fee = sell.get('fba_pickpack_fee')
+        if fba_fee is not None:
+            fee_kwargs['fba_fee_usd'] = fba_fee
+        else:
+            used_fallback_fee = True
+        if used_fallback_fee:
+            fee_missing.append(asin)
+
         # cost['price'] は JP円、sell['price'] はUSD想定(sell_domain=US前提)
         profit = calc_unit_profit(
             us_price_usd=sell['price'],
             jp_cost_jpy=cost['price'],
             weight_kg=weight_kg,
             exchange_rate=exchange_rate,
+            **fee_kwargs,
         )
 
         entry = {
@@ -302,6 +327,7 @@ def evaluate_mcp_candidates(
             'price_diff_rate_gross': candidate.get('price_diff_rate'),  # 手数料・送料考慮前
             'weight_kg': weight_kg,
             'weight_estimated': used_fallback_weight,
+            'fee_estimated': used_fallback_fee,
             **profit,  # unit_profit_usd, margin_pct など
         }
 
@@ -317,6 +343,7 @@ def evaluate_mcp_candidates(
         'qualified': qualified,
         'rejected': rejected,
         'weight_missing': weight_missing,
+        'fee_missing': fee_missing,
         'evaluated': len(mcp_result.get('candidates', [])),
     }
 

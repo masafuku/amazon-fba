@@ -104,6 +104,8 @@ def run_daily_scan(category_name: str | None, category_id: int | None, max_candi
           f"却下: {len(evaluation['rejected'])}件")
     if evaluation["weight_missing"]:
         print(f"[WARN] 重量データなし(仮値で計算): {evaluation['weight_missing']}")
+    if evaluation["fee_missing"]:
+        print(f"[WARN] 手数料データなし(仮値で計算): {evaluation['fee_missing']}")
 
     # 候補の通知
     candidate_message = build_qualified_line_message(evaluation)

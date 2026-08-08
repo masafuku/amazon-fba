@@ -89,6 +89,28 @@ def package_weight_kg(product: Dict[str, Any]) -> Optional[float]:
     return None
 
 
+def referral_fee_percent(product: Dict[str, Any]) -> Optional[float]:
+    """Amazon referral (selling) fee as a percentage of price, e.g. 15.01
+    means 15.01%. Category-specific (ranges roughly 8-45% on Amazon), so
+    prefer this over a flat assumption whenever Keepa has it."""
+    val = product.get("referralFeePercentage")
+    if val is None or val < 0:
+        return None
+    return val
+
+
+def fba_pickpack_fee(product: Dict[str, Any], domain: str) -> Optional[float]:
+    """FBA pick & pack fee in the marketplace's major currency unit
+    (e.g. USD for domain="US"). Size/weight-tier dependent on Amazon's
+    side, so this is Keepa's own per-product estimate, not a flat rate."""
+    fees = product.get("fbaFees") or {}
+    raw = fees.get("pickAndPackFee")
+    if raw is None or raw < 0:
+        return None
+    divisor = CURRENCY_DIVISOR.get(domain.upper(), 100)
+    return round(raw / divisor, 2)
+
+
 def primary_code(product: Dict[str, Any]) -> Optional[str]:
     """Primary UPC, falling back to EAN, used to match the same physical
     product across Amazon marketplaces (ASINs differ per-domain)."""
