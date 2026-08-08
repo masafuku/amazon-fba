@@ -7,8 +7,12 @@ daily_scan.py — 毎朝1回実行するだけで完結するスクリプト。
      (価格差率・ランキング・レビュー数・価格変動で絞り込み)
   2. ops_finance.evaluate_mcp_candidates() でFBA手数料・国際送料込みの
      実質利益率を計算し、閾値未満を除外
-  3. 合格した候補を LINE に通知(notify_line.py を再利用)
+  3. 合格した候補をメールに通知(notify_email.py を再利用)
   4. 予算アラート(check_budget_alert)もあわせて通知
+
+  注: 当初は notify_line.py (LINE Notify) を使う想定だったが、LINE Notify は
+  2025年3月末でサービス終了済み(notify-api.line.me は名前解決すら不可)の
+  ため、既存の notify_email.py に切り替えている。
 
 使い方:
     python3 daily_scan.py
@@ -22,18 +26,18 @@ daily_scan.py — 毎朝1回実行するだけで完結するスクリプト。
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from datetime import datetime, timezone
 
+from config import Settings
 from keepa_mcp.server import find_arbitrage_candidates, search_category
+from notify_email import send_email
 from ops_finance import (
     build_qualified_line_message,
     check_budget_alert,
     evaluate_mcp_candidates,
     init_ops_tables,
 )
-from notify_line import send_line_notify
 
 # ---------------------------------------------------------------------------
 # 曜日ごとのカテゴリローテーション(必要に応じて編集)
@@ -111,21 +115,30 @@ def run_daily_scan(category_name: str | None, category_id: int | None, max_candi
     if budget_alerts:
         full_message += "\n\n【予算アラート】\n" + "\n".join(budget_alerts)
 
-    line_token = os.getenv("LINE_NOTIFY_TOKEN", "").strip()
-    if line_token:
+    settings = Settings.load()
+    if settings.email_smtp_host and settings.email_username and settings.email_to:
         try:
-            send_line_notify(line_token, full_message)
-            print("[INFO] LINE通知を送信しました。")
+            send_email(
+                smtp_host=settings.email_smtp_host,
+                smtp_port=settings.email_smtp_port,
+                username=settings.email_username,
+                password=settings.email_password,
+                from_addr=settings.email_from,
+                to_addr=settings.email_to,
+                subject=f"【本日の候補】{category_name}",
+                body=full_message,
+            )
+            print(f"[INFO] メール通知を送信しました ({settings.email_to})。")
         except Exception as exc:
-            print(f"[ERROR] LINE通知送信失敗: {exc}")
+            print(f"[ERROR] メール通知送信失敗: {exc}")
     else:
-        print("[WARN] LINE_NOTIFY_TOKEN が未設定のため、通知はスキップしました。")
+        print("[WARN] EMAIL_* が未設定のため、通知はスキップしました。")
         print("--- 通知予定だった内容 ---")
         print(full_message)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="毎朝の候補スキャン + 実質利益率フィルタ + LINE通知")
+    parser = argparse.ArgumentParser(description="毎朝の候補スキャン + 実質利益率フィルタ + メール通知")
     parser.add_argument("--category", type=str, default=None, help="Keepaカテゴリ名(例: 'Kitchen Utensils & Gadgets')")
     parser.add_argument("--category-id", type=int, default=None, help="Keepaカテゴリ ID を直接指定(--category より優先)")
     parser.add_argument("--max-candidates", type=int, default=DEFAULT_SEARCH_PARAMS["max_candidates"],
