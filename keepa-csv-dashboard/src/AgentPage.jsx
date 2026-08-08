@@ -286,6 +286,7 @@ export default function AgentPage() {
                         <table className="min-w-full border-collapse text-left text-sm">
                             <thead className="bg-slate-950/90">
                                 <tr>
+                                    <th className="px-4 py-3 font-medium text-slate-400">画像</th>
                                     {renderSortHeader('判定', 'qualified')}
                                     {renderSortHeader('カテゴリ', 'category')}
                                     {renderSortHeader('ASIN', 'asin')}
@@ -294,6 +295,7 @@ export default function AgentPage() {
                                     {renderSortHeader('JP価格(円)', 'jpCostJpy')}
                                     {renderSortHeader('実質利益率', 'marginPct')}
                                     {renderSortHeader('1個あたり利益(円)', 'unitProfitUsd')}
+                                    {renderSortHeader('価格変動(90日)', 'priceVolatility90d')}
                                     {renderSortHeader('ランキング', 'salesRank')}
                                     {renderSortHeader('レビュー数', 'reviewCount')}
                                     {renderSortHeader('調査日時', 'createdAt')}
@@ -307,6 +309,18 @@ export default function AgentPage() {
                                         key={`${candidate.runId}-${candidate.asin}`}
                                         className="border-t border-slate-800 bg-slate-950/80"
                                     >
+                                        <td className="px-4 py-3">
+                                            {candidate.imageUrl ? (
+                                                <img
+                                                    src={candidate.imageUrl}
+                                                    alt={candidate.title || 'thumbnail'}
+                                                    className="h-12 w-12 rounded-md border border-slate-700 object-cover"
+                                                    loading="lazy"
+                                                />
+                                            ) : (
+                                                <span className="text-slate-500">-</span>
+                                            )}
+                                        </td>
                                         <td className="px-4 py-3">
                                             {candidate.qualified ? (
                                                 <span className="rounded-lg bg-emerald-900/60 px-2 py-1 text-xs font-semibold text-emerald-200">
@@ -340,6 +354,9 @@ export default function AgentPage() {
                                         </td>
                                         <td className={`px-4 py-3 font-semibold ${candidate.unitProfitUsd >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                                             {candidate.unitProfitUsd == null ? '-' : `¥${Math.round(Number(candidate.unitProfitUsd) * EXCHANGE_RATE).toLocaleString()}`}
+                                        </td>
+                                        <td className="px-4 py-3 text-slate-200">
+                                            {candidate.priceVolatility90d == null ? '-' : `±${(candidate.priceVolatility90d * 100).toFixed(0)}%`}
                                         </td>
                                         <td className="px-4 py-3 text-slate-200">{candidate.salesRank ?? '-'}</td>
                                         <td className="px-4 py-3 text-slate-200">{candidate.reviewCount ?? '-'}</td>

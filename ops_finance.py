@@ -89,6 +89,7 @@ def init_ops_tables():
                 category TEXT,
                 asin TEXT NOT NULL,
                 title TEXT,
+                image_url TEXT,
                 us_url TEXT,
                 jp_asin TEXT,
                 jp_url TEXT,
@@ -96,6 +97,7 @@ def init_ops_tables():
                 jp_cost_jpy REAL,
                 sales_rank INTEGER,
                 review_count INTEGER,
+                price_volatility_90d REAL,
                 weight_kg REAL,
                 weight_estimated INTEGER,
                 fee_estimated INTEGER,
@@ -141,6 +143,13 @@ def init_ops_tables():
             CREATE INDEX IF NOT EXISTS idx_agent_candidates_asin ON agent_candidates(asin);
             '''
         )
+        # 既存DBに対する後方互換マイグレーション(CREATE TABLE IF NOT EXISTSは
+        # 既存テーブルに新カラムを追加してくれないため)。
+        agent_candidates_columns = {row[1] for row in conn.execute('PRAGMA table_info(agent_candidates)').fetchall()}
+        if 'image_url' not in agent_candidates_columns:
+            conn.execute('ALTER TABLE agent_candidates ADD COLUMN image_url TEXT')
+        if 'price_volatility_90d' not in agent_candidates_columns:
+            conn.execute('ALTER TABLE agent_candidates ADD COLUMN price_volatility_90d REAL')
 
 
 # ---------------------------------------------------------------------------
@@ -383,11 +392,13 @@ def evaluate_mcp_candidates(
             'asin': asin,
             'title': sell.get('title'),
             'url': sell.get('url'),
+            'image_url': sell.get('image_url'),
             'jp_asin': cost.get('asin'),
             'jp_url': cost.get('url'),
             'sales_rank': sell.get('sales_rank'),
             'review_count': sell.get('review_count'),
             'price_diff_rate_gross': candidate.get('price_diff_rate'),  # 手数料・送料考慮前
+            'price_volatility_90d': candidate.get('price_volatility_90d'),
             'weight_kg': weight_kg,
             'weight_estimated': used_fallback_weight,
             'fee_estimated': used_fallback_fee,
@@ -467,6 +478,7 @@ def persist_agent_run(category: str, evaluation: dict, run_id: str = None) -> st
                 category,
                 item['asin'],
                 item.get('title'),
+                item.get('image_url'),
                 item.get('url'),
                 item.get('jp_asin'),
                 item.get('jp_url'),
@@ -474,6 +486,7 @@ def persist_agent_run(category: str, evaluation: dict, run_id: str = None) -> st
                 item.get('jp_cost_jpy'),
                 item.get('sales_rank'),
                 item.get('review_count'),
+                item.get('price_volatility_90d'),
                 item.get('weight_kg'),
                 1 if item.get('weight_estimated') else 0,
                 1 if item.get('fee_estimated') else 0,
@@ -491,12 +504,12 @@ def persist_agent_run(category: str, evaluation: dict, run_id: str = None) -> st
             conn.executemany(
                 '''
                 INSERT INTO agent_candidates (
-                    run_id, category, asin, title, us_url, jp_asin, jp_url,
-                    us_price_usd, jp_cost_jpy, sales_rank, review_count,
+                    run_id, category, asin, title, image_url, us_url, jp_asin, jp_url,
+                    us_price_usd, jp_cost_jpy, sales_rank, review_count, price_volatility_90d,
                     weight_kg, weight_estimated, fee_estimated,
                     price_diff_rate_gross, unit_profit_usd, margin_pct,
                     qualified, reason, data_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''',
                 rows,
             )

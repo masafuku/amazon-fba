@@ -164,13 +164,32 @@ def extract_product_fields(product, domain):
         sales_rank = decode_keepa_history(rank_history)
 
     category_tree = product.get('categoryTree') or []
-    images = product.get('imagesCSV') or product.get('images') or ''
-    if isinstance(images, list):
-        images = ';'.join(str(image) for image in images)
-    image_value = str(images).split(';')[0].strip()
-    image_url = image_value if image_value.startswith(('http://', 'https://')) else (
-        f'https://images-na.ssl-images-amazon.com/images/I/{image_value}.jpg' if image_value else ''
-    )
+    # imagesCSV(存在すれば)はセミコロン区切りの裸のAmazon画像ID文字列。
+    # imagesCSVが無い場合のフォールバックである images は構造が違い、
+    # 各要素が {'l': 'xxx.jpg', 'm': 'yyy.jpg', ...} のような辞書のリスト
+    # なので、素朴に str() すると辞書がそのまま文字列化されてURLが壊れる。
+    images_csv = product.get('imagesCSV')
+    if images_csv:
+        image_value = str(images_csv).split(';')[0].strip()
+    else:
+        raw_images = product.get('images')
+        image_value = ''
+        if isinstance(raw_images, list) and raw_images:
+            first = raw_images[0]
+            if isinstance(first, dict):
+                image_value = str(first.get('l') or first.get('hiRes') or first.get('m') or '').strip()
+            else:
+                image_value = str(first).strip()
+        elif isinstance(raw_images, str):
+            image_value = raw_images.split(';')[0].strip()
+
+    if image_value.startswith(('http://', 'https://')):
+        image_url = image_value
+    elif image_value:
+        suffix = '' if image_value.lower().endswith(('.jpg', '.jpeg', '.png', '.gif')) else '.jpg'
+        image_url = f'https://images-na.ssl-images-amazon.com/images/I/{image_value}{suffix}'
+    else:
+        image_url = ''
     return {
         'title': product.get('title') or '',
         'imageUrl': image_url,
@@ -551,6 +570,7 @@ def init_db() -> None:
                 category TEXT,
                 asin TEXT NOT NULL,
                 title TEXT,
+                image_url TEXT,
                 us_url TEXT,
                 jp_asin TEXT,
                 jp_url TEXT,
@@ -558,6 +578,7 @@ def init_db() -> None:
                 jp_cost_jpy REAL,
                 sales_rank INTEGER,
                 review_count INTEGER,
+                price_volatility_90d REAL,
                 weight_kg REAL,
                 weight_estimated INTEGER,
                 fee_estimated INTEGER,
@@ -571,6 +592,13 @@ def init_db() -> None:
             )
             '''
         )
+        # 既存DBに対する後方互換マイグレーション(CREATE TABLE IF NOT EXISTSは
+        # 既存テーブルに新カラムを追加してくれないため)。
+        agent_candidates_columns = {row[1] for row in conn.execute('PRAGMA table_info(agent_candidates)').fetchall()}
+        if 'image_url' not in agent_candidates_columns:
+            conn.execute('ALTER TABLE agent_candidates ADD COLUMN image_url TEXT')
+        if 'price_volatility_90d' not in agent_candidates_columns:
+            conn.execute('ALTER TABLE agent_candidates ADD COLUMN price_volatility_90d REAL')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_run_id ON agent_candidates(run_id)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_created_at ON agent_candidates(created_at)')
         # ops_finance.py (daily_scan.py) が書き込む実行履歴。定義元はops_finance.py
@@ -765,8 +793,8 @@ def load_agent_candidates(days: int = 7):
         rows = conn.execute(
             '''
             SELECT
-                ac.run_id, ac.category, ac.asin, ac.title, ac.us_url, ac.jp_asin, ac.jp_url,
-                ac.us_price_usd, ac.jp_cost_jpy, ac.sales_rank, ac.review_count,
+                ac.run_id, ac.category, ac.asin, ac.title, ac.image_url, ac.us_url, ac.jp_asin, ac.jp_url,
+                ac.us_price_usd, ac.jp_cost_jpy, ac.sales_rank, ac.review_count, ac.price_volatility_90d,
                 ac.weight_kg, ac.weight_estimated, ac.fee_estimated,
                 ac.price_diff_rate_gross, ac.unit_profit_usd, ac.margin_pct,
                 ac.qualified, ac.reason, ac.data_json, ac.created_at,
@@ -781,8 +809,8 @@ def load_agent_candidates(days: int = 7):
 
     candidates = []
     for row in rows:
-        (run_id, category, asin, title, us_url, jp_asin, jp_url,
-         us_price_usd, jp_cost_jpy, sales_rank, review_count,
+        (run_id, category, asin, title, image_url, us_url, jp_asin, jp_url,
+         us_price_usd, jp_cost_jpy, sales_rank, review_count, price_volatility_90d,
          weight_kg, weight_estimated, fee_estimated,
          price_diff_rate_gross, unit_profit_usd, margin_pct,
          qualified, reason, data_json, created_at, already_favorited) = row
@@ -795,6 +823,7 @@ def load_agent_candidates(days: int = 7):
             'category': category,
             'asin': asin,
             'title': title,
+            'imageUrl': image_url,
             'usUrl': us_url,
             'jpAsin': jp_asin,
             'jpUrl': jp_url,
@@ -802,6 +831,7 @@ def load_agent_candidates(days: int = 7):
             'jpCostJpy': jp_cost_jpy,
             'salesRank': sales_rank,
             'reviewCount': review_count,
+            'priceVolatility90d': price_volatility_90d,
             'weightKg': weight_kg,
             'weightEstimated': bool(weight_estimated),
             'feeEstimated': bool(fee_estimated),

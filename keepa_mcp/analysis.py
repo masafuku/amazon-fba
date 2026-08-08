@@ -89,6 +89,40 @@ def package_weight_kg(product: Dict[str, Any]) -> Optional[float]:
     return None
 
 
+def product_image_url(product: Dict[str, Any]) -> Optional[str]:
+    """Primary product thumbnail URL.
+
+    `imagesCSV` (when present) is a semicolon-separated string of bare
+    Amazon image ids. `images` (the fallback when imagesCSV is absent) is
+    structured instead - a list of per-image dicts with size-variant keys
+    like "l" (large) / "m" (medium) filenames, NOT a list of plain
+    strings - so it must not be naively str()'d (that stringifies the
+    whole dict into the URL)."""
+    images_csv = product.get("imagesCSV")
+    if images_csv:
+        image_value = str(images_csv).split(";")[0].strip()
+    else:
+        raw_images = product.get("images")
+        image_value = ""
+        if isinstance(raw_images, list) and raw_images:
+            first = raw_images[0]
+            if isinstance(first, dict):
+                image_value = str(first.get("l") or first.get("hiRes") or first.get("m") or "").strip()
+            else:
+                image_value = str(first).strip()
+        elif isinstance(raw_images, str):
+            image_value = raw_images.split(";")[0].strip()
+
+    if not image_value:
+        return None
+    if image_value.startswith(("http://", "https://")):
+        return image_value
+    # imagesCSV entries are bare ids with no extension; the "l"/"m" filenames
+    # from `images` already end in .jpg - don't double it up.
+    suffix = "" if image_value.lower().endswith((".jpg", ".jpeg", ".png", ".gif")) else ".jpg"
+    return f"https://images-na.ssl-images-amazon.com/images/I/{image_value}{suffix}"
+
+
 def referral_fee_percent(product: Dict[str, Any]) -> Optional[float]:
     """Amazon referral (selling) fee as a percentage of price, e.g. 15.01
     means 15.01%. Category-specific (ranges roughly 8-45% on Amazon), so
