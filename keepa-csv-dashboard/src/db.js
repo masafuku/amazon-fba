@@ -171,6 +171,29 @@ export const fetchKeepaProduct = async (payload) => {
     };
 };
 
+export const loadKeywordPool = async () => {
+    const response = await fetch(`${API_BASE}/api/keyword-pool`);
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    const json = await response.json();
+    return json.keywords || [];
+};
+
+export const addKeywordToPool = async (keyword) => {
+    const response = await fetch(`${API_BASE}/api/keyword-pool`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keyword }),
+    });
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    return response.json();
+};
+
+export const deleteKeywordFromPool = async (keyword) => {
+    const response = await fetch(`${API_BASE}/api/keyword-pool?keyword=${encodeURIComponent(keyword)}`, { method: 'DELETE' });
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    return response.json();
+};
+
 export const loadKeepaFinderRun = async (runId) => {
     const params = new URLSearchParams({ runId });
     const response = await fetch(`${API_BASE}/api/keepa/finder-run?${params.toString()}`);

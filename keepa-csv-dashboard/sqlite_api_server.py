@@ -694,6 +694,24 @@ def init_db() -> None:
         conn.execute('CREATE INDEX IF NOT EXISTS idx_keepa_finder_runs_created_at ON keepa_finder_runs(created_at)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_keepa_finder_items_run_id ON keepa_finder_items(run_id)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_keepa_finder_items_asin ON keepa_finder_items(asin)')
+        # Keyword/Categoryエージェントのキーワードプール。定義元はops_finance.py
+        # 側だが、agent_runs と同じ理由でここにも同じ定義を用意しておく。
+        conn.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS keyword_pool (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                keyword TEXT NOT NULL UNIQUE,
+                source TEXT NOT NULL,
+                seed_keyword TEXT,
+                added_at TEXT NOT NULL,
+                last_used_at TEXT,
+                times_used INTEGER NOT NULL DEFAULT 0,
+                total_qualified INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'active'
+            )
+            '''
+        )
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_keyword_pool_status ON keyword_pool(status)')
 
 
 def insert_rows(rows, metadata):
@@ -908,6 +926,59 @@ def load_agent_runs(days: int = 30):
     return runs
 
 
+def load_keyword_pool():
+    """Keyword/Categoryエージェントのキーワードプール全体を返す
+    (daily_scan.py --list-keywords / ops_finance.list_keyword_pool() と同じ並び順)。"""
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            '''
+            SELECT keyword, source, seed_keyword, added_at, last_used_at,
+                   times_used, total_qualified, status
+            FROM keyword_pool
+            ORDER BY times_used ASC, COALESCE(last_used_at, '') ASC
+            '''
+        ).fetchall()
+    return [
+        {
+            'keyword': keyword,
+            'source': source,
+            'seedKeyword': seed_keyword,
+            'addedAt': added_at,
+            'lastUsedAt': last_used_at,
+            'timesUsed': times_used,
+            'totalQualified': total_qualified,
+            'status': status,
+        }
+        for keyword, source, seed_keyword, added_at, last_used_at, times_used, total_qualified, status in rows
+    ]
+
+
+def add_keyword_pool_entry(payload):
+    """ダッシュボードからのマニュアル追加。既存キーワードは無視(重複追加しない)。"""
+    keyword = str(payload.get('keyword') or '').strip()
+    if not keyword:
+        raise ValueError('keyword is required')
+
+    now = datetime.now(timezone.utc).isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute(
+            '''
+            INSERT OR IGNORE INTO keyword_pool
+                (keyword, source, seed_keyword, added_at, times_used, total_qualified, status)
+            VALUES (?, 'manual', NULL, ?, 0, 0, 'active')
+            ''',
+            (keyword, now),
+        )
+    return {'ok': True, 'added': cursor.rowcount > 0, 'keyword': keyword}
+
+
+def delete_keyword_pool_entry(keyword):
+    keyword = str(keyword or '').strip()
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute('DELETE FROM keyword_pool WHERE keyword = ?', (keyword,))
+    return {'ok': True, 'deleted': cursor.rowcount > 0, 'keyword': keyword}
+
+
 def delete_favorite(asin):
     asin = str(asin or '').strip().upper()
     with sqlite3.connect(DB_PATH) as conn:
@@ -1106,6 +1177,10 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
+        if parsed.path == '/api/keyword-pool':
+            self._send_json(200, {'ok': True, 'keywords': load_keyword_pool()})
+            return
+
         if parsed.path == '/api/keepa/finder-run':
             run_id = (params.get('runId') or [''])[0]
             try:
@@ -1125,6 +1200,18 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 payload = json.loads(raw.decode('utf-8')) if raw else {}
                 self._send_json(200, save_favorite(payload))
+            except ValueError as exc:
+                self._send_json(400, {'error': str(exc)})
+            except Exception as exc:
+                self._send_json(500, {'error': str(exc)})
+            return
+
+        if self.path == '/api/keyword-pool':
+            length = int(self.headers.get('Content-Length', '0'))
+            raw = self.rfile.read(length)
+            try:
+                payload = json.loads(raw.decode('utf-8')) if raw else {}
+                self._send_json(200, add_keyword_pool_entry(payload))
             except ValueError as exc:
                 self._send_json(400, {'error': str(exc)})
             except Exception as exc:
@@ -1177,6 +1264,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         parsed = urlparse(self.path)
+
+        if parsed.path == '/api/keyword-pool':
+            keyword = (parse_qs(parsed.query).get('keyword') or [''])[0]
+            self._send_json(200, delete_keyword_pool_entry(keyword))
+            return
+
         if parsed.path != '/api/favorites':
             self._send_json(404, {'error': 'Not found'})
             return
