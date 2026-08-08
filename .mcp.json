@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "keepa": {
+      "command": "/Users/masaki/local/github/amazon-fba/.venv/bin/python",
+      "args": ["-m", "keepa_mcp.server"],
+      "cwd": "/Users/masaki/local/github/amazon-fba",
+      "env": {
+        "PYTHONPATH": "/Users/masaki/local/github/amazon-fba"
+      }
+    }
+  }
+}

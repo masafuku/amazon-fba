@@ -55,6 +55,12 @@ npm run dev
 
 SQLite APIを使う場合は、別ターミナルで `python3 sqlite_api_server.py` を実行します。
 
+## Keepa MCPサーバー（せどり候補検索）
+
+Claude Code / Claude Desktop から Keepa API を使って「日本仕入れ→北米販売」の候補商品を
+検索できる MCP サーバーです。詳細は [`keepa_mcp/README.md`](keepa_mcp/README.md) を参照してください。
+このリポジトリを Claude Code で開くと `.mcp.json` 経由で自動的に利用可能になります。
+
 ## 注意
 - US Amazon のスクレイピングは難しいため、Keepa API を使って US 側のデータを取得します。
 - 日本 Amazon の価格取得はスクレイピングで実装しています。IP ブロックや HTML 変更に注意してください。
