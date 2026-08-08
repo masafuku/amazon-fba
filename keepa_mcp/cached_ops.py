@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import cache
 from .config import settings
-from .keepa_client import find_products, get_categories, get_products, lookup_by_code, search_categories
+from .keepa_client import find_products, get_categories, get_products, get_sellers, lookup_by_code, search_categories
 
 CacheInfo = Dict[str, Any]
 
@@ -77,6 +77,38 @@ def cached_get_categories(
             result[cat_id] = cat
             if settings.cache_enabled:
                 cache.set("category_lookup", f"{domain.upper()}:{cat_id}", cat)
+
+    cache_info = _hit_info(0) if (any_hit and not to_fetch) else _miss_info()
+    return result, cache_info
+
+
+def cached_get_sellers(
+    api_key: str, seller_ids: List[str], domain: str = "US", storefront: bool = True, force_refresh: bool = False
+) -> Tuple[Dict[str, Dict[str, Any]], CacheInfo]:
+    """Per-seller-id cache, mirrors cached_get_categories. storefront=True
+    (default) includes each seller's listed ASINs (see keepa_client.get_sellers)."""
+    ttl = _ttl(settings.cache_ttl_seller_hours)
+    result: Dict[str, Dict[str, Any]] = {}
+    to_fetch: List[str] = []
+    any_hit = False
+
+    for seller_id in seller_ids:
+        key = f"{domain.upper()}:{seller_id}:storefront={int(storefront)}"
+        if settings.cache_enabled and not force_refresh:
+            hit = cache.get("seller", key, ttl)
+            if hit is not None:
+                value, _age = hit
+                result[seller_id] = value
+                any_hit = True
+                continue
+        to_fetch.append(seller_id)
+
+    if to_fetch:
+        fetched = get_sellers(api_key, to_fetch, domain=domain, storefront=storefront)
+        for seller_id, info in fetched.items():
+            result[seller_id] = info
+            if settings.cache_enabled:
+                cache.set("seller", f"{domain.upper()}:{seller_id}:storefront={int(storefront)}", info)
 
     cache_info = _hit_info(0) if (any_hit and not to_fetch) else _miss_info()
     return result, cache_info
@@ -167,6 +199,31 @@ def cached_get_products(
     # Preserve the caller's requested order; drop ASINs Keepa didn't return.
     ordered = [products[asin] for asin in asins if asin in products]
     return ordered, cache_meta
+
+
+def cached_get_product_with_buybox(
+    api_key: str, asin: str, domain: str, force_refresh: bool = False
+) -> Tuple[Optional[Dict[str, Any]], CacheInfo]:
+    """Single-ASIN fetch with buybox=1 (5 tokens - see keepa_client.get_products'
+    docstring), cached separately from the plain product cache (kind=
+    'product_buybox') since it's a different, more expensive fetch we don't
+    want to accidentally treat as interchangeable with the cheap one. Used
+    only for seller discovery (server.py's find_seller_for_candidate)."""
+    key = f"{domain.upper()}:{asin}"
+    ttl = _ttl(settings.cache_ttl_product_hours)
+    if settings.cache_enabled and not force_refresh:
+        hit = cache.get("product_buybox", key, ttl)
+        if hit is not None:
+            value, age = hit
+            return value, _hit_info(age)
+
+    products = get_products(api_key, domain=domain, asins=[asin], stats_days=90, include_buybox=True)
+    if not products:
+        return None, _miss_info()
+    product = products[0]
+    if settings.cache_enabled:
+        cache.set("product_buybox", key, product)
+    return product, _miss_info()
 
 
 def is_product_cached(asin: str, domain: str) -> bool:

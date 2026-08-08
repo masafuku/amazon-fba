@@ -15,6 +15,11 @@ daily_scan.py — 毎朝1回実行するだけで完結するスクリプト。
      がまとめて1通ずつ通知する(スケジュール設定は send_daily_digest.py の
      docstring参照)。
   5. プールから選んだキーワードだった場合、使用実績(times_used等)を記録
+  6. セラーマイニング(CEOのアイデア): 合格候補が出た場合、実質利益率が
+     最も高い1件についてそのセラーを特定し(5トークン)、セラーの他の
+     出品も同じパイプラインで評価する(keepa_mcp.server.expand_from_seller)。
+     「よく売れている日本のものを売っているセラーは、他にも同じような
+     ものを売っていることが多い」という考え方に基づく。
 
   Keepaのトークンは低レート帯のプランだと1分に1トークン程度しか回復しない。
   デフォルトでは wait_for_tokens=True で実行するため、予算が足りない場面では
@@ -59,7 +64,13 @@ import time
 from datetime import datetime, timezone
 
 from keepa_mcp.keepa_client import KeepaError
-from keepa_mcp.server import expand_keyword, find_arbitrage_candidates, search_category
+from keepa_mcp.server import (
+    expand_from_seller,
+    expand_keyword,
+    find_arbitrage_candidates,
+    find_seller_for_candidate,
+    search_category,
+)
 from ops_finance import (
     add_keywords,
     evaluate_mcp_candidates,
@@ -107,6 +118,62 @@ def resolve_category_id(category_name: str) -> int | None:
         return None
     # 最初の一致を採用(必要ならここでスコアリングに変更)
     return matches[0]["category_id"]
+
+
+# セラーマイニングで追加評価する出品数の上限(通常検索の12より控えめに
+# して、1回あたりのトークン消費を予測可能な範囲に収める)。
+SELLER_EXPANSION_MAX_CANDIDATES = 10
+
+
+def expand_from_top_seller(top_qualified: dict, source_label: str, wait_for_tokens: bool) -> None:
+    """合格候補のうち実質利益率が最も高い1件について、そのセラーの他の
+    出品も同じパイプラインで評価する(セラーマイニング)。失敗しても
+    メインのスキャン結果には影響させない(例外を握りつぶしてログのみ)。
+    """
+    asin = top_qualified["asin"]
+    print(f"[INFO] セラーマイニング: 合格候補 {asin} のセラーを調べています(5トークン)...")
+    try:
+        seller_lookup = find_seller_for_candidate(asin=asin)
+    except KeepaError as exc:
+        print(f"[WARN] セラー特定に失敗しました: {exc}")
+        return
+
+    if not seller_lookup.get("found"):
+        print(f"[INFO] {asin} の出品セラーを特定できませんでした({seller_lookup.get('note') or seller_lookup.get('error')})。")
+        return
+
+    seller_id = seller_lookup["seller_id"]
+    print(f"[INFO] セラー特定: {seller_id}。出品一覧を取得して評価します(最大{SELLER_EXPANSION_MAX_CANDIDATES}件)...")
+
+    try:
+        seller_result = expand_from_seller(
+            seller_id=seller_id, max_candidates=SELLER_EXPANSION_MAX_CANDIDATES,
+            price_diff_min=0.30, price_volatility_max=None, wait_for_tokens=wait_for_tokens,
+        )
+    except KeepaError as exc:
+        print(f"[WARN] セラー出品の評価に失敗しました: {exc}")
+        return
+
+    if seller_result.get("error"):
+        print(f"[WARN] セラー出品の評価に失敗しました: {seller_result['error']}")
+        return
+
+    seller_name = seller_result.get("seller_name") or seller_id
+    seller_evaluation = evaluate_mcp_candidates(seller_result)
+    print(f"[INFO] セラー「{seller_name}」の出品: {seller_result.get('evaluated', 0)}件評価 / "
+          f"実質利益率20%以上: {len(seller_evaluation['qualified'])}件")
+
+    if seller_evaluation["qualified"] or seller_evaluation["rejected"]:
+        seller_run_id = new_agent_run_id()
+        persist_agent_run(f"{source_label} (セラー: {seller_name})", seller_evaluation, run_id=seller_run_id)
+        log_agent_run(
+            seller_run_id, datetime.now(timezone.utc).isoformat(), 0,
+            keyword=f"[seller] {seller_name}", category=source_label,
+            max_candidates=SELLER_EXPANSION_MAX_CANDIDATES, wait_for_tokens=wait_for_tokens,
+            mcp_result=seller_result, evaluation=seller_evaluation,
+            notify_status="deferred_to_digest",
+        )
+        print(f"[INFO] セラー出品の評価結果も「エージェント」ページに保存しました (run_id={seller_run_id})。")
 
 
 def run_daily_scan(
@@ -209,6 +276,14 @@ def run_daily_scan(
         mcp_result=mcp_result, evaluation=evaluation,
         notify_status="deferred_to_digest", notify_error=None,
     )
+
+    # Keyword/Categoryエージェント: セラーマイニング。CEOのアイデア -
+    # 「よく売れている日本のものを売っているセラーは、他にも同じような
+    # ものを売っていることが多い」。合格候補が出た回だけ(トークンを
+    # 抑えるため、実質利益率が最も高い1件のみ)、そのセラーを特定して
+    # (5トークン)、出品の残りも同じパイプラインで評価する。
+    if evaluation["qualified"]:
+        expand_from_top_seller(evaluation["qualified"][0], label, wait_for_tokens)
 
 
 def cmd_seed_from_favorites() -> None:

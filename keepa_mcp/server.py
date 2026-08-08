@@ -25,7 +25,9 @@ from . import analysis, cache
 from .cached_ops import (
     cached_find_products,
     cached_get_categories,
+    cached_get_product_with_buybox,
     cached_get_products,
+    cached_get_sellers,
     cached_lookup_by_code,
     cached_search_categories,
     is_product_cached,
@@ -35,6 +37,7 @@ from .keepa_client import (
     KeepaError,
     estimate_finder_cost,
     estimate_product_request_cost,
+    estimate_seller_lookup_cost,
     get_token_status,
 )
 
@@ -346,6 +349,135 @@ def find_jp_price(code: str, force_refresh: bool = False) -> Dict[str, Any]:
     return summary
 
 
+def _fetch_sell_products(
+    api_key: str,
+    asins: List[str],
+    sell_domain: str,
+    wait_for_tokens: bool,
+    force_refresh: bool,
+    budget: int,
+):
+    """Fetch full product details for `asins` (chunked + budget-checked in
+    wait mode - see find_arbitrage_candidates' docstring). Shared by
+    find_arbitrage_candidates() and expand_from_seller() since both end up
+    evaluating a flat ASIN list the same way, just sourced differently
+    (Product Finder vs. a seller's storefront). Returns
+    (sell_products, sell_cache_meta, budget); raises KeepaError on failure.
+    """
+    api_key_local = api_key  # readability only
+    sell_products: List[Dict[str, Any]] = []
+    sell_cache_meta: Dict[str, Dict[str, Any]] = {}
+    if wait_for_tokens:
+        for i in range(0, len(asins), _WAIT_MODE_BATCH_SIZE):
+            chunk = asins[i:i + _WAIT_MODE_BATCH_SIZE]
+            to_fetch_estimate = sum(1 for a in chunk if force_refresh or not is_product_cached(a, sell_domain))
+            if to_fetch_estimate:
+                budget = _wait_for_budget(api_key_local, to_fetch_estimate, 0)
+            chunk_products, chunk_meta = cached_get_products(
+                api_key_local, domain=sell_domain, asins=chunk, stats_days=90, force_refresh=force_refresh
+            )
+            budget -= sum(1 for info in chunk_meta.values() if not info["hit"])
+            sell_products.extend(chunk_products)
+            sell_cache_meta.update(chunk_meta)
+    else:
+        sell_products, sell_cache_meta = cached_get_products(
+            api_key_local, domain=sell_domain, asins=asins, stats_days=90, force_refresh=force_refresh
+        )
+        budget -= sum(1 for info in sell_cache_meta.values() if not info["hit"])
+    return sell_products, sell_cache_meta, budget
+
+
+def _evaluate_sell_products(
+    api_key: str,
+    sell_products: List[Dict[str, Any]],
+    sell_cache_meta: Dict[str, Dict[str, Any]],
+    sell_domain: str,
+    price_diff_min: float,
+    price_volatility_max: Optional[float],
+    rate: float,
+    wait_for_tokens: bool,
+    force_refresh: bool,
+    budget: int,
+):
+    """Per-ASIN evaluation: price/volatility gate -> JP cross-domain lookup ->
+    price-gap filter. Shared by find_arbitrage_candidates() and
+    expand_from_seller(). Returns (results, skipped, stopped_early, budget)."""
+    results: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+    stopped_early = False
+    for product in sell_products:
+        asin = product.get("asin")
+        sell_summary = _summarize_product(product, sell_domain, sell_cache_meta.get(asin))
+
+        if sell_summary["price"] is None:
+            skipped.append({**sell_summary, "reason": "no current price"})
+            continue
+        volatility = sell_summary["price_volatility_90d"]
+        if price_volatility_max is not None and volatility is not None and volatility > price_volatility_max:
+            skipped.append({**sell_summary, "reason": f"price volatility {volatility:.2%} exceeds limit"})
+            continue
+
+        # ASIN-based cross-domain match: assumes the same ASIN is used on
+        # both marketplaces. Note this does NOT hold in general - ASINs are
+        # assigned per-marketplace, so many genuinely-dual-market products
+        # (especially non-brand-registered ones) use a different ASIN in
+        # each catalog and will not be found this way. When Keepa has no
+        # such ASIN in the JP catalog it still returns a near-empty stub
+        # (no price/stats), which the price check below skips.
+        needs_live_call = force_refresh or not is_product_cached(asin, "JP")
+        if needs_live_call and wait_for_tokens:
+            # Force a real-balance check every time (current_budget=0) rather
+            # than trusting the locally tracked estimate - see note above.
+            budget = _wait_for_budget(api_key, estimate_product_request_cost(1), 0)
+        elif needs_live_call and budget < estimate_product_request_cost(1):
+            skipped.append({**sell_summary, "reason": "stopped early: Keepa token budget ran out"})
+            stopped_early = True
+            continue
+
+        try:
+            jp_matches, jp_cache_meta = cached_get_products(api_key, domain="JP", asins=[asin], stats_days=90, force_refresh=force_refresh)
+        except KeepaError as exc:
+            skipped.append({**sell_summary, "reason": f"JP lookup failed (token budget likely exhausted): {exc}"})
+            stopped_early = True
+            continue
+        jp_cache_info = jp_cache_meta.get(asin, {"hit": False})
+        if not jp_cache_info["hit"]:
+            budget -= estimate_product_request_cost(1)
+
+        if not jp_matches:
+            skipped.append({**sell_summary, "reason": "ASIN not found in Amazon Japan catalog"})
+            continue
+
+        jp_summary = _summarize_product(jp_matches[0], "JP", jp_cache_info)
+        if jp_summary["price"] is None:
+            skipped.append({**sell_summary, "reason": "no current price for this ASIN on Amazon Japan (may not exist in the JP catalog)"})
+            continue
+
+        diff_rate = analysis.price_diff_rate(
+            sell_summary["price"], sell_domain, jp_summary["price"], "JP", rate
+        )
+        if diff_rate is None or diff_rate < price_diff_min:
+            skipped.append({
+                **sell_summary,
+                "jp_price": jp_summary["price"],
+                "jp_asin": jp_summary.get("asin"),
+                "jp_url": jp_summary.get("url"),
+                "reason": f"price diff rate {diff_rate:.2%} below {price_diff_min:.0%}" if diff_rate is not None else "could not compute price diff rate",
+            })
+            continue
+
+        results.append({
+            "sell": sell_summary,
+            "cost": jp_summary,
+            "price_diff_rate": diff_rate,
+            "price_volatility_90d": volatility,
+            "usd_to_jpy_used": rate if sell_domain.upper() == "US" else None,
+        })
+
+    results.sort(key=lambda r: r["price_diff_rate"], reverse=True)
+    return results, skipped, stopped_early, budget
+
+
 @mcp.tool()
 def find_arbitrage_candidates(
     keyword: str,
@@ -471,119 +603,155 @@ def find_arbitrage_candidates(
     if not asins:
         return {"candidates": [], "evaluated": 0, "note": "Product Finder returned no ASINs for these filters."}
 
-    sell_products: List[Dict[str, Any]] = []
-    sell_cache_meta: Dict[str, Dict[str, Any]] = {}
-    if wait_for_tokens:
-        # The token bucket has a hard cap (plan refill-rate x 60 minutes), so
-        # a single huge batched request can need more tokens than the bucket
-        # can ever hold. Fetch in small chunks instead, waiting for budget
-        # before each one - this also means work starts on whatever's
-        # already cached/affordable rather than blocking on the whole batch.
-        for i in range(0, len(asins), _WAIT_MODE_BATCH_SIZE):
-            chunk = asins[i:i + _WAIT_MODE_BATCH_SIZE]
-            to_fetch_estimate = sum(1 for a in chunk if force_refresh or not is_product_cached(a, sell_domain))
-            if to_fetch_estimate:
-                budget = _wait_for_budget(api_key, to_fetch_estimate, 0)  # force real check, see note above
-            try:
-                chunk_products, chunk_meta = cached_get_products(
-                    api_key, domain=sell_domain, asins=chunk, stats_days=90, force_refresh=force_refresh
-                )
-            except KeepaError as exc:
-                return {
-                    "candidates": [], "evaluated": 0,
-                    "error": f"Product detail fetch failed: {exc}",
-                    "note": budget_note,
-                }
-            budget -= sum(1 for info in chunk_meta.values() if not info["hit"])
-            sell_products.extend(chunk_products)
-            sell_cache_meta.update(chunk_meta)
-    else:
-        try:
-            sell_products, sell_cache_meta = cached_get_products(
-                api_key, domain=sell_domain, asins=asins, stats_days=90, force_refresh=force_refresh
-            )
-        except KeepaError as exc:
-            return {
-                "candidates": [], "evaluated": 0,
-                "error": f"Product detail fetch failed (likely token budget ran out after the Finder call): {exc}",
-                "note": budget_note,
-            }
-        budget -= sum(1 for info in sell_cache_meta.values() if not info["hit"])
-
-    results = []
-    skipped = []
-    stopped_early = False
-    for product in sell_products:
-        asin = product.get("asin")
-        sell_summary = _summarize_product(product, sell_domain, sell_cache_meta.get(asin))
-
-        if sell_summary["price"] is None:
-            skipped.append({**sell_summary, "reason": "no current price"})
-            continue
-        volatility = sell_summary["price_volatility_90d"]
-        if price_volatility_max is not None and volatility is not None and volatility > price_volatility_max:
-            skipped.append({**sell_summary, "reason": f"price volatility {volatility:.2%} exceeds limit"})
-            continue
-
-        # ASIN-based cross-domain match: assumes the same ASIN is used on
-        # both marketplaces. Note this does NOT hold in general - ASINs are
-        # assigned per-marketplace, so many genuinely-dual-market products
-        # (especially non-brand-registered ones) use a different ASIN in
-        # each catalog and will not be found this way. When Keepa has no
-        # such ASIN in the JP catalog it still returns a near-empty stub
-        # (no price/stats), which the price check below skips.
-        needs_live_call = force_refresh or not is_product_cached(asin, "JP")
-        if needs_live_call and wait_for_tokens:
-            # Force a real-balance check every time (current_budget=0) rather
-            # than trusting the locally tracked estimate - see note above.
-            budget = _wait_for_budget(api_key, estimate_product_request_cost(1), 0)
-        elif needs_live_call and budget < estimate_product_request_cost(1):
-            skipped.append({**sell_summary, "reason": "stopped early: Keepa token budget ran out"})
-            stopped_early = True
-            continue
-
-        try:
-            jp_matches, jp_cache_meta = cached_get_products(api_key, domain="JP", asins=[asin], stats_days=90, force_refresh=force_refresh)
-        except KeepaError as exc:
-            skipped.append({**sell_summary, "reason": f"JP lookup failed (token budget likely exhausted): {exc}"})
-            stopped_early = True
-            continue
-        jp_cache_info = jp_cache_meta.get(asin, {"hit": False})
-        if not jp_cache_info["hit"]:
-            budget -= estimate_product_request_cost(1)
-
-        if not jp_matches:
-            skipped.append({**sell_summary, "reason": "ASIN not found in Amazon Japan catalog"})
-            continue
-
-        jp_summary = _summarize_product(jp_matches[0], "JP", jp_cache_info)
-        if jp_summary["price"] is None:
-            skipped.append({**sell_summary, "reason": "no current price for this ASIN on Amazon Japan (may not exist in the JP catalog)"})
-            continue
-
-        diff_rate = analysis.price_diff_rate(
-            sell_summary["price"], sell_domain, jp_summary["price"], "JP", rate
+    try:
+        sell_products, sell_cache_meta, budget = _fetch_sell_products(
+            api_key, asins, sell_domain, wait_for_tokens, force_refresh, budget
         )
-        if diff_rate is None or diff_rate < price_diff_min:
-            skipped.append({
-                **sell_summary,
-                "jp_price": jp_summary["price"],
-                "jp_asin": jp_summary.get("asin"),
-                "jp_url": jp_summary.get("url"),
-                "reason": f"price diff rate {diff_rate:.2%} below {price_diff_min:.0%}" if diff_rate is not None else "could not compute price diff rate",
-            })
-            continue
+    except KeepaError as exc:
+        return {
+            "candidates": [], "evaluated": 0,
+            "error": f"Product detail fetch failed (likely token budget ran out after the Finder call): {exc}",
+            "note": budget_note,
+        }
 
-        results.append({
-            "sell": sell_summary,
-            "cost": jp_summary,
-            "price_diff_rate": diff_rate,
-            "price_volatility_90d": volatility,
-            "usd_to_jpy_used": rate if sell_domain.upper() == "US" else None,
-        })
-
-    results.sort(key=lambda r: r["price_diff_rate"], reverse=True)
+    results, skipped, stopped_early, budget = _evaluate_sell_products(
+        api_key, sell_products, sell_cache_meta, sell_domain, price_diff_min, price_volatility_max,
+        rate, wait_for_tokens, force_refresh, budget,
+    )
     return {
+        "candidates": results,
+        "evaluated": len(sell_products),
+        "matched": len(results),
+        "skipped": skipped,
+        "stopped_early_for_tokens": stopped_early,
+        "note": budget_note,
+    }
+
+
+@mcp.tool()
+def find_seller_for_candidate(asin: str, domain: str = "US", force_refresh: bool = False) -> Dict[str, Any]:
+    """Find who currently holds the buy box for an ASIN, so you can pull the
+    rest of their catalog with expand_from_seller() ("seller mining": a
+    seller who already lists one profitable Japan-import item often lists
+    several - CEO's idea).
+
+    Costs 5 tokens (not the usual 1) - this is the one place in the pipeline
+    that deliberately fetches with buybox=1 to read buyBoxSellerIdHistory
+    (see keepa_client.get_products()'s docstring for why that's normally
+    avoided). Only call this on candidates you've already decided are worth
+    digging into further (e.g. ones find_arbitrage_candidates qualified) -
+    not on every search result.
+    """
+    api_key = _require_api_key()
+    product, cache_info = cached_get_product_with_buybox(api_key, asin, domain=domain, force_refresh=force_refresh)
+    if product is None:
+        return {"asin": asin, "found": False, "error": f"No product found for ASIN {asin} in domain {domain}."}
+    seller_id = analysis.current_buy_box_seller_id(product)
+    if not seller_id:
+        return {
+            "asin": asin, "found": False,
+            "note": "No qualifying buy box seller on file (out of stock, or won by a brand-new/unknown seller).",
+            "_cache": cache_info,
+        }
+    return {"asin": asin, "found": True, "seller_id": seller_id, "domain": domain.upper(), "_cache": cache_info}
+
+
+@mcp.tool()
+def expand_from_seller(
+    seller_id: str,
+    domain: str = "US",
+    max_candidates: int = 30,
+    price_diff_min: float = 0.4,
+    price_volatility_max: Optional[float] = None,
+    sell_domain: str = "US",
+    usd_to_jpy: Optional[float] = None,
+    force_refresh: bool = False,
+    wait_for_tokens: bool = False,
+) -> Dict[str, Any]:
+    """Seller-mining: given a seller id (see find_seller_for_candidate), pull
+    their storefront ASIN list (1 token, up to 100,000 ASINs on file - Keepa
+    doesn't charge extra for the storefront data) and run every one of them
+    through the same US-price -> JP cross-check -> price-gap pipeline as
+    find_arbitrage_candidates() - just skipping the keyword Finder step,
+    since the ASINs already come from a seller known to be worth digging
+    into (e.g. one who already sells a qualified Japan-import candidate).
+
+    Cost: ~1 (seller lookup, free on cache hit) + up to 2*max_candidates
+    (US + JP product detail, same as find_arbitrage_candidates).
+
+    Args: see find_arbitrage_candidates() for price_diff_min/
+    price_volatility_max/sell_domain/usd_to_jpy/force_refresh/
+    wait_for_tokens - identical semantics. There's no keyword/category/rank/
+    review filtering here since there's no Finder call; every ASIN the
+    seller lists gets evaluated, up to max_candidates (Keepa's asinList is
+    "sorted by freshest first", so the first max_candidates are their most
+    recently-verified listings).
+    """
+    api_key = _require_api_key()
+    rate = usd_to_jpy if usd_to_jpy is not None else settings.usd_to_jpy
+
+    status = get_token_status(api_key)
+    tokens_left = status["tokens_left"] or 0
+    worst_case_cost = estimate_seller_lookup_cost(1) + 2 * estimate_product_request_cost(max_candidates)
+    budget_note = None
+    if tokens_left < worst_case_cost:
+        if wait_for_tokens:
+            budget_note = (
+                f"Only {tokens_left} tokens available (worst case needs ~{worst_case_cost} if nothing is "
+                "cached); wait_for_tokens=True, so this run will pause and wait for the token bucket to "
+                "refill as needed rather than stopping early."
+            )
+        else:
+            budget_note = (
+                f"Only {tokens_left} tokens available (worst case needs ~{worst_case_cost} if nothing is "
+                "cached); will use cached data where possible and stop early if live calls run out. "
+                f"Estimated wait for full budget: {_wait_estimate(worst_case_cost - tokens_left, status['refill_rate_per_minute'])}. "
+                "Pass wait_for_tokens=True to wait it out instead of stopping early."
+            )
+    budget = tokens_left
+
+    if wait_for_tokens:
+        budget = _wait_for_budget(api_key, estimate_seller_lookup_cost(1), 0)
+
+    try:
+        sellers, seller_cache_info = cached_get_sellers(
+            api_key, [seller_id], domain=domain, storefront=True, force_refresh=force_refresh
+        )
+    except KeepaError as exc:
+        return {"candidates": [], "evaluated": 0, "error": f"Seller lookup failed: {exc}", "note": budget_note}
+    if not seller_cache_info["hit"]:
+        budget -= estimate_seller_lookup_cost(1)
+
+    seller_info = sellers.get(seller_id)
+    if not seller_info:
+        return {"candidates": [], "evaluated": 0, "error": f"No seller found for id {seller_id!r} in domain {domain}.", "note": budget_note}
+
+    asins = (seller_info.get("asinList") or [])[:max_candidates]
+    if not asins:
+        return {
+            "candidates": [], "evaluated": 0,
+            "seller_id": seller_id, "seller_name": seller_info.get("sellerName"),
+            "note": "Seller has no storefront ASINs on file.",
+        }
+
+    try:
+        sell_products, sell_cache_meta, budget = _fetch_sell_products(
+            api_key, asins, sell_domain, wait_for_tokens, force_refresh, budget
+        )
+    except KeepaError as exc:
+        return {
+            "candidates": [], "evaluated": 0,
+            "error": f"Product detail fetch failed (likely token budget ran out after the seller lookup): {exc}",
+            "note": budget_note,
+        }
+
+    results, skipped, stopped_early, budget = _evaluate_sell_products(
+        api_key, sell_products, sell_cache_meta, sell_domain, price_diff_min, price_volatility_max,
+        rate, wait_for_tokens, force_refresh, budget,
+    )
+    return {
+        "seller_id": seller_id,
+        "seller_name": seller_info.get("sellerName"),
         "candidates": results,
         "evaluated": len(sell_products),
         "matched": len(results),

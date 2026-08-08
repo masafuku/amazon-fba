@@ -71,6 +71,30 @@ def monthly_sold(product: Dict[str, Any]) -> Optional[int]:
     return int(val) if isinstance(val, (int, float)) and val >= 0 else None
 
 
+# Keepa uses these sentinel seller ids in buyBoxSellerIdHistory to mean
+# "no seller qualified for the buy box" (-1) / "a brand-new, unknown seller"
+# (-2) - neither is a real, queryable seller id.
+_NO_SELLER_SENTINELS = ("-1", "-2")
+
+
+def current_buy_box_seller_id(product: Dict[str, Any]) -> Optional[str]:
+    """Most recent real seller id from buyBoxSellerIdHistory (flat array:
+    [keepaMinutes, sellerId, keepaMinutes, sellerId, ...], most recent last).
+    Only present when the product was fetched with buybox=1 (see
+    keepa_client.get_products(include_buybox=True)) - this is the expensive
+    (5 tokens/product) call, so only do this for candidates worth the cost
+    (e.g. already-qualified ones, for seller-based expansion)."""
+    history = product.get("buyBoxSellerIdHistory")
+    if not history or not isinstance(history, list):
+        return None
+    # 末尾から遡って、-1/-2でない実在のsellerIdを探す(直近の有効な入札者)。
+    for i in range(len(history) - 1, 0, -2):
+        seller_id = history[i]
+        if seller_id and seller_id not in _NO_SELLER_SENTINELS:
+            return seller_id
+    return None
+
+
 def price_volatility_ratio(product: Dict[str, Any], domain: str) -> Optional[float]:
     """(max - min) / avg over the interval the product was fetched with
     (call get_products(..., stats_days=90) so this reflects the last 90 days).

@@ -152,6 +152,18 @@ def estimate_product_request_cost(count: int) -> int:
     return max(0, count)
 
 
+def estimate_buybox_product_request_cost(count: int) -> int:
+    """Product Request with buybox=1: 5 tokens per product instead of 1 -
+    only used narrowly for seller discovery (see get_products(include_buybox=True))."""
+    return max(0, count) * 5
+
+
+def estimate_seller_lookup_cost(count: int) -> int:
+    """Seller Information (/seller): 1 token per seller id (storefront=True
+    doesn't add cost - Keepa docs say it triggers no new data collection)."""
+    return max(0, count)
+
+
 def search_categories(api_key: str, term: str, domain: str = "US") -> List[Dict[str, Any]]:
     """Find category ids/names matching a search term (category names are in the
     target marketplace's language, e.g. English for US, Japanese for JP)."""
@@ -276,6 +288,7 @@ def get_products(
     codes: Optional[List[str]] = None,
     stats_days: int = 90,
     history: bool = False,
+    include_buybox: bool = False,
 ) -> List[Dict[str, Any]]:
     """Fetch full product data (price stats, identifiers, rank, reviews).
 
@@ -283,15 +296,24 @@ def get_products(
     400 invalidParameter error (verified empirically); leaving it out avoids
     fetching/paying for live marketplace offers we don't use.
 
-    Note: `buybox` is also intentionally omitted - it costs 5 tokens per
-    product instead of 1 (verified empirically: a 20-ASIN batch drained the
-    token bucket by ~100 tokens instead of the expected ~20, confirmed via
-    Keepa API discussion/GitHub sources - see estimate_product_request_cost()).
-    It isn't needed here: analysis.current_price()/price_volatility_ratio()
-    already read CsvType.BUY_BOX_SHIPPING (csv/stats type 18) straight from
-    the `stats`/`history` data and fall back to NEW/AMAZON when it's
-    unavailable - the same approach keepa-csv-dashboard/sqlite_api_server.py
-    already uses successfully without ever passing buybox=1.
+    Note: `buybox` is also omitted by default - it costs 5 tokens per product
+    instead of 1 (verified empirically: a 20-ASIN batch drained the token
+    bucket by ~100 tokens instead of the expected ~20, confirmed via Keepa API
+    discussion/GitHub sources - see estimate_product_request_cost()). It isn't
+    needed for ordinary price lookups: analysis.current_price()/
+    price_volatility_ratio() already read CsvType.BUY_BOX_SHIPPING (csv/stats
+    type 18) straight from the `stats`/`history` data and fall back to
+    NEW/AMAZON when it's unavailable - the same approach
+    keepa-csv-dashboard/sqlite_api_server.py already uses successfully
+    without ever passing buybox=1.
+
+    Pass include_buybox=True only when you specifically need
+    buyBoxSellerIdHistory (see analysis.current_buy_box_seller_id) - e.g. to
+    find out who's selling an already-qualified candidate, for seller-based
+    expansion (see server.py's expand_from_seller). This is the one place in
+    the pipeline that intentionally pays the 5x cost, and CEO-approved
+    specifically for that narrow use (only on already-qualified candidates,
+    not on every candidate evaluated).
     """
     if not asins and not codes:
         return []
@@ -302,6 +324,8 @@ def get_products(
         "history": 1 if history else 0,
         "rating": 1,
     }
+    if include_buybox:
+        params["buybox"] = 1
     if asins:
         params["asin"] = ",".join(asins)
     if codes:
@@ -317,3 +341,30 @@ def get_products(
 def lookup_by_code(api_key: str, code: str, domain: str) -> List[Dict[str, Any]]:
     """Cross-domain lookup: find product(s) in `domain` sharing this UPC/EAN/ISBN."""
     return get_products(api_key, domain=domain, codes=[code], stats_days=90, history=False)
+
+
+def get_sellers(
+    api_key: str, seller_ids: List[str], domain: str = "US", storefront: bool = False
+) -> Dict[str, Dict[str, Any]]:
+    """Seller Information (/seller): 1 token per seller id, batched up to 100
+    per call. Passing storefront=True additionally returns each seller's
+    listed ASINs (field `asinList`, up to 100,000) at no extra token cost
+    (Keepa docs: the storefront flag doesn't trigger new data collection,
+    just includes what Keepa already has on file) - this is what powers
+    "seller mining": find who's selling an already-qualified candidate, then
+    pull the rest of their catalog as new candidates (see server.py's
+    expand_from_seller).
+    """
+    if not seller_ids:
+        return {}
+    ids = seller_ids[:100]
+    params = {
+        "key": api_key,
+        "domain": resolve_domain(domain),
+        "seller": ",".join(ids),
+    }
+    if storefront:
+        params["storefront"] = 1
+    data = _request("/seller", params)
+    sellers = data.get("sellers") or {}
+    return {seller_id: info for seller_id, info in sellers.items() if info}
