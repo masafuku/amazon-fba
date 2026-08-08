@@ -357,7 +357,7 @@ def find_arbitrage_candidates(
     sales_rank_max: Optional[int] = None,
     review_count_max: Optional[int] = None,
     price_diff_min: float = 0.4,
-    price_volatility_max: float = 0.2,
+    price_volatility_max: Optional[float] = None,
     max_candidates: int = 30,
     sell_domain: str = "US",
     usd_to_jpy: Optional[float] = None,
@@ -396,7 +396,12 @@ def find_arbitrage_candidates(
         sales_rank_max: Optional maximum current sales rank on the sell side.
         review_count_max: Optional maximum current review count on the sell side.
         price_diff_min: Minimum required (sell - cost) / cost, e.g. 0.4 = 40%.
-        price_volatility_max: Maximum allowed (max90-min90)/avg90 on the sell side, e.g. 0.2 = 20%.
+        price_volatility_max: Maximum allowed (max90-min90)/avg90 on the sell side,
+            e.g. 0.2 = 20%. None (default) disables this filter entirely - CEO's
+            call, since it was excluding every candidate outright for volatile
+            categories (e.g. character merchandise) before they even got a real
+            profit calc. price_volatility_90d is still computed and returned on
+            every candidate either way, just no longer used to exclude.
         max_candidates: Max sell-side ASINs to evaluate (bounds API token usage).
         sell_domain: Marketplace to sell on. Default "US".
         usd_to_jpy: Override the USD->JPY rate used for the price-gap calc
@@ -516,7 +521,7 @@ def find_arbitrage_candidates(
             skipped.append({**sell_summary, "reason": "no current price"})
             continue
         volatility = sell_summary["price_volatility_90d"]
-        if volatility is not None and volatility > price_volatility_max:
+        if price_volatility_max is not None and volatility is not None and volatility > price_volatility_max:
             skipped.append({**sell_summary, "reason": f"price volatility {volatility:.2%} exceeds limit"})
             continue
 

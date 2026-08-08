@@ -873,6 +873,34 @@ def add_keywords(keywords, source: str, seed_keyword: str = None) -> int:
         return cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
 
 
+# Amazon USのトップレベル部門名(ブラウズカテゴリ)。実際の商品タイトルに
+# 出てくる言葉ではないため、Keepaのtitleキーワード検索(find_products)に
+# 渡しても0件になる。「粗選別で除外」の理由には出てこず、Finderの結果自体が
+# 0件になるだけなので気づきにくい - 実際に "Clothing, Shoes & Jewelry" /
+# "Arts, Crafts & Sewing" で0件ヒットを確認済み。productCategoryから
+# キーワードを拾う際はここに含まれるものを除外する。
+_AMAZON_TOP_LEVEL_CATEGORIES = {
+    'clothing, shoes & jewelry', 'sports & outdoors', 'toys & games',
+    'arts, crafts & sewing', 'home & kitchen', 'electronics',
+    'beauty & personal care', 'health & household', 'grocery & gourmet food',
+    'pet supplies', 'office products', 'tools & home improvement',
+    'automotive', 'baby', 'books', 'movies & tv', 'cds & vinyl',
+    'video games', 'cell phones & accessories', 'industrial & scientific',
+    'patio, lawn & garden', 'appliances', 'musical instruments', 'software',
+    'collectibles & fine art', 'entertainment collectibles',
+    'sports collectibles', 'everything else', 'computers & accessories',
+    'camera & photo', 'garden & outdoor', 'kitchen & dining',
+    'luggage & travel gear', 'home improvement', 'clothing', 'shoes',
+    'jewelry', 'watches', 'handmade products',
+}
+
+
+def _is_searchable_keyword(candidate: str) -> bool:
+    """productCategoryから拾った文字列が、Keepaのtitleキーワード検索として
+    使えそうか(=Amazonの大分類名そのものではないか)を判定する。"""
+    return candidate.strip().lower() not in _AMAZON_TOP_LEVEL_CATEGORIES
+
+
 def seed_keyword_pool_from_favorites() -> dict:
     """お気に入り登録済みの商品からブランド名・カテゴリ名を抽出し、
     キーワードプールの種にする。CEOが実際に「良い」と判断した商品が
@@ -899,8 +927,9 @@ def seed_keyword_pool_from_favorites() -> dict:
                 seeds.add(str(candidate).strip())
 
         for candidate in (data.get('productCategory'), data.get('category'), us.get('productCategory')):
-            if candidate and str(candidate).strip() not in ('未分類', ''):
-                seeds.add(str(candidate).strip())
+            candidate = str(candidate).strip() if candidate else ''
+            if candidate and candidate != '未分類' and _is_searchable_keyword(candidate):
+                seeds.add(candidate)
 
     seeds_list = sorted(seeds)
     added = add_keywords(seeds_list, source='favorite')
@@ -942,6 +971,24 @@ def record_keyword_used(keyword: str, qualified_count: int = 0) -> None:
             ''',
             (now, qualified_count, keyword),
         )
+
+
+def set_keyword_status(keyword: str, status: str) -> bool:
+    """キーワードプール内の1件のstatusを変更する(active/paused)。
+    Amazonの大分類名など「検索語として機能しない」ことが分かったキーワードを
+    pick_next_keyword()の対象から外すのに使う(削除ではなくpausedにするので、
+    いつ・なぜ止めたかの履歴(times_used/total_qualified)は残る)。
+    戻り値: 対象行が見つかって更新できたか。
+    """
+    init_ops_tables()
+    if status not in ('active', 'paused'):
+        raise ValueError("status must be 'active' or 'paused'")
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute(
+            'UPDATE keyword_pool SET status = ? WHERE keyword = ?',
+            (status, keyword),
+        )
+    return cursor.rowcount > 0
 
 
 def list_keyword_pool() -> list:

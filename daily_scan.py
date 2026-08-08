@@ -92,7 +92,9 @@ DEFAULT_SEARCH_PARAMS = dict(
     # find_arbitrage_candidates() 側のデフォルト(ダッシュボードの手動Finderと
     # 同じ「Amazon自体は在庫なし・3000円/ドル以上」レシピ)をそのまま使う。
     price_diff_min=0.30,   # MCP側の粗いフィルタ(実質利益率はここでは見ていない)
-    price_volatility_max=0.20,
+    # 価格変動フィルタは無効化(CEOの指示: 除外基準にはせず、結果の列として
+    # 見えるだけにする)。price_volatility_90dは引き続き各候補に付与される。
+    price_volatility_max=None,
     max_candidates=30,
 )
 
