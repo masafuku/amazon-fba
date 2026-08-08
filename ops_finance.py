@@ -895,10 +895,36 @@ _AMAZON_TOP_LEVEL_CATEGORIES = {
 }
 
 
+def _contains_japanese(text: str) -> bool:
+    """ひらがな・カタカナ・漢字が含まれるか(Unicodeのブロック範囲で判定)。
+    find_arbitrage_candidates()のキーワード検索は常にsell_domain(デフォルト
+    US)側のタイトルに対して行われる - 仕入れ先(JP)のブランド名/カテゴリを
+    そのまま拾うと、日本語表記はUS商品タイトルに一致しない
+    (例: 'G-SHOCK(ジーショック)'ではなく'G-Shock'でないとヒットしない)。
+    「日本原産ブランドが良い」のは正しいが、それは英語表記で検索する必要がある。
+    """
+    for ch in text:
+        code = ord(ch)
+        if (
+            0x3040 <= code <= 0x309F   # ひらがな
+            or 0x30A0 <= code <= 0x30FF  # カタカナ
+            or 0x4E00 <= code <= 0x9FFF  # CJK統合漢字
+            or 0xFF66 <= code <= 0xFF9D  # 半角カタカナ
+        ):
+            return True
+    return False
+
+
 def _is_searchable_keyword(candidate: str) -> bool:
-    """productCategoryから拾った文字列が、Keepaのtitleキーワード検索として
-    使えそうか(=Amazonの大分類名そのものではないか)を判定する。"""
-    return candidate.strip().lower() not in _AMAZON_TOP_LEVEL_CATEGORIES
+    """お気に入りから拾った文字列が、Keepaのtitleキーワード検索(常にUS側の
+    タイトルに対して行われる)として使えそうかを判定する: Amazonの大分類名
+    そのものではないか、日本語表記ではないか。"""
+    stripped = candidate.strip()
+    if stripped.lower() in _AMAZON_TOP_LEVEL_CATEGORIES:
+        return False
+    if _contains_japanese(stripped):
+        return False
+    return True
 
 
 def seed_keyword_pool_from_favorites() -> dict:
@@ -923,8 +949,9 @@ def seed_keyword_pool_from_favorites() -> dict:
         jp = data.get('JP') if isinstance(data.get('JP'), dict) else {}
 
         for candidate in (data.get('brand'), us.get('brand'), jp.get('brand')):
-            if candidate:
-                seeds.add(str(candidate).strip())
+            candidate = str(candidate).strip() if candidate else ''
+            if candidate and _is_searchable_keyword(candidate):
+                seeds.add(candidate)
 
         for candidate in (data.get('productCategory'), data.get('category'), us.get('productCategory')):
             candidate = str(candidate).strip() if candidate else ''
