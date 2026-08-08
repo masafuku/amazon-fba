@@ -141,7 +141,14 @@ def estimate_finder_cost(per_page: int) -> int:
 
 
 def estimate_product_request_cost(count: int) -> int:
-    """Product Request (/product): 1 token per ASIN/code requested."""
+    """Product Request (/product): 1 token per ASIN/code requested.
+
+    This assumes get_products()'s params: `buybox` is NOT passed (it would
+    make this 5 tokens/product instead of 1 - see get_products()'s
+    docstring), and `offers` is never requested. `rating`/`history`/`stats`
+    are passed but not believed to add cost beyond the base 1/product
+    (unverified beyond the empirical token-balance checks done so far).
+    """
     return max(0, count)
 
 
@@ -275,6 +282,16 @@ def get_products(
     Note: `offers` is intentionally omitted - Keepa rejects `offers=0` with a
     400 invalidParameter error (verified empirically); leaving it out avoids
     fetching/paying for live marketplace offers we don't use.
+
+    Note: `buybox` is also intentionally omitted - it costs 5 tokens per
+    product instead of 1 (verified empirically: a 20-ASIN batch drained the
+    token bucket by ~100 tokens instead of the expected ~20, confirmed via
+    Keepa API discussion/GitHub sources - see estimate_product_request_cost()).
+    It isn't needed here: analysis.current_price()/price_volatility_ratio()
+    already read CsvType.BUY_BOX_SHIPPING (csv/stats type 18) straight from
+    the `stats`/`history` data and fall back to NEW/AMAZON when it's
+    unavailable - the same approach keepa-csv-dashboard/sqlite_api_server.py
+    already uses successfully without ever passing buybox=1.
     """
     if not asins and not codes:
         return []
@@ -283,7 +300,6 @@ def get_products(
         "domain": resolve_domain(domain),
         "stats": stats_days,
         "history": 1 if history else 0,
-        "buybox": 1,
         "rating": 1,
     }
     if asins:
