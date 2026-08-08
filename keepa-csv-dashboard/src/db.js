@@ -82,6 +82,28 @@ export const loadKeepaTokenStatus = async () => {
     return response.json();
 };
 
+export const loadScanLoopStatus = async () => {
+    const response = await fetch(`${API_BASE}/api/agent/scan-loop`);
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || `HTTP ${response.status}`);
+    }
+    return response.json();
+};
+
+export const controlScanLoop = async (action) => {
+    const response = await fetch(`${API_BASE}/api/agent/scan-loop`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+    });
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || `HTTP ${response.status}`);
+    }
+    return response.json();
+};
+
 export const loadDbStatsFromDb = async () => {
     const response = await fetch(`${API_BASE}/api/health`);
     if (!response.ok) {

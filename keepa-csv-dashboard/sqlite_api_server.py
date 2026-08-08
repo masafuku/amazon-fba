@@ -4,6 +4,7 @@ import gzip
 import mimetypes
 import os
 import sqlite3
+import subprocess
 import zlib
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -273,6 +274,76 @@ def request_keepa_token_status():
         'refillIn': keepa_json.get('refillIn'),
         'refillRate': keepa_json.get('refillRate'),
     }
+
+
+# ダッシュボードから検索ループ(scripts/run_all_day.shを回し続けるsystemd
+# サービス)を停止・再開するための操作。AWS等のsystemd常駐デプロイでのみ
+# 意味を持つ(ローカルのVite開発環境ではサービス自体が存在しないので、
+# systemctlが見つからない/失敗するだけで実害はない)。
+#
+# 「停止」は実行中のdaily_scan.pyを中断しない(CEOの希望: 使いかけの
+# トークンを無駄にしたくない) - run_all_day.shが見るフラグファイルを
+# 立てるだけで、今のサイクルが終わり次第、次のサイクルを開始せず
+# run_all_day.sh自身が終了する(scripts/run_all_day.sh参照)。
+SCAN_LOOP_SERVICE = 'fba-scan-loop.service'
+SCAN_LOOP_STOP_FLAG = Path(__file__).resolve().parent.parent / '.scan_loop_stop_requested'
+
+
+def get_scan_loop_status():
+    """状態確認はsudo不要(systemctl is-activeは誰でも実行可能)。"""
+    stop_requested = SCAN_LOOP_STOP_FLAG.exists()
+    try:
+        result = subprocess.run(
+            ['systemctl', 'is-active', SCAN_LOOP_SERVICE],
+            capture_output=True, text=True, timeout=10,
+        )
+        systemd_status = (result.stdout or '').strip() or 'unknown'
+    except FileNotFoundError:
+        return {
+            'status': 'unavailable', 'running': False, 'stopRequested': stop_requested,
+            'note': 'systemctl not found (not a systemd deployment)',
+        }
+    except Exception as exc:
+        return {'status': 'unknown', 'running': False, 'stopRequested': stop_requested, 'error': str(exc)}
+
+    is_active = systemd_status == 'active'
+    if is_active and stop_requested:
+        status = 'stopping'  # 今のサイクルが終わり次第止まる
+    elif is_active:
+        status = 'running'
+    else:
+        status = 'stopped'
+    return {'status': status, 'running': is_active, 'stopRequested': stop_requested}
+
+
+def control_scan_loop(action):
+    """action='stop': フラグファイルを立てるだけ(実行中のサイクルは
+    中断しない)。action='resume': フラグファイルを消し、サービスが
+    (フラグにより)既に終了していれば `sudo systemctl start` で起動し直す
+    (既に稼働中ならstartは無害な no-op)。
+    """
+    if action not in ('stop', 'resume'):
+        raise ValueError("action must be 'stop' or 'resume'")
+
+    if action == 'stop':
+        SCAN_LOOP_STOP_FLAG.touch()
+        return {'ok': True, **get_scan_loop_status()}
+
+    # resume
+    SCAN_LOOP_STOP_FLAG.unlink(missing_ok=True)
+    try:
+        result = subprocess.run(
+            ['sudo', '-n', 'systemctl', 'start', SCAN_LOOP_SERVICE],
+            capture_output=True, text=True, timeout=20,
+        )
+    except FileNotFoundError:
+        return {'ok': False, 'error': 'systemctl not found (not a systemd deployment)'}
+    except subprocess.TimeoutExpired:
+        return {'ok': False, 'error': 'systemctl start timed out'}
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or '').strip()
+        return {'ok': False, 'error': detail or f'systemctl start failed (exit {result.returncode})'}
+    return {'ok': True, **get_scan_loop_status()}
 
 
 def keepa_product_request(payload):
@@ -1189,6 +1260,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(500, {'error': str(exc)})
             return
 
+        if parsed.path == '/api/agent/scan-loop':
+            self._send_json(200, {'ok': True, **get_scan_loop_status()})
+            return
+
         if parsed.path == '/api/latest':
             us_data = load_latest_market_rows('US')
             jp_data = load_latest_market_rows('JP')
@@ -1264,6 +1339,19 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 payload = json.loads(raw.decode('utf-8')) if raw else {}
                 self._send_json(200, add_keyword_pool_entry(payload))
+            except ValueError as exc:
+                self._send_json(400, {'error': str(exc)})
+            except Exception as exc:
+                self._send_json(500, {'error': str(exc)})
+            return
+
+        if self.path == '/api/agent/scan-loop':
+            length = int(self.headers.get('Content-Length', '0'))
+            raw = self.rfile.read(length)
+            try:
+                payload = json.loads(raw.decode('utf-8')) if raw else {}
+                action = str(payload.get('action') or '').strip()
+                self._send_json(200, control_scan_loop(action))
             except ValueError as exc:
                 self._send_json(400, {'error': str(exc)})
             except Exception as exc:

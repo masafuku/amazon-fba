@@ -22,6 +22,15 @@
 #
 # 停止: Ctrl+C、または `kill <pid>`。SIGINT/SIGTERM で安全に終了する。
 #
+# ダッシュボードの停止ボタン(または `touch .scan_loop_stop_requested`)は
+# これとは別の、よりソフトな停止方法: 実行中のサイクルを中断せず、次の
+# サイクルを開始しないだけ。フラグファイル(リポジトリ直下の
+# .scan_loop_stop_requested)の有無をサイクルの節目ごとにチェックし、
+# あれば消費中のトークンを無駄にせず綺麗に終了する(SIGTERM経由の停止は
+# 実行中のdaily_scan.pyごと即座に中断してしまうため、意図的に別の仕組みに
+# している)。再開はダッシュボードの再開ボタン(フラグファイルを消して
+# `systemctl start`)から。
+#
 # 常駐させたい場合(macOSでログイン時に自動起動するなど)は、この
 # スクリプトを launchd の plist や `nohup ./scripts/run_all_day.sh &`
 # から起動する。
@@ -29,6 +38,7 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
+STOP_FLAG="$REPO_ROOT/.scan_loop_stop_requested"
 
 VENV_PYTHON="$REPO_ROOT/.venv/bin/python"
 if [ ! -x "$VENV_PYTHON" ]; then
@@ -61,6 +71,11 @@ log "[INFO] 追加引数: $*"
 
 cycle=0
 while [ "$running" -eq 1 ]; do
+  if [ -e "$STOP_FLAG" ]; then
+    log "[INFO] 停止フラグ($STOP_FLAG)を検出。次のサイクルは開始せず終了します。"
+    break
+  fi
+
   cycle=$((cycle + 1))
   log "[INFO] --- サイクル $cycle 開始 ---"
 
@@ -79,9 +94,10 @@ while [ "$running" -eq 1 ]; do
   fi
 
   log "[INFO] ${sleep_seconds}秒待機します..."
-  # sleepを中断可能にする(シグナルを受け取ったら即座にループを抜ける)。
+  # sleepを中断可能にする(シグナル、または停止フラグで即座にループを抜ける)。
   for _ in $(seq 1 "$sleep_seconds"); do
     [ "$running" -eq 1 ] || break
+    [ -e "$STOP_FLAG" ] && break
     sleep 1
   done
 done

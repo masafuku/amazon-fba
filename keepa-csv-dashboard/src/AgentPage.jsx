@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Star } from 'lucide-react';
-import { loadAgentCandidates, loadAgentRuns, loadKeepaTokenStatus, saveFavorite } from './db';
+import { controlScanLoop, loadAgentCandidates, loadAgentRuns, loadKeepaTokenStatus, loadScanLoopStatus, saveFavorite } from './db';
 import { formatDateTime } from './formatters';
 
 const EXCHANGE_RATE = 150;
@@ -31,6 +31,8 @@ export default function AgentPage() {
     const [showRunHistory, setShowRunHistory] = useState(true);
     const [sortKey, setSortKey] = useState('marginPct');
     const [sortOrder, setSortOrder] = useState('desc');
+    const [scanLoopStatus, setScanLoopStatus] = useState(null);
+    const [scanLoopBusy, setScanLoopBusy] = useState(false);
 
     const refresh = async (period) => {
         setLoading(true);
@@ -57,9 +59,34 @@ export default function AgentPage() {
         }
     };
 
+    const refreshScanLoopStatus = async () => {
+        try {
+            setScanLoopStatus(await loadScanLoopStatus());
+        } catch (scanLoopError) {
+            setScanLoopStatus({ error: scanLoopError?.message || '検索ループの状態取得に失敗しました。' });
+        }
+    };
+
+    const handleScanLoopAction = async (action) => {
+        setScanLoopBusy(true);
+        setError('');
+        try {
+            const result = await controlScanLoop(action);
+            if (!result.ok) {
+                setError(result.error || '検索ループの操作に失敗しました。');
+            }
+            setScanLoopStatus(result);
+        } catch (scanLoopError) {
+            setError(scanLoopError?.message || '検索ループの操作に失敗しました。');
+        } finally {
+            setScanLoopBusy(false);
+        }
+    };
+
     useEffect(() => {
         refresh(days);
         refreshTokenStatus();
+        refreshScanLoopStatus();
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [days]);
 
@@ -164,6 +191,55 @@ export default function AgentPage() {
                     >
                         更新
                     </button>
+                </div>
+                <div className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-sm">
+                    <p className="text-slate-400">検索ループ(AWS)</p>
+                    {scanLoopStatus?.error ? (
+                        <p className="text-rose-300">{scanLoopStatus.error}</p>
+                    ) : scanLoopStatus?.status === 'unavailable' ? (
+                        <p className="text-slate-500 text-xs">{scanLoopStatus.note || '未対応の環境です。'}</p>
+                    ) : (
+                        <p className="text-xl font-semibold">
+                            {scanLoopStatus?.status === 'running' ? (
+                                <span className="inline-flex items-center gap-1.5 text-emerald-300">
+                                    <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-400" aria-hidden="true" />
+                                    稼働中
+                                </span>
+                            ) : scanLoopStatus?.status === 'stopping' ? (
+                                <span className="text-amber-300">停止処理中</span>
+                            ) : scanLoopStatus?.status === 'stopped' ? (
+                                <span className="text-slate-400">停止中</span>
+                            ) : (
+                                <span className="text-slate-500">-</span>
+                            )}
+                        </p>
+                    )}
+                    <div className="mt-2 flex gap-2">
+                        <button
+                            type="button"
+                            onClick={() => handleScanLoopAction('stop')}
+                            disabled={scanLoopBusy || scanLoopStatus?.status === 'stopped' || scanLoopStatus?.status === 'stopping'}
+                            className="rounded-lg bg-rose-950/60 px-2 py-1 text-xs font-semibold text-rose-200 hover:bg-rose-900 disabled:opacity-40"
+                            title="実行中の検索は中断せず、次のサイクルから開始しないようにします"
+                        >
+                            停止
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => handleScanLoopAction('resume')}
+                            disabled={scanLoopBusy || scanLoopStatus?.status === 'running'}
+                            className="rounded-lg bg-emerald-950/60 px-2 py-1 text-xs font-semibold text-emerald-200 hover:bg-emerald-900 disabled:opacity-40"
+                        >
+                            再開
+                        </button>
+                        <button
+                            type="button"
+                            onClick={refreshScanLoopStatus}
+                            className="rounded-lg bg-slate-800 px-2 py-1 text-xs font-semibold text-slate-300 hover:bg-slate-700"
+                        >
+                            更新
+                        </button>
+                    </div>
                 </div>
             </header>
 
