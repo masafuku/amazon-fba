@@ -10,15 +10,11 @@ daily_scan.py — 毎朝1回実行するだけで完結するスクリプト。
      (キーワード検索 + 価格差率・ランキング・レビュー数・価格変動で絞り込み)
   3. ops_finance.evaluate_mcp_candidates() でFBA手数料・国際送料込みの
      実質利益率を計算し、閾値未満を除外
-  4. 合格した候補をLINEに通知(notify_line.py、LINE Messaging API経由)
-  5. 予算アラート(check_budget_alert)もあわせて通知
-  6. プールから選んだキーワードだった場合、使用実績(times_used等)を記録
-
-  注: 旧LINE Notifyは2025年3月末でサービス終了済み(notify-api.line.me は
-  名前解決すら不可)。後継のLINE Messaging APIを使用しており、
-  LINE公式アカウントの「チャネルアクセストークン(長期)」が必要
-  (詳細はnotify_line.pyのモジュールdocstring参照)。一時的にメール通知
-  (notify_email.py)を使っていたが、LINEに切り替えた。
+  4. 結果をDBに保存する(agent_candidates / agent_runs)。即時のLINE通知は
+     しない - CEOの希望で、1日の候補は朝8時・夜8時に send_daily_digest.py
+     がまとめて1通ずつ通知する(スケジュール設定は send_daily_digest.py の
+     docstring参照)。
+  5. プールから選んだキーワードだった場合、使用実績(times_used等)を記録
 
   Keepaのトークンは低レート帯のプランだと1分に1トークン程度しか回復しない。
   デフォルトでは wait_for_tokens=True で実行するため、予算が足りない場面では
@@ -62,14 +58,10 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from config import Settings
 from keepa_mcp.keepa_client import KeepaError
 from keepa_mcp.server import expand_keyword, find_arbitrage_candidates, search_category
-from notify_line import send_line_message
 from ops_finance import (
     add_keywords,
-    build_qualified_line_message,
-    check_budget_alert,
     evaluate_mcp_candidates,
     init_ops_tables,
     list_keyword_pool,
@@ -194,44 +186,17 @@ def run_daily_scan(
     if keyword_from_pool:
         record_keyword_used(keyword, qualified_count=len(evaluation["qualified"]))
 
-    # 候補の通知
-    candidate_message = build_qualified_line_message(evaluation)
-    full_message = f"【本日の候補: {label}】\n{candidate_message}"
-
-    # 予算アラートも合わせて通知
-    this_month = datetime.now(timezone.utc).strftime("%Y-%m")
-    budget_alerts = check_budget_alert(this_month)
-    if budget_alerts:
-        full_message += "\n\n【予算アラート】\n" + "\n".join(budget_alerts)
-
-    notify_status = "skipped"
-    notify_error = None
-    settings = Settings.load()
-    if settings.line_channel_access_token:
-        try:
-            send_line_message(
-                channel_access_token=settings.line_channel_access_token,
-                message=f"【本日の候補】{label}\n\n{full_message}",
-                user_id=settings.line_user_id or None,
-            )
-            target = settings.line_user_id or "友だち全員へbroadcast"
-            print(f"[INFO] LINE通知を送信しました ({target})。")
-            notify_status = "sent"
-        except Exception as exc:
-            print(f"[ERROR] LINE通知送信失敗: {exc}")
-            notify_status = "failed"
-            notify_error = str(exc)
-    else:
-        print("[WARN] LINE_CHANNEL_ACCESS_TOKEN が未設定のため、通知はスキップしました。")
-        print("--- 通知予定だった内容 ---")
-        print(full_message)
+    # 即時のLINE通知はしない(CEOの希望: 1日の候補は朝8時・夜8時に
+    # send_daily_digest.py がまとめて通知する)。ここでは結果をDBに
+    # 保存するだけ。
+    print(f"[INFO] 実質利益率{len(evaluation['qualified'])}件合格。ダイジェスト通知(8時/20時)でまとめて送信されます。")
 
     log_agent_run(
         run_id, started_at, time.monotonic() - start_time,
         keyword=keyword, category=category_name, category_id=category_id,
         max_candidates=max_candidates, wait_for_tokens=wait_for_tokens,
         mcp_result=mcp_result, evaluation=evaluation,
-        notify_status=notify_status, notify_error=notify_error,
+        notify_status="deferred_to_digest", notify_error=None,
     )
 
 

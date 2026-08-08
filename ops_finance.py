@@ -158,6 +158,13 @@ def init_ops_tables():
                 status TEXT NOT NULL DEFAULT 'active'  -- active/paused
             );
             CREATE INDEX IF NOT EXISTS idx_keyword_pool_status ON keyword_pool(status);
+
+            -- 1日2回(朝8時/夜8時)のLINEダイジェスト通知が「前回の通知以降」
+            -- を正しく判定するための状態テーブル(常に1行だけ)。
+            CREATE TABLE IF NOT EXISTS digest_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                last_sent_at TEXT
+            );
             '''
         )
         # 既存DBに対する後方互換マイグレーション(CREATE TABLE IF NOT EXISTSは
@@ -458,6 +465,135 @@ def build_qualified_line_message(evaluation: dict, max_items: int = 5) -> str:
 
     if len(qualified) > max_items:
         lines.append(f"他 {len(qualified) - max_items} 件")
+
+    return '\n'.join(lines)
+
+
+# ---------------------------------------------------------------------------
+# 7. 1日2回(朝8時/夜8時)のLINEダイジェスト通知
+#
+# daily_scan.py 自体は即時通知しない(CEOの希望: 「1日の候補を朝8時と
+# 夜8時にまとめて送ってほしい。即時通知は不要」)。代わりに
+# send_daily_digest.py がこのセクションの関数を使い、前回のダイジェスト
+# 送信以降にたまった合格候補をまとめて1通のLINEメッセージにする。
+# ---------------------------------------------------------------------------
+
+def get_last_digest_sent_at() -> str | None:
+    """前回ダイジェストを送った時刻(ISO8601)。まだ一度も送っていなければNone。"""
+    init_ops_tables()
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute('SELECT last_sent_at FROM digest_state WHERE id = 1').fetchone()
+    return row[0] if row else None
+
+
+def set_last_digest_sent_at(sent_at: str) -> None:
+    init_ops_tables()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            '''
+            INSERT INTO digest_state (id, last_sent_at) VALUES (1, ?)
+            ON CONFLICT(id) DO UPDATE SET last_sent_at = excluded.last_sent_at
+            ''',
+            (sent_at,),
+        )
+
+
+def load_digest_window(since_iso: str | None):
+    """前回ダイジェスト送信以降(初回はsince_iso=None、直近24時間扱い)の
+    データをまとめて返す: 合格候補(ASIN重複除去・複数回見つかった場合は
+    最新のものを採用)と、その間に検索したキーワード一覧。
+    """
+    init_ops_tables()
+    if since_iso is None:
+        since_iso = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+
+    with sqlite3.connect(DB_PATH) as conn:
+        candidate_rows = conn.execute(
+            '''
+            WITH ranked AS (
+                SELECT *,
+                    ROW_NUMBER() OVER (PARTITION BY asin ORDER BY created_at DESC) AS rn
+                FROM agent_candidates
+                WHERE qualified = 1 AND created_at > ?
+            )
+            SELECT asin, title, us_url, jp_url, us_price_usd, jp_cost_jpy,
+                   sales_rank, review_count, margin_pct, unit_profit_usd,
+                   weight_estimated, category, created_at
+            FROM ranked
+            WHERE rn = 1
+            ORDER BY margin_pct DESC
+            ''',
+            (since_iso,),
+        ).fetchall()
+
+        keyword_rows = conn.execute(
+            'SELECT DISTINCT keyword FROM agent_runs WHERE started_at > ? AND keyword IS NOT NULL ORDER BY keyword',
+            (since_iso,),
+        ).fetchall()
+
+    candidates = [
+        {
+            'asin': asin, 'title': title, 'us_url': us_url, 'jp_url': jp_url,
+            'us_price_usd': us_price_usd, 'jp_cost_jpy': jp_cost_jpy,
+            'sales_rank': sales_rank, 'review_count': review_count,
+            'margin_pct': margin_pct, 'unit_profit_usd': unit_profit_usd,
+            'weight_estimated': bool(weight_estimated), 'category': category,
+            'created_at': created_at,
+        }
+        for asin, title, us_url, jp_url, us_price_usd, jp_cost_jpy, sales_rank, review_count,
+            margin_pct, unit_profit_usd, weight_estimated, category, created_at in candidate_rows
+    ]
+    keywords = [row[0] for row in keyword_rows]
+    return candidates, keywords, since_iso
+
+
+def build_daily_digest_message(
+    candidates: list,
+    keywords: list,
+    period_label: str,
+    budget_alerts: list = None,
+    max_items: int = 5,
+    exchange_rate: float = 150.0,
+) -> str:
+    """1日2回のダイジェスト通知本文を組み立てる。"""
+    today = datetime.now(timezone.utc).strftime('%Y/%m/%d')
+    lines = [f"【{period_label}まとめ】{today}"]
+
+    if keywords:
+        lines.append(f"検索キーワード: {', '.join(keywords)} ({len(keywords)}件)")
+    else:
+        lines.append("検索は行われませんでした。")
+
+    if not candidates:
+        lines.append("実質利益率20%以上の候補はありませんでした。")
+    else:
+        lines.append(f"実質利益率20%以上の候補: {len(candidates)}件(重複除く)")
+        for item in candidates[:max_items]:
+            weight_note = '(重量は仮値)' if item['weight_estimated'] else ''
+            lines.append('---')
+            lines.append(f"ASIN: {item['asin']}")
+            lines.append(f"{item['title'] or ''}")
+            profit_jpy = round((item['unit_profit_usd'] or 0) * exchange_rate)
+            margin = item['margin_pct']
+            lines.append(f"利益率: {margin:.1%} / 1個あたり利益: ¥{profit_jpy:,}" if margin is not None else "利益率: -")
+            us_price = item['us_price_usd']
+            jp_price = item['jp_cost_jpy']
+            us_price_str = f"${us_price:.2f}" if us_price is not None else '-'
+            jp_price_str = f"¥{jp_price:.0f}" if jp_price is not None else '-'
+            lines.append(f"US: {us_price_str} / JP: {jp_price_str}")
+            lines.append(f"ランキング: {item['sales_rank']} / レビュー数: {item['review_count']}{weight_note}")
+            if item['us_url']:
+                lines.append(f"US: {item['us_url']}")
+            if item['jp_url']:
+                lines.append(f"JP: {item['jp_url']}")
+
+        if len(candidates) > max_items:
+            lines.append(f"他 {len(candidates) - max_items} 件")
+
+    if budget_alerts:
+        lines.append('')
+        lines.append('【予算アラート】')
+        lines.extend(budget_alerts)
 
     return '\n'.join(lines)
 
