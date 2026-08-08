@@ -16,10 +16,12 @@ daily_scan.py — 毎朝1回実行するだけで完結するスクリプト。
      docstring参照)。
   5. プールから選んだキーワードだった場合、使用実績(times_used等)を記録
   6. セラーマイニング(CEOのアイデア): 合格候補が出た場合、実質利益率が
-     最も高い1件についてそのセラーを特定し(5トークン)、セラーの他の
-     出品も同じパイプラインで評価する(keepa_mcp.server.expand_from_seller)。
-     「よく売れている日本のものを売っているセラーは、他にも同じような
-     ものを売っていることが多い」という考え方に基づく。
+     最も高い1件について、そのASINを出品しているセラーを
+     (Amazonの「他のセラー」欄相当、最大MAX_SELLERS_PER_CANDIDATE件)
+     特定し、それぞれのセラーの他の出品も同じパイプラインで評価する
+     (keepa_mcp.server.find_other_sellers_for_candidate /
+     expand_from_seller)。「よく売れている日本のものを売っているセラーは、
+     他にも同じようなものを売っていることが多い」という考え方に基づく。
 
   Keepaのトークンは低レート帯のプランだと1分に1トークン程度しか回復しない。
   デフォルトでは wait_for_tokens=True で実行するため、予算が足りない場面では
@@ -68,7 +70,7 @@ from keepa_mcp.server import (
     expand_from_seller,
     expand_keyword,
     find_arbitrage_candidates,
-    find_seller_for_candidate,
+    find_other_sellers_for_candidate,
     search_category,
 )
 from ops_finance import (
@@ -125,26 +127,15 @@ def resolve_category_id(category_name: str) -> int | None:
 SELLER_EXPANSION_MAX_CANDIDATES = 10
 
 
-def expand_from_top_seller(top_qualified: dict, source_label: str, wait_for_tokens: bool) -> None:
-    """合格候補のうち実質利益率が最も高い1件について、そのセラーの他の
-    出品も同じパイプラインで評価する(セラーマイニング)。失敗しても
-    メインのスキャン結果には影響させない(例外を握りつぶしてログのみ)。
-    """
-    asin = top_qualified["asin"]
-    print(f"[INFO] セラーマイニング: 合格候補 {asin} のセラーを調べています(5トークン)...")
-    try:
-        seller_lookup = find_seller_for_candidate(asin=asin)
-    except KeepaError as exc:
-        print(f"[WARN] セラー特定に失敗しました: {exc}")
-        return
+# 1件の合格候補から芋づる式に調べるセラー数の上限(「Other sellers on
+# Amazon」全員を追うとコストが膨らむため)。
+MAX_SELLERS_PER_CANDIDATE = 3
 
-    if not seller_lookup.get("found"):
-        print(f"[INFO] {asin} の出品セラーを特定できませんでした({seller_lookup.get('note') or seller_lookup.get('error')})。")
-        return
 
-    seller_id = seller_lookup["seller_id"]
-    print(f"[INFO] セラー特定: {seller_id}。出品一覧を取得して評価します(最大{SELLER_EXPANSION_MAX_CANDIDATES}件)...")
-
+def _expand_from_one_seller(seller_id: str, source_label: str, wait_for_tokens: bool) -> None:
+    """1セラー分の出品をパイプラインで評価し、結果を保存する。失敗しても
+    メインのスキャン結果には影響させない(例外を握りつぶしてログのみ)。"""
+    print(f"[INFO] セラー {seller_id} の出品一覧を取得して評価します(最大{SELLER_EXPANSION_MAX_CANDIDATES}件)...")
     try:
         seller_result = expand_from_seller(
             seller_id=seller_id, max_candidates=SELLER_EXPANSION_MAX_CANDIDATES,
@@ -174,6 +165,30 @@ def expand_from_top_seller(top_qualified: dict, source_label: str, wait_for_toke
             notify_status="deferred_to_digest",
         )
         print(f"[INFO] セラー出品の評価結果も「エージェント」ページに保存しました (run_id={seller_run_id})。")
+
+
+def expand_from_top_seller(top_qualified: dict, source_label: str, wait_for_tokens: bool) -> None:
+    """合格候補のうち実質利益率が最も高い1件について、そのASINを出品している
+    セラー(buyboxの1人だけでなく、Amazonの「他のセラー」欄に相当する全員、
+    最大MAX_SELLERS_PER_CANDIDATE件)それぞれについて、他の出品も同じ
+    パイプラインで評価する(セラーマイニング、CEOのアイデア)。
+    """
+    asin = top_qualified["asin"]
+    print(f"[INFO] セラーマイニング: 合格候補 {asin} の出品セラーを調べています...")
+    try:
+        sellers_lookup = find_other_sellers_for_candidate(asin=asin, max_sellers=MAX_SELLERS_PER_CANDIDATE)
+    except KeepaError as exc:
+        print(f"[WARN] セラー一覧の取得に失敗しました: {exc}")
+        return
+
+    seller_ids = sellers_lookup.get("seller_ids") or []
+    if not seller_ids:
+        print(f"[INFO] {asin} の出品セラーを特定できませんでした({sellers_lookup.get('note') or sellers_lookup.get('error')})。")
+        return
+
+    print(f"[INFO] セラー{len(seller_ids)}件を特定: {seller_ids}")
+    for seller_id in seller_ids:
+        _expand_from_one_seller(seller_id, source_label, wait_for_tokens)
 
 
 def run_daily_scan(
@@ -280,8 +295,9 @@ def run_daily_scan(
     # Keyword/Categoryエージェント: セラーマイニング。CEOのアイデア -
     # 「よく売れている日本のものを売っているセラーは、他にも同じような
     # ものを売っていることが多い」。合格候補が出た回だけ(トークンを
-    # 抑えるため、実質利益率が最も高い1件のみ)、そのセラーを特定して
-    # (5トークン)、出品の残りも同じパイプラインで評価する。
+    # 抑えるため、実質利益率が最も高い1件の候補のみ対象)、そのASINの
+    # 出品セラー(最大MAX_SELLERS_PER_CANDIDATE件)を特定して、それぞれの
+    # 出品の残りも同じパイプラインで評価する。
     if evaluation["qualified"]:
         expand_from_top_seller(evaluation["qualified"][0], label, wait_for_tokens)
 

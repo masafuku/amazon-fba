@@ -164,6 +164,18 @@ def estimate_seller_lookup_cost(count: int) -> int:
     return max(0, count)
 
 
+def estimate_offers_product_request_cost(count: int, offers_limit: int = 20) -> int:
+    """Product Request with offers=N: unlike buybox's confirmed 5x, the exact
+    formula for `offers` isn't pinned down empirically - public docs only
+    say each offer/page adds tokens beyond the base 1/product. This is a
+    deliberately generous (over-)estimate (1 page worth, ~6 tokens, per
+    product - matching what an earlier pass at these docs found for "per
+    offer page") so wait_for_tokens budget checks err toward waiting rather
+    than under-budgeting and hitting 429s. Revise once observed live (see
+    get_products()'s docstring)."""
+    return max(0, count) * 7
+
+
 def search_categories(api_key: str, term: str, domain: str = "US") -> List[Dict[str, Any]]:
     """Find category ids/names matching a search term (category names are in the
     target marketplace's language, e.g. English for US, Japanese for JP)."""
@@ -289,6 +301,7 @@ def get_products(
     stats_days: int = 90,
     history: bool = False,
     include_buybox: bool = False,
+    offers_limit: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Fetch full product data (price stats, identifiers, rank, reviews).
 
@@ -314,6 +327,18 @@ def get_products(
     the pipeline that intentionally pays the 5x cost, and CEO-approved
     specifically for that narrow use (only on already-qualified candidates,
     not on every candidate evaluated).
+
+    Pass offers_limit=N (e.g. 20) to additionally request the `offers` array
+    (every current marketplace listing for the ASIN, not just the buy box
+    winner - each has its own `sellerId`, see analysis.distinct_seller_ids).
+    This is what powers "Other sellers on Amazon"-style seller discovery
+    (server.py's find_other_sellers_for_candidate): one qualified candidate
+    can surface several sellers worth mining at once instead of just the buy
+    box winner. Cost is not precisely confirmed empirically the way buybox's
+    5x was (public docs only say "each offer uses additional tokens" without
+    a number) - treat estimate_offers_product_request_cost() as a rough
+    upper bound until observed live, and only use this on candidates already
+    worth digging into, same as include_buybox.
     """
     if not asins and not codes:
         return []
@@ -326,6 +351,8 @@ def get_products(
     }
     if include_buybox:
         params["buybox"] = 1
+    if offers_limit is not None:
+        params["offers"] = offers_limit
     if asins:
         params["asin"] = ",".join(asins)
     if codes:

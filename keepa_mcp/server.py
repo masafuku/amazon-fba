@@ -26,6 +26,7 @@ from .cached_ops import (
     cached_find_products,
     cached_get_categories,
     cached_get_product_with_buybox,
+    cached_get_product_with_offers,
     cached_get_products,
     cached_get_sellers,
     cached_lookup_by_code,
@@ -36,6 +37,7 @@ from .config import settings
 from .keepa_client import (
     KeepaError,
     estimate_finder_cost,
+    estimate_offers_product_request_cost,
     estimate_product_request_cost,
     estimate_seller_lookup_cost,
     get_token_status,
@@ -654,6 +656,40 @@ def find_seller_for_candidate(asin: str, domain: str = "US", force_refresh: bool
             "_cache": cache_info,
         }
     return {"asin": asin, "found": True, "seller_id": seller_id, "domain": domain.upper(), "_cache": cache_info}
+
+
+@mcp.tool()
+def find_other_sellers_for_candidate(
+    asin: str, domain: str = "US", max_sellers: int = 5, force_refresh: bool = False
+) -> Dict[str, Any]:
+    """Amazon's "Other sellers on Amazon" list for an ASIN: every current
+    marketplace offer's seller, not just the single buy-box winner (that's
+    find_seller_for_candidate). One qualified candidate can surface several
+    sellers worth mining at once via expand_from_seller() - CEO's idea, to
+    grow the pool of sellers under investigation faster than one-at-a-time.
+
+    Cost isn't pinned down as precisely as buybox's confirmed 5x (public
+    Keepa docs only say offers add tokens beyond the base 1/product, no
+    exact number) - budgeted conservatively via
+    estimate_offers_product_request_cost(). Same rule as
+    find_seller_for_candidate: only call this on candidates already worth
+    digging into, not on every search result.
+    """
+    api_key = _require_api_key()
+    product, cache_info = cached_get_product_with_offers(api_key, asin, domain=domain, force_refresh=force_refresh)
+    if product is None:
+        return {"asin": asin, "found": False, "error": f"No product found for ASIN {asin} in domain {domain}."}
+    seller_ids = analysis.distinct_seller_ids(product)[:max_sellers]
+    if not seller_ids:
+        return {
+            "asin": asin, "found": False, "seller_ids": [],
+            "note": "No third-party sellers on file for this ASIN.",
+            "_cache": cache_info,
+        }
+    return {
+        "asin": asin, "found": True, "seller_ids": seller_ids,
+        "domain": domain.upper(), "_cache": cache_info,
+    }
 
 
 @mcp.tool()

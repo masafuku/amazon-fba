@@ -3,7 +3,7 @@ metrics the arbitrage search cares about. No network calls in this module.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from .keepa_client import CsvType, CURRENCY_DIVISOR, NO_DATA_SENTINELS
 
@@ -93,6 +93,34 @@ def current_buy_box_seller_id(product: Dict[str, Any]) -> Optional[str]:
         if seller_id and seller_id not in _NO_SELLER_SENTINELS:
             return seller_id
     return None
+
+
+def distinct_seller_ids(product: Dict[str, Any], exclude_amazon: bool = True) -> List[str]:
+    """All distinct sellerIds currently offering this ASIN (not just the buy
+    box winner) - Amazon's "Other sellers on Amazon" list, in effect. Only
+    present when the product was fetched with offers_limit set (see
+    keepa_client.get_products(offers_limit=N)); each real dict in the
+    `offers` array has its own `sellerId`. Order is preserved, first-seen
+    (roughly Amazon's own offer ranking), duplicates removed.
+
+    exclude_amazon=True (default) drops offers where isAmazon is true -
+    Amazon itself isn't a "seller to mine" for this pipeline's purposes.
+    """
+    offers = product.get("offers")
+    if not offers or not isinstance(offers, list):
+        return []
+    seen = set()
+    seller_ids: List[str] = []
+    for offer in offers:
+        if not isinstance(offer, dict):
+            continue
+        if exclude_amazon and offer.get("isAmazon"):
+            continue
+        seller_id = offer.get("sellerId")
+        if seller_id and seller_id not in seen:
+            seen.add(seller_id)
+            seller_ids.append(seller_id)
+    return seller_ids
 
 
 def price_volatility_ratio(product: Dict[str, Any], domain: str) -> Optional[float]:
