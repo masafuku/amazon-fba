@@ -874,6 +874,7 @@ export default function App() {
                                                 {renderSortHeader('Amazonセラー', 'amazonSeller')}
                                                 {renderSortHeader('純利益(円)', 'profit')}
                                                 {renderSortHeader('利益率(%)', 'profitRate')}
+                                                <th className="px-4 py-3 font-medium text-slate-400">リンク</th>
                                                 <th className="px-4 py-3 font-medium text-slate-400">お気に入り</th>
                                             </tr>
                                         </thead>
@@ -917,6 +918,26 @@ export default function App() {
                                                     <td className={`px-4 py-3 font-semibold ${row.profit >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{row.profit !== null ? row.profit.toFixed(0) : '-'}</td>
                                                     <td className={`px-4 py-3 font-semibold ${row.profitRate >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{row.profitRate !== null ? row.profitRate.toFixed(1) : '-'}</td>
                                                     <td className="px-4 py-3">
+                                                        <div className="flex flex-wrap gap-2">
+                                                            <a
+                                                                href={`https://www.amazon.com/dp/${getAsin(row)}`}
+                                                                target="_blank"
+                                                                rel="noreferrer"
+                                                                className="rounded-lg bg-slate-800 px-2 py-1 text-xs font-semibold text-slate-200 hover:bg-slate-700"
+                                                            >
+                                                                US
+                                                            </a>
+                                                            <a
+                                                                href={`https://www.amazon.co.jp/dp/${getAsin(row)}`}
+                                                                target="_blank"
+                                                                rel="noreferrer"
+                                                                className="rounded-lg bg-slate-800 px-2 py-1 text-xs font-semibold text-slate-200 hover:bg-slate-700"
+                                                            >
+                                                                JP
+                                                            </a>
+                                                        </div>
+                                                    </td>
+                                                    <td className="px-4 py-3">
                                                         <FavoriteButton asin={getAsin(row)} title={getTitle(row)} source="csv" data={row} />
                                                     </td>
                                                 </tr>
@@ -941,8 +962,24 @@ export default function App() {
                                                 <span>カテゴリ: {row.productCategory || '未分類'}</span>
                                                 <span>US: {row.buyBoxUsd !== null ? `$${row.buyBoxUsd.toFixed(2)}` : '-'}</span>
                                             </div>
-                                            <div className="mt-3">
+                                            <div className="mt-3 flex flex-wrap items-center gap-2">
                                                 <FavoriteButton asin={getAsin(row)} title={getTitle(row)} source="csv" data={row} />
+                                                <a
+                                                    href={`https://www.amazon.com/dp/${getAsin(row)}`}
+                                                    target="_blank"
+                                                    rel="noreferrer"
+                                                    className="rounded-lg bg-slate-800 px-2 py-1 text-xs font-semibold text-slate-200 hover:bg-slate-700"
+                                                >
+                                                    US
+                                                </a>
+                                                <a
+                                                    href={`https://www.amazon.co.jp/dp/${getAsin(row)}`}
+                                                    target="_blank"
+                                                    rel="noreferrer"
+                                                    className="rounded-lg bg-slate-800 px-2 py-1 text-xs font-semibold text-slate-200 hover:bg-slate-700"
+                                                >
+                                                    JP
+                                                </a>
                                             </div>
                                             <div className="mt-3 space-y-2">
                                                 <p className="text-base font-semibold text-white">{getTitle(row)}</p>
