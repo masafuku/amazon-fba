@@ -786,23 +786,38 @@ def load_favorites():
 
 def load_agent_candidates(days: int = 7):
     """Researchエージェントが調べた候補一覧(直近 days 日分)を、
-    favoritesに既に追加済みかどうかのフラグ付きで返す。"""
+    favoritesに既に追加済みかどうかのフラグ付きで返す。
+
+    同じASINが複数回のスキャンで見つかった場合、agent_candidates には
+    実行ごとに別の行として記録されている(agent_runs の集計を正確に保つ
+    ため生ログとして全件残す設計)。表示上は同じ商品が重複して並ぶと
+    分かりにくいので、ASINごとに最新1件だけに絞り込み、何回見つかったか
+    (timesSeen)を添えて返す。
+    """
     since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute(
             '''
+            WITH ranked AS (
+                SELECT
+                    ac.*,
+                    ROW_NUMBER() OVER (PARTITION BY ac.asin ORDER BY ac.created_at DESC) AS rn,
+                    COUNT(*) OVER (PARTITION BY ac.asin) AS times_seen
+                FROM agent_candidates ac
+                WHERE ac.created_at >= ?
+            )
             SELECT
-                ac.run_id, ac.category, ac.asin, ac.title, ac.image_url, ac.us_url, ac.jp_asin, ac.jp_url,
-                ac.us_price_usd, ac.jp_cost_jpy, ac.sales_rank, ac.review_count, ac.price_volatility_90d,
-                ac.weight_kg, ac.weight_estimated, ac.fee_estimated,
-                ac.price_diff_rate_gross, ac.unit_profit_usd, ac.margin_pct,
-                ac.qualified, ac.reason, ac.data_json, ac.created_at,
+                r.run_id, r.category, r.asin, r.title, r.image_url, r.us_url, r.jp_asin, r.jp_url,
+                r.us_price_usd, r.jp_cost_jpy, r.sales_rank, r.review_count, r.price_volatility_90d,
+                r.weight_kg, r.weight_estimated, r.fee_estimated,
+                r.price_diff_rate_gross, r.unit_profit_usd, r.margin_pct,
+                r.qualified, r.reason, r.data_json, r.created_at, r.times_seen,
                 CASE WHEN f.asin IS NULL THEN 0 ELSE 1 END AS already_favorited
-            FROM agent_candidates ac
-            LEFT JOIN favorites f ON f.asin = ac.asin
-            WHERE ac.created_at >= ?
-            ORDER BY ac.qualified DESC, ac.margin_pct DESC, ac.created_at DESC
+            FROM ranked r
+            LEFT JOIN favorites f ON f.asin = r.asin
+            WHERE r.rn = 1
+            ORDER BY r.qualified DESC, r.margin_pct DESC, r.created_at DESC
             ''',
             (since,),
         ).fetchall()
@@ -813,7 +828,7 @@ def load_agent_candidates(days: int = 7):
          us_price_usd, jp_cost_jpy, sales_rank, review_count, price_volatility_90d,
          weight_kg, weight_estimated, fee_estimated,
          price_diff_rate_gross, unit_profit_usd, margin_pct,
-         qualified, reason, data_json, created_at, already_favorited) = row
+         qualified, reason, data_json, created_at, times_seen, already_favorited) = row
         try:
             data = json.loads(data_json)
         except Exception:
@@ -842,6 +857,7 @@ def load_agent_candidates(days: int = 7):
             'reason': reason,
             'data': data,
             'createdAt': created_at,
+            'timesSeen': times_seen,
             'alreadyFavorited': bool(already_favorited),
         })
     return candidates

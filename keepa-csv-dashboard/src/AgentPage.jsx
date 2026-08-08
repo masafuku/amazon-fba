@@ -299,6 +299,7 @@ export default function AgentPage() {
                                     {renderSortHeader('ランキング', 'salesRank')}
                                     {renderSortHeader('レビュー数', 'reviewCount')}
                                     {renderSortHeader('調査日時', 'createdAt')}
+                                    {renderSortHeader('発見回数', 'timesSeen')}
                                     <th className="px-4 py-3 font-medium text-slate-400">リンク</th>
                                     <th className="px-4 py-3 font-medium text-slate-400">操作</th>
                                 </tr>
@@ -361,6 +362,15 @@ export default function AgentPage() {
                                         <td className="px-4 py-3 text-slate-200">{candidate.salesRank ?? '-'}</td>
                                         <td className="px-4 py-3 text-slate-200">{candidate.reviewCount ?? '-'}</td>
                                         <td className="px-4 py-3 text-slate-400">{formatDateTime(candidate.createdAt)}</td>
+                                        <td className="px-4 py-3 text-slate-200">
+                                            {candidate.timesSeen > 1 ? (
+                                                <span className="rounded-lg bg-cyan-900/40 px-2 py-1 text-xs font-semibold text-cyan-200" title="複数回のスキャンで繰り返し見つかっている候補">
+                                                    {candidate.timesSeen}回
+                                                </span>
+                                            ) : (
+                                                candidate.timesSeen ?? '-'
+                                            )}
+                                        </td>
                                         <td className="px-4 py-3">
                                             <div className="flex flex-wrap gap-2">
                                                 <a
