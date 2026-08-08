@@ -13,6 +13,7 @@ import {
 } from 'recharts';
 import { Download, FileText, UploadCloud } from 'lucide-react';
 import { loadDbStatsFromDb, loadRowsFromDb, saveRowsToDb } from './db';
+import FavoriteButton from './FavoriteButton';
 
 const SAMPLE_CSV = `ASIN,Title,Buy Box Price,Amazon Price,Merchant Price,Sales Rank,Condition,Buy Box Price (USD),List Price (USD),"Buy Box: Amazon (USD)","Buy Box: Merchant (USD)","Buy Box: Amazon (JPY)","Buy Box: Merchant (JPY)","Amazon Price (JPY)","Merchant Price (JPY)","Country"
 B08N5WRWNW,Sample Product A,29.99,34.99,28.99,12345,New,29.99,32.99,29.99,0.00,4498,0,4498,0,US
@@ -873,6 +874,7 @@ export default function App() {
                                                 {renderSortHeader('Amazonセラー', 'amazonSeller')}
                                                 {renderSortHeader('純利益(円)', 'profit')}
                                                 {renderSortHeader('利益率(%)', 'profitRate')}
+                                                <th className="px-4 py-3 font-medium text-slate-400">お気に入り</th>
                                             </tr>
                                         </thead>
                                         <tbody>
@@ -914,6 +916,9 @@ export default function App() {
                                                     <td className="px-4 py-3 text-slate-100">{row.amazonSeller ? 'Yes' : 'No'}</td>
                                                     <td className={`px-4 py-3 font-semibold ${row.profit >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{row.profit !== null ? row.profit.toFixed(0) : '-'}</td>
                                                     <td className={`px-4 py-3 font-semibold ${row.profitRate >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{row.profitRate !== null ? row.profitRate.toFixed(1) : '-'}</td>
+                                                    <td className="px-4 py-3">
+                                                        <FavoriteButton asin={getAsin(row)} title={getTitle(row)} source="csv" data={row} />
+                                                    </td>
                                                 </tr>
                                             ))}
                                         </tbody>
@@ -935,6 +940,9 @@ export default function App() {
                                                 <span>ASIN: {getAsin(row)}</span>
                                                 <span>カテゴリ: {row.productCategory || '未分類'}</span>
                                                 <span>US: {row.buyBoxUsd !== null ? `$${row.buyBoxUsd.toFixed(2)}` : '-'}</span>
+                                            </div>
+                                            <div className="mt-3">
+                                                <FavoriteButton asin={getAsin(row)} title={getTitle(row)} source="csv" data={row} />
                                             </div>
                                             <div className="mt-3 space-y-2">
                                                 <p className="text-base font-semibold text-white">{getTitle(row)}</p>
