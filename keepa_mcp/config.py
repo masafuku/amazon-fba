@@ -36,6 +36,12 @@ class Settings:
     keepa_api_key: str
     usd_to_jpy: float
     default_domain: str
+    cache_enabled: bool
+    # Prices/ranks/reviews move; keep these caches short-lived by default.
+    cache_ttl_product_hours: float
+    cache_ttl_finder_hours: float
+    # Category trees barely change; safe to cache much longer.
+    cache_ttl_category_hours: float
 
     @classmethod
     def load(cls) -> "Settings":
@@ -43,6 +49,10 @@ class Settings:
             keepa_api_key=os.getenv("KEEPA_API_KEY", ""),
             usd_to_jpy=float(os.getenv("USD_TO_JPY", "150.0")),
             default_domain=os.getenv("KEEPA_DEFAULT_DOMAIN", "US"),
+            cache_enabled=os.getenv("KEEPA_CACHE_ENABLED", "true").lower() not in ("0", "false", "no"),
+            cache_ttl_product_hours=float(os.getenv("KEEPA_CACHE_TTL_PRODUCT_HOURS", "6")),
+            cache_ttl_finder_hours=float(os.getenv("KEEPA_CACHE_TTL_FINDER_HOURS", "6")),
+            cache_ttl_category_hours=float(os.getenv("KEEPA_CACHE_TTL_CATEGORY_HOURS", "720")),
         )
 
 

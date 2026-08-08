@@ -5,6 +5,13 @@ Run directly for local testing:
     python -m keepa_mcp.server
 
 Registered as a stdio MCP server in ../.mcp.json under the name "keepa".
+
+Caching: results are cached locally in keepa_mcp/cache.sqlite3 (see cache.py /
+cached_ops.py) to conserve Keepa tokens, since the same ASIN/category/code is
+often re-queried while tuning filters. Every tool that can be served from
+cache accepts force_refresh=True to bypass it and pull live data - use that
+when you have spare token budget and want current prices/ranks rather than
+what was cached earlier.
 """
 from __future__ import annotations
 
@@ -13,17 +20,20 @@ from typing import Any, Dict, List, Optional
 
 from mcp.server.fastmcp import FastMCP
 
-from . import analysis
+from . import analysis, cache
+from .cached_ops import (
+    cached_find_products,
+    cached_get_products,
+    cached_lookup_by_code,
+    cached_search_categories,
+    is_code_lookup_cached,
+)
 from .config import settings
 from .keepa_client import (
     KeepaError,
     estimate_finder_cost,
     estimate_product_request_cost,
-    find_products,
-    get_products,
     get_token_status,
-    lookup_by_code,
-    search_categories,
 )
 
 mcp = FastMCP("keepa-arbitrage-finder")
@@ -55,15 +65,22 @@ def check_token_balance() -> Dict[str, Any]:
     return get_token_status(api_key)
 
 
-def _summarize_product(product: Dict[str, Any], domain: str) -> Dict[str, Any]:
+@mcp.tool()
+def cache_status() -> Dict[str, Any]:
+    """Show how many entries are cached locally, by kind (category_search,
+    finder, product, code_lookup), and their age range. Free - no Keepa call."""
+    return cache.stats()
+
+
+def _summarize_product(product: Dict[str, Any], domain: str, cache_info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     asin = product.get("asin")
-    return {
+    summary = {
         "asin": asin,
         "title": product.get("title"),
         "brand": product.get("brand"),
         "domain": domain.upper(),
         "price": analysis.current_price(product, domain),
-        "currency": None,  # filled in by caller when known
+        "currency": _currency_for(domain),
         "sales_rank": analysis.sales_rank(product),
         "review_count": analysis.review_count(product),
         "rating": analysis.rating(product),
@@ -72,22 +89,34 @@ def _summarize_product(product: Dict[str, Any], domain: str) -> Dict[str, Any]:
         "ean": (product.get("eanList") or [None])[0],
         "url": analysis.product_url(asin, domain),
     }
+    if cache_info is not None:
+        summary["_cache"] = cache_info
+    return summary
+
+
+def _currency_for(domain: str) -> str:
+    from .keepa_client import CURRENCY_CODE
+    return CURRENCY_CODE.get(domain.upper(), "?")
 
 
 @mcp.tool()
-def search_category(term: str, domain: str = "US") -> List[Dict[str, Any]]:
+def search_category(term: str, domain: str = "US", force_refresh: bool = False) -> Dict[str, Any]:
     """Search Keepa's category tree by name and return matching category ids.
 
     Use this first to resolve a category name (e.g. "Kitchen Utensils & Gadgets")
     to the numeric category_id needed by find_candidates / find_arbitrage_candidates.
     Category names are in the target marketplace's language (English for domain=US).
+    Results are cached for a long time by default (categories rarely change);
+    pass force_refresh=True to bypass the cache.
 
     Args:
         term: Category name or keyword to search for.
         domain: Amazon marketplace code (US, JP, GB, DE, FR, CA, ...). Default "US".
+        force_refresh: Bypass the cache and query Keepa live.
     """
     api_key = _require_api_key()
-    return search_categories(api_key, term, domain=domain)
+    results, cache_info = cached_search_categories(api_key, term, domain=domain, force_refresh=force_refresh)
+    return {"categories": results, "_cache": cache_info}
 
 
 @mcp.tool()
@@ -98,11 +127,15 @@ def find_candidates(
     review_count_max: int = 200,
     max_results: int = 50,
     domain: str = "US",
+    force_refresh: bool = False,
 ) -> Dict[str, Any]:
     """Coarse, cheap product search via Keepa's Product Finder.
 
     Filters only by category / sales rank range / max review count - no price
     data yet (call get_product_detail or find_arbitrage_candidates for that).
+    Results are cached (default 6h; see KEEPA_CACHE_TTL_FINDER_HOURS) since
+    rankings/review counts do not change minute to minute; pass
+    force_refresh=True to force a live re-query.
 
     Args:
         category_id: Keepa category id (from search_category).
@@ -111,70 +144,67 @@ def find_candidates(
         review_count_max: Maximum current review count.
         max_results: Max ASINs to return (capped at 200 per Keepa Finder page).
         domain: Amazon marketplace code. Default "US".
+        force_refresh: Bypass the cache and query Keepa live.
     """
     api_key = _require_api_key()
-    estimated_cost = estimate_finder_cost(max_results)
-    status = get_token_status(api_key)
-    tokens_left = status["tokens_left"]
-    if tokens_left is not None and tokens_left <= 0:
+    try:
+        result, cache_info = cached_find_products(
+            api_key, domain=domain, category_id=category_id,
+            sales_rank_min=sales_rank_min, sales_rank_max=sales_rank_max,
+            review_count_max=review_count_max, review_count_min=None,
+            per_page=max_results, force_refresh=force_refresh,
+        )
+    except KeepaError as exc:
+        status = get_token_status(api_key)
+        tokens_left = status["tokens_left"] or 0
+        estimated_cost = estimate_finder_cost(max_results)
         return {
-            "error": "Insufficient Keepa token balance to run this query.",
+            "error": f"Product Finder call failed: {exc}",
             "tokens_left": tokens_left,
             "estimated_cost": estimated_cost,
             "estimated_wait": _wait_estimate(estimated_cost - tokens_left, status["refill_rate_per_minute"]),
-            "hint": "Call check_token_balance() to monitor recovery.",
         }
-    result = find_products(
-        api_key,
-        domain=domain,
-        category_id=category_id,
-        sales_rank_min=sales_rank_min,
-        sales_rank_max=sales_rank_max,
-        review_count_max=review_count_max,
-        per_page=max_results,
-    )
+    result["_cache"] = cache_info
     return result
 
 
 @mcp.tool()
-def get_product_detail(asin: str, domain: str = "US") -> Dict[str, Any]:
+def get_product_detail(asin: str, domain: str = "US", force_refresh: bool = False) -> Dict[str, Any]:
     """Fetch full Keepa product detail: current price, 90-day price
     volatility, sales rank, review count, rating, and UPC/EAN identifiers.
+    Cached by default (default 6h; see KEEPA_CACHE_TTL_PRODUCT_HOURS) - pass
+    force_refresh=True when you want the latest price rather than a cached one.
 
     Args:
         asin: The ASIN to look up.
         domain: Amazon marketplace code the ASIN belongs to. Default "US".
+        force_refresh: Bypass the cache and fetch live from Keepa.
     """
     api_key = _require_api_key()
-    products = get_products(api_key, domain=domain, asins=[asin], stats_days=90)
+    products, cache_meta = cached_get_products(api_key, domain=domain, asins=[asin], stats_days=90, force_refresh=force_refresh)
     if not products:
         return {"error": f"No product found for ASIN {asin} in domain {domain}"}
-    summary = _summarize_product(products[0], domain)
-    summary["currency"] = _currency_for(domain)
-    return summary
+    return _summarize_product(products[0], domain, cache_meta.get(asin))
 
 
 @mcp.tool()
-def find_jp_price(code: str) -> Dict[str, Any]:
+def find_jp_price(code: str, force_refresh: bool = False) -> Dict[str, Any]:
     """Cross-domain lookup: given a UPC or EAN barcode, find the matching
-    product listed on Amazon Japan and its current price.
+    product listed on Amazon Japan and its current price. Cached by default
+    (default 6h; see KEEPA_CACHE_TTL_PRODUCT_HOURS) - pass force_refresh=True
+    to re-check the live price.
 
     Args:
         code: UPC or EAN of the product (from get_product_detail's upc/ean fields).
+        force_refresh: Bypass the cache and look up live on Keepa.
     """
     api_key = _require_api_key()
-    products = lookup_by_code(api_key, code, domain="JP")
+    products, cache_info = cached_lookup_by_code(api_key, code, domain="JP", force_refresh=force_refresh)
     if not products:
-        return {"found": False, "code": code}
-    summary = _summarize_product(products[0], "JP")
-    summary["currency"] = "JPY"
+        return {"found": False, "code": code, "_cache": cache_info}
+    summary = _summarize_product(products[0], "JP", cache_info)
     summary["found"] = True
     return summary
-
-
-def _currency_for(domain: str) -> str:
-    from .keepa_client import CURRENCY_CODE
-    return CURRENCY_CODE.get(domain.upper(), "?")
 
 
 @mcp.tool()
@@ -188,6 +218,7 @@ def find_arbitrage_candidates(
     max_candidates: int = 30,
     sell_domain: str = "US",
     usd_to_jpy: Optional[float] = None,
+    force_refresh: bool = False,
 ) -> Dict[str, Any]:
     """End-to-end search: find products in a category/rank/review-count band
     on the sell-side marketplace (default US), cross-reference their JPY cost
@@ -196,7 +227,11 @@ def find_arbitrage_candidates(
 
     Pipeline: Product Finder (cheap) -> per-ASIN detail fetch (price/UPC/rank/
     reviews/volatility) -> JP cross-domain price lookup by UPC/EAN -> filter.
-    Each step costs Keepa API tokens; keep max_candidates modest while tuning.
+    Each live Keepa call costs tokens; results are cached locally (see cache.py)
+    so re-running the same/overlapping search is free where the cache is warm.
+    Pass force_refresh=True to ignore the cache and pull current prices/ranks
+    everywhere (worth doing when your token budget is flush, since prices and
+    rankings do genuinely move over time).
 
     Args:
         category_id: Keepa category id on the sell-side marketplace (from search_category).
@@ -210,70 +245,60 @@ def find_arbitrage_candidates(
         usd_to_jpy: Override the USD->JPY rate used for the price-gap calc
             (defaults to USD_TO_JPY from .env, currently used only when
             sell_domain="US"; the cost side is assumed to be Amazon Japan).
+        force_refresh: Bypass the cache everywhere in this pipeline.
     """
     api_key = _require_api_key()
     rate = usd_to_jpy if usd_to_jpy is not None else settings.usd_to_jpy
 
-    # Preflight: this pipeline makes 1 Finder call + 1 batched product-detail
-    # call + up to max_candidates JP lookup calls. On low refill-rate plans a
-    # partial run can drain the bucket negative mid-pipeline (each Keepa call
-    # only checks that the balance is *positive*, not that it can afford the
-    # call), which previously surfaced as a raw 429 error. Check budget up
-    # front and bail out cleanly instead.
-    worst_case_cost = estimate_finder_cost(max_candidates) + 2 * estimate_product_request_cost(max_candidates)
+    # Free balance check, used only for the per-candidate budget gate below
+    # and an informational note - a cache-warm run can still fully succeed
+    # even at 0 tokens, so this no longer hard-blocks the pipeline.
     status = get_token_status(api_key)
     tokens_left = status["tokens_left"] or 0
-    if tokens_left <= 0:
-        return {
-            "candidates": [], "evaluated": 0,
-            "error": "Insufficient Keepa token balance to start this pipeline.",
-            "tokens_left": tokens_left,
-            "estimated_cost": worst_case_cost,
-            "estimated_wait": _wait_estimate(worst_case_cost - tokens_left, status["refill_rate_per_minute"]),
-        }
+    worst_case_cost = estimate_finder_cost(max_candidates) + 2 * estimate_product_request_cost(max_candidates)
     budget_note = None
     if tokens_left < worst_case_cost:
         budget_note = (
-            f"Only {tokens_left} tokens available (worst case needs ~{worst_case_cost}); "
-            "will run as far as the budget allows and stop early if it runs out."
+            f"Only {tokens_left} tokens available (worst case needs ~{worst_case_cost} if nothing is "
+            "cached); will use cached data where possible and stop early if live calls run out. "
+            f"Estimated wait for full budget: {_wait_estimate(worst_case_cost - tokens_left, status['refill_rate_per_minute'])}."
         )
+    budget = tokens_left  # tracks *live-call* budget only; cache hits are free and don't touch this
 
     try:
-        finder = find_products(
-            api_key,
-            domain=sell_domain,
-            category_id=category_id,
-            sales_rank_min=sales_rank_min,
-            sales_rank_max=sales_rank_max,
-            review_count_max=review_count_max,
-            per_page=max_candidates,
+        finder, finder_cache_info = cached_find_products(
+            api_key, domain=sell_domain, category_id=category_id,
+            sales_rank_min=sales_rank_min, sales_rank_max=sales_rank_max,
+            review_count_max=review_count_max, review_count_min=None,
+            per_page=max_candidates, force_refresh=force_refresh,
         )
     except KeepaError as exc:
-        return {"candidates": [], "evaluated": 0, "error": f"Product Finder call failed: {exc}"}
+        return {"candidates": [], "evaluated": 0, "error": f"Product Finder call failed: {exc}", "note": budget_note}
+    if not finder_cache_info["hit"]:
+        budget -= estimate_finder_cost(max_candidates)
 
     asins = finder["asins"][:max_candidates]
     if not asins:
         return {"candidates": [], "evaluated": 0, "note": "Product Finder returned no ASINs for these filters."}
 
     try:
-        sell_products = get_products(api_key, domain=sell_domain, asins=asins, stats_days=90)
+        sell_products, sell_cache_meta = cached_get_products(
+            api_key, domain=sell_domain, asins=asins, stats_days=90, force_refresh=force_refresh
+        )
     except KeepaError as exc:
         return {
             "candidates": [], "evaluated": 0,
             "error": f"Product detail fetch failed (likely token budget ran out after the Finder call): {exc}",
             "note": budget_note,
         }
-
-    # Re-check the real balance (free call) before the per-candidate JP
-    # lookup loop, so early-stop decisions use actual data, not estimates.
-    budget = get_token_status(api_key)["tokens_left"] or 0
+    budget -= sum(1 for info in sell_cache_meta.values() if not info["hit"])
 
     results = []
     skipped = []
     stopped_early = False
     for product in sell_products:
-        sell_summary = _summarize_product(product, sell_domain)
-        sell_summary["currency"] = _currency_for(sell_domain)
+        asin = product.get("asin")
+        sell_summary = _summarize_product(product, sell_domain, sell_cache_meta.get(asin))
         code = sell_summary["upc"] or sell_summary["ean"]
 
         if sell_summary["price"] is None:
@@ -287,25 +312,27 @@ def find_arbitrage_candidates(
             skipped.append({"asin": sell_summary["asin"], "reason": "no UPC/EAN to cross-reference against Amazon Japan"})
             continue
 
-        if budget < estimate_product_request_cost(1):
+        # Cache hits are free - only gate on budget when a live call is actually needed.
+        needs_live_call = force_refresh or not is_code_lookup_cached(code, "JP")
+        if needs_live_call and budget < estimate_product_request_cost(1):
             skipped.append({"asin": sell_summary["asin"], "reason": "stopped early: Keepa token budget ran out"})
             stopped_early = True
             continue
 
         try:
-            jp_matches = lookup_by_code(api_key, code, domain="JP")
+            jp_matches, jp_cache_info = cached_lookup_by_code(api_key, code, domain="JP", force_refresh=force_refresh)
         except KeepaError as exc:
             skipped.append({"asin": sell_summary["asin"], "reason": f"JP lookup failed (token budget likely exhausted): {exc}"})
             stopped_early = True
             continue
-        budget -= estimate_product_request_cost(1)
+        if not jp_cache_info["hit"]:
+            budget -= estimate_product_request_cost(1)
 
         if not jp_matches:
             skipped.append({"asin": sell_summary["asin"], "reason": f"no Amazon Japan listing found for code {code}"})
             continue
 
-        jp_summary = _summarize_product(jp_matches[0], "JP")
-        jp_summary["currency"] = "JPY"
+        jp_summary = _summarize_product(jp_matches[0], "JP", jp_cache_info)
         if jp_summary["price"] is None:
             skipped.append({"asin": sell_summary["asin"], "reason": "matched JP listing has no current price"})
             continue
