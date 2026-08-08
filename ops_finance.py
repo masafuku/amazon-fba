@@ -108,12 +108,36 @@ def init_ops_tables():
                 created_at TEXT NOT NULL
             );
 
+            -- daily_scan.py を1回実行するごとの動作履歴(エージェントページの
+            -- 「実行履歴」に表示する)。agent_candidates が候補の中身なら、
+            -- こちらは「いつ・何を条件に・何件評価して・通知はどうなったか」
+            -- というラン単位のサマリー。
+            CREATE TABLE IF NOT EXISTS agent_runs (
+                run_id TEXT PRIMARY KEY,
+                started_at TEXT NOT NULL,
+                duration_seconds REAL,
+                keyword TEXT,
+                category TEXT,
+                category_id INTEGER,
+                max_candidates INTEGER,
+                wait_for_tokens INTEGER,
+                evaluated INTEGER,
+                mcp_matched INTEGER,
+                qualified_count INTEGER,
+                rejected_count INTEGER,
+                stopped_early_for_tokens INTEGER,
+                error TEXT,
+                notify_status TEXT,              -- sent/skipped/failed
+                notify_error TEXT
+            );
+
             CREATE INDEX IF NOT EXISTS idx_daily_costs_date ON daily_costs(date);
             CREATE INDEX IF NOT EXISTS idx_sales_date ON sales(date);
             CREATE INDEX IF NOT EXISTS idx_sales_asin ON sales(asin);
             CREATE INDEX IF NOT EXISTS idx_inventory_log_asin ON inventory_log(asin);
             CREATE INDEX IF NOT EXISTS idx_agent_candidates_run_id ON agent_candidates(run_id);
             CREATE INDEX IF NOT EXISTS idx_agent_candidates_created_at ON agent_candidates(created_at);
+            CREATE INDEX IF NOT EXISTS idx_agent_runs_started_at ON agent_runs(started_at);
             CREATE INDEX IF NOT EXISTS idx_agent_candidates_asin ON agent_candidates(asin);
             '''
         )
@@ -414,16 +438,25 @@ def build_qualified_line_message(evaluation: dict, max_items: int = 5) -> str:
 # 6. 「エージェント」ページ向け: 調査結果の永続化
 # ---------------------------------------------------------------------------
 
-def persist_agent_run(category: str, evaluation: dict) -> str:
+def new_agent_run_id() -> str:
+    """persist_agent_run() と log_agent_run() で同じrun_idを共有したい
+    呼び出し元(daily_scan.py)向けの採番ヘルパー。"""
+    return f"agent-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
+
+
+def persist_agent_run(category: str, evaluation: dict, run_id: str = None) -> str:
     """evaluate_mcp_candidates() の結果(合格・不合格とも)を agent_candidates に
     保存する。ダッシュボードの「エージェント」ページがこれを表示し、
     CEOが気に入ったものだけ手動で favorites に追加する運用を想定。
 
-    Returns: 今回保存した run_id
+    run_id を渡さない場合は新規採番する。log_agent_run() と同じ実行に
+    紐付けたい場合は new_agent_run_id() で採番したものを両方に渡す。
+
+    Returns: 今回使った run_id
     """
     init_ops_tables()  # このモジュール単体で先に呼ばれるケースに備えて念のため
 
-    run_id = f"agent-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    run_id = run_id or new_agent_run_id()
     created_at = datetime.now(timezone.utc).isoformat()
 
     rows = []
@@ -469,6 +502,61 @@ def persist_agent_run(category: str, evaluation: dict) -> str:
             )
 
     return run_id
+
+
+def log_agent_run(
+    run_id: str,
+    started_at: str,
+    duration_seconds: float,
+    keyword: str = None,
+    category: str = None,
+    category_id: int = None,
+    max_candidates: int = None,
+    wait_for_tokens: bool = None,
+    mcp_result: dict = None,
+    evaluation: dict = None,
+    error: str = None,
+    notify_status: str = None,
+    notify_error: str = None,
+) -> None:
+    """daily_scan.py の1回の実行を agent_runs に記録する(エージェントページの
+    「実行履歴」用)。persist_agent_run() が候補の中身を保存するのに対し、
+    こちらは実行条件と結果件数・通知結果のサマリーだけを保存する。
+    """
+    init_ops_tables()
+
+    mcp_result = mcp_result or {}
+    evaluation = evaluation or {}
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            '''
+            INSERT INTO agent_runs (
+                run_id, started_at, duration_seconds, keyword, category, category_id,
+                max_candidates, wait_for_tokens, evaluated, mcp_matched,
+                qualified_count, rejected_count, stopped_early_for_tokens,
+                error, notify_status, notify_error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(run_id) DO UPDATE SET
+                duration_seconds = excluded.duration_seconds,
+                evaluated = excluded.evaluated,
+                mcp_matched = excluded.mcp_matched,
+                qualified_count = excluded.qualified_count,
+                rejected_count = excluded.rejected_count,
+                stopped_early_for_tokens = excluded.stopped_early_for_tokens,
+                error = excluded.error,
+                notify_status = excluded.notify_status,
+                notify_error = excluded.notify_error
+            ''',
+            (
+                run_id, started_at, duration_seconds, keyword, category, category_id,
+                max_candidates, 1 if wait_for_tokens else 0,
+                mcp_result.get('evaluated'), mcp_result.get('matched'),
+                len(evaluation.get('qualified', [])), len(evaluation.get('rejected', [])),
+                1 if mcp_result.get('stopped_early_for_tokens') else 0,
+                error, notify_status, notify_error,
+            ),
+        )
 
 
 if __name__ == '__main__':

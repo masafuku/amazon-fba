@@ -65,6 +65,14 @@ export const loadAgentCandidates = async (days = 7) => {
     return json.candidates || [];
 };
 
+export const loadAgentRuns = async (days = 30) => {
+    const params = new URLSearchParams({ days: String(days) });
+    const response = await fetch(`${API_BASE}/api/agent/runs?${params.toString()}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const json = await response.json();
+    return json.runs || [];
+};
+
 export const loadDbStatsFromDb = async () => {
     const response = await fetch(`${API_BASE}/api/health`);
     if (!response.ok) {

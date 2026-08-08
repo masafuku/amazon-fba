@@ -1,21 +1,34 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Star } from 'lucide-react';
-import { loadAgentCandidates, saveFavorite } from './db';
+import { loadAgentCandidates, loadAgentRuns, saveFavorite } from './db';
 import { formatDateTime } from './formatters';
+
+const formatDuration = (seconds) => {
+    if (seconds === null || seconds === undefined || Number.isNaN(seconds)) return '-';
+    if (seconds < 60) return `${seconds.toFixed(0)}秒`;
+    return `${Math.floor(seconds / 60)}分${Math.round(seconds % 60)}秒`;
+};
 
 export default function AgentPage() {
     const [candidates, setCandidates] = useState([]);
+    const [runs, setRuns] = useState([]);
     const [error, setError] = useState('');
     const [loading, setLoading] = useState(true);
     const [savingAsin, setSavingAsin] = useState('');
     const [days, setDays] = useState(7);
     const [showRejected, setShowRejected] = useState(false);
+    const [showRunHistory, setShowRunHistory] = useState(true);
 
     const refresh = async (period) => {
         setLoading(true);
         setError('');
         try {
-            setCandidates(await loadAgentCandidates(period));
+            const [candidateList, runList] = await Promise.all([
+                loadAgentCandidates(period),
+                loadAgentRuns(Math.max(period, 30)),
+            ]);
+            setCandidates(candidateList);
+            setRuns(runList);
         } catch (loadError) {
             setError(loadError?.message || 'エージェント候補の読み込みに失敗しました。');
         } finally {
@@ -69,6 +82,88 @@ export default function AgentPage() {
             {error ? (
                 <p className="rounded-2xl border border-rose-800 bg-rose-950/40 p-4 text-sm text-rose-200">{error}</p>
             ) : null}
+
+            <section className="rounded-3xl border border-slate-800 bg-slate-900/80 p-6 shadow-xl shadow-slate-950/10">
+                <div className="mb-4 flex items-center justify-between gap-3">
+                    <h2 className="text-lg font-semibold text-white">実行履歴</h2>
+                    <button
+                        type="button"
+                        onClick={() => setShowRunHistory((current) => !current)}
+                        className="rounded-2xl bg-slate-800 px-4 py-2 text-sm font-semibold text-slate-200"
+                    >
+                        {showRunHistory ? '隠す' : '表示'}
+                    </button>
+                </div>
+                {showRunHistory ? (
+                    loading ? (
+                        <p className="py-6 text-center text-slate-500">読み込み中...</p>
+                    ) : runs.length === 0 ? (
+                        <p className="py-6 text-center text-slate-500">daily_scan.py はまだ実行されていません。</p>
+                    ) : (
+                        <div className="overflow-x-auto">
+                            <table className="min-w-full border-collapse text-left text-sm">
+                                <thead className="bg-slate-950/90">
+                                    <tr>
+                                        <th className="px-4 py-3 font-medium text-slate-400">実行日時</th>
+                                        <th className="px-4 py-3 font-medium text-slate-400">キーワード / カテゴリ</th>
+                                        <th className="px-4 py-3 font-medium text-slate-400">所要時間</th>
+                                        <th className="px-4 py-3 font-medium text-slate-400">評価件数</th>
+                                        <th className="px-4 py-3 font-medium text-slate-400">合格/却下</th>
+                                        <th className="px-4 py-3 font-medium text-slate-400">状態</th>
+                                        <th className="px-4 py-3 font-medium text-slate-400">通知</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {runs.map((run) => (
+                                        <tr key={run.runId} className="border-t border-slate-800 bg-slate-950/80">
+                                            <td className="px-4 py-3 text-slate-200">{formatDateTime(run.startedAt)}</td>
+                                            <td className="px-4 py-3 text-slate-300">
+                                                {run.keyword || '-'}
+                                                {run.category ? ` / ${run.category}` : ''}
+                                            </td>
+                                            <td className="px-4 py-3 text-slate-400">{formatDuration(run.durationSeconds)}</td>
+                                            <td className="px-4 py-3 text-slate-200">
+                                                {run.evaluated ?? '-'}件中 粗選別{run.mcpMatched ?? '-'}件
+                                            </td>
+                                            <td className="px-4 py-3 text-slate-200">
+                                                <span className="text-emerald-300">{run.qualifiedCount ?? '-'}</span>
+                                                {' / '}
+                                                <span className="text-slate-400">{run.rejectedCount ?? '-'}</span>
+                                            </td>
+                                            <td className="px-4 py-3">
+                                                {run.error ? (
+                                                    <span className="rounded-lg bg-rose-900/60 px-2 py-1 text-xs font-semibold text-rose-200" title={run.error}>
+                                                        エラー
+                                                    </span>
+                                                ) : run.stoppedEarlyForTokens ? (
+                                                    <span className="rounded-lg bg-amber-900/40 px-2 py-1 text-xs font-semibold text-amber-200">
+                                                        途中で打ち切り
+                                                    </span>
+                                                ) : (
+                                                    <span className="rounded-lg bg-emerald-900/60 px-2 py-1 text-xs font-semibold text-emerald-200">
+                                                        完了
+                                                    </span>
+                                                )}
+                                            </td>
+                                            <td className="px-4 py-3">
+                                                {run.notifyStatus === 'sent' ? (
+                                                    <span className="text-emerald-300">送信済み</span>
+                                                ) : run.notifyStatus === 'failed' ? (
+                                                    <span className="text-rose-300" title={run.notifyError || ''}>失敗</span>
+                                                ) : run.notifyStatus === 'skipped' ? (
+                                                    <span className="text-slate-500">未設定でスキップ</span>
+                                                ) : (
+                                                    <span className="text-slate-600">-</span>
+                                                )}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    )
+                ) : null}
+            </section>
 
             <section className="rounded-3xl border border-slate-800 bg-slate-900/80 p-6 shadow-xl shadow-slate-950/10">
                 <div className="mb-4 flex flex-wrap items-center justify-between gap-3">

@@ -519,6 +519,31 @@ def init_db() -> None:
         )
         conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_run_id ON agent_candidates(run_id)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_created_at ON agent_candidates(created_at)')
+        # ops_finance.py (daily_scan.py) が書き込む実行履歴。定義元はops_finance.py
+        # 側だが、agent_candidates と同じ理由でここにも同じ定義を用意しておく。
+        conn.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS agent_runs (
+                run_id TEXT PRIMARY KEY,
+                started_at TEXT NOT NULL,
+                duration_seconds REAL,
+                keyword TEXT,
+                category TEXT,
+                category_id INTEGER,
+                max_candidates INTEGER,
+                wait_for_tokens INTEGER,
+                evaluated INTEGER,
+                mcp_matched INTEGER,
+                qualified_count INTEGER,
+                rejected_count INTEGER,
+                stopped_early_for_tokens INTEGER,
+                error TEXT,
+                notify_status TEXT,
+                notify_error TEXT
+            )
+            '''
+        )
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_runs_started_at ON agent_runs(started_at)')
         conn.execute(
             '''
             CREATE TABLE IF NOT EXISTS keepa_finder_items (
@@ -738,6 +763,51 @@ def load_agent_candidates(days: int = 7):
     return candidates
 
 
+def load_agent_runs(days: int = 30):
+    """daily_scan.py の実行履歴(直近 days 日分)を新しい順で返す。"""
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            '''
+            SELECT run_id, started_at, duration_seconds, keyword, category, category_id,
+                   max_candidates, wait_for_tokens, evaluated, mcp_matched,
+                   qualified_count, rejected_count, stopped_early_for_tokens,
+                   error, notify_status, notify_error
+            FROM agent_runs
+            WHERE started_at >= ?
+            ORDER BY started_at DESC
+            ''',
+            (since,),
+        ).fetchall()
+
+    runs = []
+    for row in rows:
+        (run_id, started_at, duration_seconds, keyword, category, category_id,
+         max_candidates, wait_for_tokens, evaluated, mcp_matched,
+         qualified_count, rejected_count, stopped_early_for_tokens,
+         error, notify_status, notify_error) = row
+        runs.append({
+            'runId': run_id,
+            'startedAt': started_at,
+            'durationSeconds': duration_seconds,
+            'keyword': keyword,
+            'category': category,
+            'categoryId': category_id,
+            'maxCandidates': max_candidates,
+            'waitForTokens': bool(wait_for_tokens),
+            'evaluated': evaluated,
+            'mcpMatched': mcp_matched,
+            'qualifiedCount': qualified_count,
+            'rejectedCount': rejected_count,
+            'stoppedEarlyForTokens': bool(stopped_early_for_tokens),
+            'error': error,
+            'notifyStatus': notify_status,
+            'notifyError': notify_error,
+        })
+    return runs
+
+
 def delete_favorite(asin):
     asin = str(asin or '').strip().upper()
     with sqlite3.connect(DB_PATH) as conn:
@@ -886,6 +956,11 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == '/api/agent/candidates':
             days = to_int_or_default((params.get('days') or [None])[0], 7)
             self._send_json(200, {'ok': True, 'candidates': load_agent_candidates(days=days)})
+            return
+
+        if parsed.path == '/api/agent/runs':
+            days = to_int_or_default((params.get('days') or [None])[0], 30)
+            self._send_json(200, {'ok': True, 'runs': load_agent_runs(days=days)})
             return
 
         if parsed.path == '/api/latest':

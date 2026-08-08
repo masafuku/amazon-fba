@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from datetime import datetime, timezone
 
 from config import Settings
@@ -45,6 +46,8 @@ from ops_finance import (
     check_budget_alert,
     evaluate_mcp_candidates,
     init_ops_tables,
+    log_agent_run,
+    new_agent_run_id,
     persist_agent_run,
 )
 
@@ -91,6 +94,10 @@ def run_daily_scan(
 ) -> None:
     init_ops_tables()
 
+    run_id = new_agent_run_id()
+    started_at = datetime.now(timezone.utc).isoformat()
+    start_time = time.monotonic()
+
     if keyword is None:
         weekday = datetime.now(timezone.utc).weekday()
         keyword = KEYWORD_ROTATION.get(weekday, "kitchen gadget")
@@ -99,6 +106,12 @@ def run_daily_scan(
     if category_id is None and category_name:
         category_id = resolve_category_id(category_name)
         if category_id is None:
+            log_agent_run(
+                run_id, started_at, time.monotonic() - start_time,
+                keyword=keyword, category=category_name, category_id=None,
+                max_candidates=max_candidates, wait_for_tokens=wait_for_tokens,
+                error=f"カテゴリ '{category_name}' が見つかりませんでした。",
+            )
             sys.exit(1)
 
     label = f"{keyword}" + (f" / {category_name}" if category_name else "")
@@ -112,6 +125,12 @@ def run_daily_scan(
 
     if mcp_result.get("error"):
         print(f"[ERROR] MCP検索失敗: {mcp_result['error']}")
+        log_agent_run(
+            run_id, started_at, time.monotonic() - start_time,
+            keyword=keyword, category=category_name, category_id=category_id,
+            max_candidates=max_candidates, wait_for_tokens=wait_for_tokens,
+            mcp_result=mcp_result, error=mcp_result["error"],
+        )
         sys.exit(1)
 
     print(f"[INFO] MCP評価対象: {mcp_result.get('evaluated', 0)}件 / "
@@ -131,7 +150,7 @@ def run_daily_scan(
     if evaluation["fee_missing"]:
         print(f"[WARN] 手数料データなし(仮値で計算): {evaluation['fee_missing']}")
 
-    run_id = persist_agent_run(label, evaluation)
+    persist_agent_run(label, evaluation, run_id=run_id)
     print(f"[INFO] 「エージェント」ページ用に保存しました (run_id={run_id})。ダッシュボードで確認できます。")
 
     # 候補の通知
@@ -144,6 +163,8 @@ def run_daily_scan(
     if budget_alerts:
         full_message += "\n\n【予算アラート】\n" + "\n".join(budget_alerts)
 
+    notify_status = "skipped"
+    notify_error = None
     settings = Settings.load()
     if settings.email_smtp_host and settings.email_username and settings.email_to:
         try:
@@ -158,12 +179,23 @@ def run_daily_scan(
                 body=full_message,
             )
             print(f"[INFO] メール通知を送信しました ({settings.email_to})。")
+            notify_status = "sent"
         except Exception as exc:
             print(f"[ERROR] メール通知送信失敗: {exc}")
+            notify_status = "failed"
+            notify_error = str(exc)
     else:
         print("[WARN] EMAIL_* が未設定のため、通知はスキップしました。")
         print("--- 通知予定だった内容 ---")
         print(full_message)
+
+    log_agent_run(
+        run_id, started_at, time.monotonic() - start_time,
+        keyword=keyword, category=category_name, category_id=category_id,
+        max_candidates=max_candidates, wait_for_tokens=wait_for_tokens,
+        mcp_result=mcp_result, evaluation=evaluation,
+        notify_status=notify_status, notify_error=notify_error,
+    )
 
 
 def main() -> None:
