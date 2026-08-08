@@ -11,6 +11,17 @@ const formatDuration = (seconds) => {
     return `${Math.floor(seconds / 60)}分${Math.round(seconds % 60)}秒`;
 };
 
+// 実行中の検索は経過時間を秒精度で表示したいので、durationSecondsではなく
+// startedAtから現在時刻までを都度計算する。
+const formatElapsedSince = (startedAt) => {
+    const startedMs = Date.parse(startedAt);
+    if (Number.isNaN(startedMs)) return '-';
+    return formatDuration((Date.now() - startedMs) / 1000);
+};
+
+// 実行中(status='running')の間だけ有効なポーリング間隔。
+const RUNNING_POLL_INTERVAL_MS = 10000;
+
 export default function AgentPage() {
     const [candidates, setCandidates] = useState([]);
     const [runs, setRuns] = useState([]);
@@ -54,6 +65,20 @@ export default function AgentPage() {
         refreshTokenStatus();
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [days]);
+
+    const runningRun = useMemo(() => runs.find((run) => run.status === 'running'), [runs]);
+
+    // 実行中の検索がある間は、状況が分かるように自動でポーリングする
+    // (完了したら自然にポーリングが止まる)。
+    useEffect(() => {
+        if (!runningRun) return undefined;
+        const timer = setInterval(() => {
+            refresh(days);
+            refreshTokenStatus();
+        }, RUNNING_POLL_INTERVAL_MS);
+        return () => clearInterval(timer);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [runningRun?.runId, days]);
 
     const selectSortKey = (nextSortKey) => {
         if (sortKey === nextSortKey) {
@@ -158,6 +183,20 @@ export default function AgentPage() {
                 <p className="rounded-2xl border border-rose-800 bg-rose-950/40 p-4 text-sm text-rose-200">{error}</p>
             ) : null}
 
+            {runningRun ? (
+                <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-cyan-800 bg-cyan-950/30 px-4 py-3">
+                    <div className="flex items-center gap-3">
+                        <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-cyan-400" aria-hidden="true" />
+                        <p className="text-sm text-cyan-100">
+                            <span className="font-semibold">🔄 検索実行中:</span> {runningRun.keyword}
+                            {runningRun.category ? ` / ${runningRun.category}` : ''}
+                            <span className="ml-2 text-cyan-300">経過 {formatElapsedSince(runningRun.startedAt)}</span>
+                        </p>
+                    </div>
+                    <p className="text-xs text-cyan-400">{RUNNING_POLL_INTERVAL_MS / 1000}秒ごとに自動更新中</p>
+                </div>
+            ) : null}
+
             <section className="rounded-3xl border border-slate-800 bg-slate-900/80 p-6 shadow-xl shadow-slate-950/10">
                 <div className="mb-4 flex items-center justify-between gap-3">
                     <h2 className="text-lg font-semibold text-white">実行履歴</h2>
@@ -196,9 +235,11 @@ export default function AgentPage() {
                                                 {run.keyword || '-'}
                                                 {run.category ? ` / ${run.category}` : ''}
                                             </td>
-                                            <td className="px-4 py-3 text-slate-400">{formatDuration(run.durationSeconds)}</td>
+                                            <td className="px-4 py-3 text-slate-400">
+                                                {run.status === 'running' ? formatElapsedSince(run.startedAt) : formatDuration(run.durationSeconds)}
+                                            </td>
                                             <td className="px-4 py-3 text-slate-200">
-                                                {run.evaluated ?? '-'}件中 粗選別{run.mcpMatched ?? '-'}件
+                                                {run.status === 'running' ? '-' : `${run.evaluated ?? '-'}件中 粗選別${run.mcpMatched ?? '-'}件`}
                                             </td>
                                             <td className="px-4 py-3 text-slate-200">
                                                 <span className="text-emerald-300">{run.qualifiedCount ?? '-'}</span>
@@ -206,7 +247,12 @@ export default function AgentPage() {
                                                 <span className="text-slate-400">{run.rejectedCount ?? '-'}</span>
                                             </td>
                                             <td className="px-4 py-3">
-                                                {run.error ? (
+                                                {run.status === 'running' ? (
+                                                    <span className="inline-flex items-center gap-1 rounded-lg bg-cyan-900/50 px-2 py-1 text-xs font-semibold text-cyan-200">
+                                                        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-cyan-300" aria-hidden="true" />
+                                                        実行中
+                                                    </span>
+                                                ) : run.error ? (
                                                     <span className="rounded-lg bg-rose-900/60 px-2 py-1 text-xs font-semibold text-rose-200" title={run.error}>
                                                         エラー
                                                     </span>

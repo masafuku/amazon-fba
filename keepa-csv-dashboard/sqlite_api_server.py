@@ -621,10 +621,14 @@ def init_db() -> None:
                 stopped_early_for_tokens INTEGER,
                 error TEXT,
                 notify_status TEXT,
-                notify_error TEXT
+                notify_error TEXT,
+                status TEXT NOT NULL DEFAULT 'running'
             )
             '''
         )
+        agent_runs_columns = {row[1] for row in conn.execute('PRAGMA table_info(agent_runs)').fetchall()}
+        if 'status' not in agent_runs_columns:
+            conn.execute("ALTER TABLE agent_runs ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'")
         conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_runs_started_at ON agent_runs(started_at)')
         conn.execute(
             '''
@@ -891,7 +895,7 @@ def load_agent_runs(days: int = 30):
             SELECT run_id, started_at, duration_seconds, keyword, category, category_id,
                    max_candidates, wait_for_tokens, evaluated, mcp_matched,
                    qualified_count, rejected_count, stopped_early_for_tokens,
-                   error, notify_status, notify_error
+                   error, notify_status, notify_error, status
             FROM agent_runs
             WHERE started_at >= ?
             ORDER BY started_at DESC
@@ -904,7 +908,7 @@ def load_agent_runs(days: int = 30):
         (run_id, started_at, duration_seconds, keyword, category, category_id,
          max_candidates, wait_for_tokens, evaluated, mcp_matched,
          qualified_count, rejected_count, stopped_early_for_tokens,
-         error, notify_status, notify_error) = row
+         error, notify_status, notify_error, status) = row
         runs.append({
             'runId': run_id,
             'startedAt': started_at,
@@ -922,6 +926,7 @@ def load_agent_runs(days: int = 30):
             'error': error,
             'notifyStatus': notify_status,
             'notifyError': notify_error,
+            'status': status or 'completed',
         })
     return runs
 

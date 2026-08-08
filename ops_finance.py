@@ -130,7 +130,8 @@ def init_ops_tables():
                 stopped_early_for_tokens INTEGER,
                 error TEXT,
                 notify_status TEXT,              -- sent/skipped/failed
-                notify_error TEXT
+                notify_error TEXT,
+                status TEXT NOT NULL DEFAULT 'running'  -- running/completed/failed。エージェントページで進行中の検索を表示するため
             );
 
             CREATE INDEX IF NOT EXISTS idx_daily_costs_date ON daily_costs(date);
@@ -174,6 +175,13 @@ def init_ops_tables():
             conn.execute('ALTER TABLE agent_candidates ADD COLUMN image_url TEXT')
         if 'price_volatility_90d' not in agent_candidates_columns:
             conn.execute('ALTER TABLE agent_candidates ADD COLUMN price_volatility_90d REAL')
+
+        agent_runs_columns = {row[1] for row in conn.execute('PRAGMA table_info(agent_runs)').fetchall()}
+        if 'status' not in agent_runs_columns:
+            conn.execute("ALTER TABLE agent_runs ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'")
+            # 既存の行は(このカラム追加以前は)すべて完了済みのランなので'completed'を
+            # デフォルトにする。今後の新規ランはlog_agent_run()が明示的に'running'から
+            # 始めて更新する。
 
 
 # ---------------------------------------------------------------------------
@@ -684,15 +692,33 @@ def log_agent_run(
     error: str = None,
     notify_status: str = None,
     notify_error: str = None,
+    status: str = None,
 ) -> None:
     """daily_scan.py の1回の実行を agent_runs に記録する(エージェントページの
     「実行履歴」用)。persist_agent_run() が候補の中身を保存するのに対し、
     こちらは実行条件と結果件数・通知結果のサマリーだけを保存する。
+
+    daily_scan.py は開始直後にも(結果がまだ無い状態で)一度これを呼び、
+    「今まさに実行中」であることをエージェントページに表示できるようにする
+    (status='running' の行がINSERTされる)。完了/失敗時にもう一度同じ
+    run_id で呼ぶと、ON CONFLICTでその行が更新される。
+
+    `status` を明示しなければ、error があれば'failed'、mcp_result/evaluation
+    のどちらかにデータがあれば'completed'、それ以外(まだ何も結果が無い=
+    開始直後の呼び出し)は'running'と推測する。
     """
     init_ops_tables()
 
     mcp_result = mcp_result or {}
     evaluation = evaluation or {}
+
+    if status is None:
+        if error:
+            status = 'failed'
+        elif mcp_result or evaluation:
+            status = 'completed'
+        else:
+            status = 'running'
 
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
@@ -701,8 +727,8 @@ def log_agent_run(
                 run_id, started_at, duration_seconds, keyword, category, category_id,
                 max_candidates, wait_for_tokens, evaluated, mcp_matched,
                 qualified_count, rejected_count, stopped_early_for_tokens,
-                error, notify_status, notify_error
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                error, notify_status, notify_error, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(run_id) DO UPDATE SET
                 duration_seconds = excluded.duration_seconds,
                 evaluated = excluded.evaluated,
@@ -712,7 +738,8 @@ def log_agent_run(
                 stopped_early_for_tokens = excluded.stopped_early_for_tokens,
                 error = excluded.error,
                 notify_status = excluded.notify_status,
-                notify_error = excluded.notify_error
+                notify_error = excluded.notify_error,
+                status = excluded.status
             ''',
             (
                 run_id, started_at, duration_seconds, keyword, category, category_id,
@@ -720,7 +747,7 @@ def log_agent_run(
                 mcp_result.get('evaluated'), mcp_result.get('matched'),
                 len(evaluation.get('qualified', [])), len(evaluation.get('rejected', [])),
                 1 if mcp_result.get('stopped_early_for_tokens') else 0,
-                error, notify_status, notify_error,
+                error, notify_status, notify_error, status,
             ),
         )
 

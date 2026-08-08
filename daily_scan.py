@@ -133,6 +133,15 @@ def run_daily_scan(
     else:
         print(f"[INFO] 指定されたキーワード: {keyword}")
 
+    # エージェントページで「今まさに実行中」を表示できるよう、結果が出る前に
+    # 一度status='running'で記録しておく(完了/失敗時に同じrun_idで更新される)。
+    log_agent_run(
+        run_id, started_at, time.monotonic() - start_time,
+        keyword=keyword, category=category_name, category_id=category_id,
+        max_candidates=max_candidates, wait_for_tokens=wait_for_tokens,
+        status="running",
+    )
+
     if category_id is None and category_name:
         category_id = resolve_category_id(category_name)
         if category_id is None:
