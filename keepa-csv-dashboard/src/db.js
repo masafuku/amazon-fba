@@ -73,6 +73,15 @@ export const loadAgentRuns = async (days = 30) => {
     return json.runs || [];
 };
 
+export const loadKeepaTokenStatus = async () => {
+    const response = await fetch(`${API_BASE}/api/keepa/token`);
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || `HTTP ${response.status}`);
+    }
+    return response.json();
+};
+
 export const loadDbStatsFromDb = async () => {
     const response = await fetch(`${API_BASE}/api/health`);
     if (!response.ok) {

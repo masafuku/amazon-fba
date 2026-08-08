@@ -12,11 +12,34 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
+# このスクリプトはOS環境変数だけを見ており、リポジトリルートの .env を
+# 自動では読み込んでいなかった(KEEPA_API_KEY等をシェルでexportしていないと
+# 動かない状態だった)。「python3 sqlite_api_server.py」をREADME通りシステムの
+# python3で起動するケースではpython-dotenvが入っていないこともあるため、
+# 外部パッケージに頼らず config.py と同じ最小実装で .env を読み込む。
+def _load_dotenv(path):
+    if not path.exists():
+        return
+    with path.open('r', encoding='utf-8') as fp:
+        for line in fp:
+            line = line.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            key, value = line.split('=', 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and value and key not in os.environ:
+                os.environ[key] = value
+
+
+_load_dotenv(Path(__file__).resolve().parent.parent / '.env')
+
 HOST = os.getenv('API_HOST', '0.0.0.0')
 PORT = 8001
 DB_PATH = Path(__file__).resolve().parent / 'keepa_imports.sqlite3'
 KEEPA_QUERY_URL = 'https://api.keepa.com/query'
 KEEPA_PRODUCT_URL = 'https://api.keepa.com/product'
+KEEPA_TOKEN_URL = 'https://api.keepa.com/token'
 
 
 def to_int_or_default(value, default_value):
@@ -192,6 +215,37 @@ def request_keepa_product(asin, domain):
     if product is None:
         raise RuntimeError(f'Keepa returned no product for ASIN {asin}')
     return keepa_json, product
+
+
+def request_keepa_token_status():
+    """Keepaの/tokenは残高確認専用でトークンを消費しない(公式ドキュメント記載)。"""
+    api_key = os.getenv('KEEPA_API_KEY', '').strip()
+    if not api_key:
+        raise ValueError('KEEPA_API_KEY is not set on the API server environment')
+
+    query = f'{KEEPA_TOKEN_URL}?{urlencode({"key": api_key})}'
+    request = Request(url=query, headers={'Accept-Encoding': 'gzip, deflate'}, method='GET')
+
+    try:
+        with urlopen(request, timeout=15) as response:
+            raw_body = response.read()
+            content_encoding = str(response.headers.get('Content-Encoding', '')).lower()
+            if 'gzip' in content_encoding:
+                raw_body = gzip.decompress(raw_body)
+            elif 'deflate' in content_encoding:
+                raw_body = zlib.decompress(raw_body)
+            keepa_json = json.loads(raw_body.decode('utf-8'))
+    except HTTPError as error:
+        detail = error.read().decode('utf-8', errors='ignore')
+        raise RuntimeError(f'Keepa HTTPError {error.code}: {detail}') from error
+    except URLError as error:
+        raise RuntimeError(f'Keepa request failed: {error}') from error
+
+    return {
+        'tokensLeft': keepa_json.get('tokensLeft'),
+        'refillIn': keepa_json.get('refillIn'),
+        'refillRate': keepa_json.get('refillRate'),
+    }
 
 
 def keepa_product_request(payload):
@@ -961,6 +1015,13 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == '/api/agent/runs':
             days = to_int_or_default((params.get('days') or [None])[0], 30)
             self._send_json(200, {'ok': True, 'runs': load_agent_runs(days=days)})
+            return
+
+        if parsed.path == '/api/keepa/token':
+            try:
+                self._send_json(200, {'ok': True, **request_keepa_token_status()})
+            except Exception as exc:
+                self._send_json(500, {'error': str(exc)})
             return
 
         if parsed.path == '/api/latest':

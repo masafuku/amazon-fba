@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Star } from 'lucide-react';
-import { loadAgentCandidates, loadAgentRuns, saveFavorite } from './db';
+import { loadAgentCandidates, loadAgentRuns, loadKeepaTokenStatus, saveFavorite } from './db';
 import { formatDateTime } from './formatters';
+
+const EXCHANGE_RATE = 150;
 
 const formatDuration = (seconds) => {
     if (seconds === null || seconds === undefined || Number.isNaN(seconds)) return '-';
@@ -12,12 +14,15 @@ const formatDuration = (seconds) => {
 export default function AgentPage() {
     const [candidates, setCandidates] = useState([]);
     const [runs, setRuns] = useState([]);
+    const [tokenStatus, setTokenStatus] = useState(null);
     const [error, setError] = useState('');
     const [loading, setLoading] = useState(true);
     const [savingAsin, setSavingAsin] = useState('');
     const [days, setDays] = useState(7);
     const [showRejected, setShowRejected] = useState(false);
     const [showRunHistory, setShowRunHistory] = useState(true);
+    const [sortKey, setSortKey] = useState('marginPct');
+    const [sortOrder, setSortOrder] = useState('desc');
 
     const refresh = async (period) => {
         setLoading(true);
@@ -36,10 +41,43 @@ export default function AgentPage() {
         }
     };
 
+    const refreshTokenStatus = async () => {
+        try {
+            setTokenStatus(await loadKeepaTokenStatus());
+        } catch (tokenError) {
+            setTokenStatus({ error: tokenError?.message || 'トークン残高の取得に失敗しました。' });
+        }
+    };
+
     useEffect(() => {
         refresh(days);
+        refreshTokenStatus();
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [days]);
+
+    const selectSortKey = (nextSortKey) => {
+        if (sortKey === nextSortKey) {
+            setSortOrder((current) => (current === 'desc' ? 'asc' : 'desc'));
+            return;
+        }
+        setSortKey(nextSortKey);
+        setSortOrder('desc');
+    };
+
+    const renderSortHeader = (label, key) => (
+        <th key={key} className="px-4 py-3 font-medium text-slate-400">
+            <button
+                type="button"
+                onClick={() => selectSortKey(key)}
+                className="inline-flex items-center gap-1 whitespace-nowrap text-left hover:text-cyan-300"
+            >
+                {label}
+                <span className="text-xs text-cyan-300" aria-hidden="true">
+                    {sortKey === key ? (sortOrder === 'desc' ? '▼' : '▲') : '↕'}
+                </span>
+            </button>
+        </th>
+    );
 
     const addToFavorites = async (candidate) => {
         setSavingAsin(candidate.asin);
@@ -61,22 +99,59 @@ export default function AgentPage() {
         }
     };
 
-    const visibleCandidates = useMemo(
-        () => (showRejected ? candidates : candidates.filter((item) => item.qualified)),
-        [candidates, showRejected]
-    );
+    const visibleCandidates = useMemo(() => {
+        const base = showRejected ? candidates : candidates.filter((item) => item.qualified);
+        return [...base].sort((left, right) => {
+            const leftValue = sortKey === 'createdAt' ? Date.parse(left.createdAt) || 0 : left[sortKey];
+            const rightValue = sortKey === 'createdAt' ? Date.parse(right.createdAt) || 0 : right[sortKey];
+            const leftMissing = leftValue === null || leftValue === undefined || leftValue === '';
+            const rightMissing = rightValue === null || rightValue === undefined || rightValue === '';
+            if (leftMissing || rightMissing) {
+                if (leftMissing && rightMissing) return 0;
+                return leftMissing ? 1 : -1;
+            }
+            const comparison = typeof leftValue === 'string'
+                ? leftValue.localeCompare(String(rightValue), 'ja')
+                : Number(leftValue) - Number(rightValue);
+            return sortOrder === 'desc' ? -comparison : comparison;
+        });
+    }, [candidates, showRejected, sortKey, sortOrder]);
 
     const qualifiedCount = useMemo(() => candidates.filter((item) => item.qualified).length, [candidates]);
 
     return (
         <main className="space-y-6">
-            <header>
-                <p className="text-sm uppercase tracking-[0.2em] text-cyan-300">Research Agent</p>
-                <h1 className="mt-1 text-3xl font-semibold text-white">🤖 エージェント</h1>
-                <p className="mt-2 text-sm text-slate-400">
-                    daily_scan.py が自動で調査した候補です。実質利益率(FBA手数料・国際送料込み)で
-                    フィルタ済みですが、お気に入りへの追加は判断してから行ってください。
-                </p>
+            <header className="flex flex-wrap items-start justify-between gap-4">
+                <div>
+                    <p className="text-sm uppercase tracking-[0.2em] text-cyan-300">Research Agent</p>
+                    <h1 className="mt-1 text-3xl font-semibold text-white">🤖 エージェント</h1>
+                    <p className="mt-2 text-sm text-slate-400">
+                        daily_scan.py が自動で調査した候補です。実質利益率(FBA手数料・国際送料込み)で
+                        フィルタ済みですが、お気に入りへの追加は判断してから行ってください。
+                    </p>
+                </div>
+                <div className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-sm">
+                    <p className="text-slate-400">Keepaトークン残高</p>
+                    {tokenStatus?.error ? (
+                        <p className="text-rose-300">{tokenStatus.error}</p>
+                    ) : (
+                        <>
+                            <p className="text-xl font-semibold text-white">
+                                {tokenStatus?.tokensLeft ?? '-'}
+                            </p>
+                            <p className="text-xs text-slate-500">
+                                {tokenStatus?.refillRate != null ? `${tokenStatus.refillRate}トークン/分で回復` : ''}
+                            </p>
+                        </>
+                    )}
+                    <button
+                        type="button"
+                        onClick={refreshTokenStatus}
+                        className="mt-2 rounded-lg bg-slate-800 px-2 py-1 text-xs font-semibold text-slate-300 hover:bg-slate-700"
+                    >
+                        更新
+                    </button>
+                </div>
             </header>
 
             {error ? (
@@ -211,17 +286,17 @@ export default function AgentPage() {
                         <table className="min-w-full border-collapse text-left text-sm">
                             <thead className="bg-slate-950/90">
                                 <tr>
-                                    <th className="px-4 py-3 font-medium text-slate-400">判定</th>
-                                    <th className="px-4 py-3 font-medium text-slate-400">カテゴリ</th>
-                                    <th className="px-4 py-3 font-medium text-slate-400">ASIN</th>
-                                    <th className="px-4 py-3 font-medium text-slate-400">商品名</th>
-                                    <th className="px-4 py-3 font-medium text-slate-400">US価格($)</th>
-                                    <th className="px-4 py-3 font-medium text-slate-400">JP価格(円)</th>
-                                    <th className="px-4 py-3 font-medium text-slate-400">実質利益率</th>
-                                    <th className="px-4 py-3 font-medium text-slate-400">1個あたり利益($)</th>
-                                    <th className="px-4 py-3 font-medium text-slate-400">ランキング</th>
-                                    <th className="px-4 py-3 font-medium text-slate-400">レビュー数</th>
-                                    <th className="px-4 py-3 font-medium text-slate-400">調査日時</th>
+                                    {renderSortHeader('判定', 'qualified')}
+                                    {renderSortHeader('カテゴリ', 'category')}
+                                    {renderSortHeader('ASIN', 'asin')}
+                                    {renderSortHeader('商品名', 'title')}
+                                    {renderSortHeader('US価格($)', 'usPriceUsd')}
+                                    {renderSortHeader('JP価格(円)', 'jpCostJpy')}
+                                    {renderSortHeader('実質利益率', 'marginPct')}
+                                    {renderSortHeader('1個あたり利益(円)', 'unitProfitUsd')}
+                                    {renderSortHeader('ランキング', 'salesRank')}
+                                    {renderSortHeader('レビュー数', 'reviewCount')}
+                                    {renderSortHeader('調査日時', 'createdAt')}
                                     <th className="px-4 py-3 font-medium text-slate-400">リンク</th>
                                     <th className="px-4 py-3 font-medium text-slate-400">操作</th>
                                 </tr>
@@ -264,7 +339,7 @@ export default function AgentPage() {
                                             ) : null}
                                         </td>
                                         <td className={`px-4 py-3 font-semibold ${candidate.unitProfitUsd >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                                            {candidate.unitProfitUsd == null ? '-' : `$${Number(candidate.unitProfitUsd).toFixed(2)}`}
+                                            {candidate.unitProfitUsd == null ? '-' : `¥${Math.round(Number(candidate.unitProfitUsd) * EXCHANGE_RATE).toLocaleString()}`}
                                         </td>
                                         <td className="px-4 py-3 text-slate-200">{candidate.salesRank ?? '-'}</td>
                                         <td className="px-4 py-3 text-slate-200">{candidate.reviewCount ?? '-'}</td>
