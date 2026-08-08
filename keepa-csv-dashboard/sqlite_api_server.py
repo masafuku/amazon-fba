@@ -578,6 +578,7 @@ def init_db() -> None:
                 jp_cost_jpy REAL,
                 sales_rank INTEGER,
                 review_count INTEGER,
+                monthly_sold INTEGER,
                 price_volatility_90d REAL,
                 weight_kg REAL,
                 weight_estimated INTEGER,
@@ -599,6 +600,8 @@ def init_db() -> None:
             conn.execute('ALTER TABLE agent_candidates ADD COLUMN image_url TEXT')
         if 'price_volatility_90d' not in agent_candidates_columns:
             conn.execute('ALTER TABLE agent_candidates ADD COLUMN price_volatility_90d REAL')
+        if 'monthly_sold' not in agent_candidates_columns:
+            conn.execute('ALTER TABLE agent_candidates ADD COLUMN monthly_sold INTEGER')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_run_id ON agent_candidates(run_id)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_created_at ON agent_candidates(created_at)')
         # ops_finance.py (daily_scan.py) が書き込む実行履歴。定義元はops_finance.py
@@ -831,7 +834,7 @@ def load_agent_candidates(days: int = 7):
             )
             SELECT
                 r.run_id, r.category, r.asin, r.title, r.image_url, r.us_url, r.jp_asin, r.jp_url,
-                r.us_price_usd, r.jp_cost_jpy, r.sales_rank, r.review_count, r.price_volatility_90d,
+                r.us_price_usd, r.jp_cost_jpy, r.sales_rank, r.review_count, r.monthly_sold, r.price_volatility_90d,
                 r.weight_kg, r.weight_estimated, r.fee_estimated,
                 r.price_diff_rate_gross, r.unit_profit_usd, r.margin_pct,
                 r.qualified, r.reason, r.data_json, r.created_at, r.times_seen,
@@ -847,7 +850,7 @@ def load_agent_candidates(days: int = 7):
     candidates = []
     for row in rows:
         (run_id, category, asin, title, image_url, us_url, jp_asin, jp_url,
-         us_price_usd, jp_cost_jpy, sales_rank, review_count, price_volatility_90d,
+         us_price_usd, jp_cost_jpy, sales_rank, review_count, monthly_sold, price_volatility_90d,
          weight_kg, weight_estimated, fee_estimated,
          price_diff_rate_gross, unit_profit_usd, margin_pct,
          qualified, reason, data_json, created_at, times_seen, already_favorited) = row
@@ -868,6 +871,7 @@ def load_agent_candidates(days: int = 7):
             'jpCostJpy': jp_cost_jpy,
             'salesRank': sales_rank,
             'reviewCount': review_count,
+            'monthlySold': monthly_sold,
             'priceVolatility90d': price_volatility_90d,
             'weightKg': weight_kg,
             'weightEstimated': bool(weight_estimated),

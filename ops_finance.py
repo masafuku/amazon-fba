@@ -97,6 +97,7 @@ def init_ops_tables():
                 jp_cost_jpy REAL,
                 sales_rank INTEGER,
                 review_count INTEGER,
+                monthly_sold INTEGER,            -- Keepaの月間販売個数(概算、bucketed estimate)
                 price_volatility_90d REAL,
                 weight_kg REAL,
                 weight_estimated INTEGER,
@@ -175,6 +176,8 @@ def init_ops_tables():
             conn.execute('ALTER TABLE agent_candidates ADD COLUMN image_url TEXT')
         if 'price_volatility_90d' not in agent_candidates_columns:
             conn.execute('ALTER TABLE agent_candidates ADD COLUMN price_volatility_90d REAL')
+        if 'monthly_sold' not in agent_candidates_columns:
+            conn.execute('ALTER TABLE agent_candidates ADD COLUMN monthly_sold INTEGER')
 
         agent_runs_columns = {row[1] for row in conn.execute('PRAGMA table_info(agent_runs)').fetchall()}
         if 'status' not in agent_runs_columns:
@@ -429,6 +432,7 @@ def evaluate_mcp_candidates(
             'jp_url': cost.get('url'),
             'sales_rank': sell.get('sales_rank'),
             'review_count': sell.get('review_count'),
+            'monthly_sold': sell.get('monthly_sold'),
             'price_diff_rate_gross': candidate.get('price_diff_rate'),  # 手数料・送料考慮前
             'price_volatility_90d': candidate.get('price_volatility_90d'),
             'weight_kg': weight_kg,
@@ -447,14 +451,22 @@ def evaluate_mcp_candidates(
     qualified.sort(key=lambda e: e['margin_pct'], reverse=True)
 
     # keepa_mcp.find_arbitrage_candidates() の粗選別(価格変動・JP一致・
-    # 価格差率など)で落ちた候補も「不合格」として表示する。ここまでは
-    # 実利益計算(calc_unit_profit)にすら到達していないので、
-    # unit_profit_usd/margin_pct はNoneのまま、reasonだけ日本語化して残す。
+    # 価格差率など)で落ちた候補も「不合格」として表示する。
+    #
+    # ほとんどの粗選別スキップ(価格変動が大きい、JPにASINが無い等)は
+    # コスト側(JP)のデータをそもそも取得していない(トークン節約のため、
+    # CEOの判断で意図的にそうしている)ので unit_profit_usd/margin_pct は
+    # Noneのまま。ただし「価格差率が閾値未満」で落ちたものだけは、US/JP
+    # 両方の価格がすでに取得済み(そこまで進んで初めて価格差率を計算できる
+    # ため)なので、他の合格/不合格候補と同じ実利益計算をしてあげられる。
     for skip in mcp_result.get('skipped', []):
         asin = skip.get('asin')
         if not asin:
             continue
-        rejected.append({
+
+        us_price = skip.get('price')
+        jp_price = skip.get('jp_price')
+        entry = {
             'asin': asin,
             'title': skip.get('title'),
             'url': skip.get('url'),
@@ -463,17 +475,51 @@ def evaluate_mcp_candidates(
             'jp_url': skip.get('jp_url'),
             'sales_rank': skip.get('sales_rank'),
             'review_count': skip.get('review_count'),
+            'monthly_sold': skip.get('monthly_sold'),
             'price_diff_rate_gross': None,
             'price_volatility_90d': skip.get('price_volatility_90d'),
             'weight_kg': skip.get('weight_kg'),
             'weight_estimated': False,
             'fee_estimated': False,
-            'us_price_usd': skip.get('price'),
-            'jp_cost_jpy': skip.get('jp_price'),
+            'us_price_usd': us_price,
+            'jp_cost_jpy': jp_price,
             'unit_profit_usd': None,
             'margin_pct': None,
             'reason': f"粗選別で除外: {_translate_skip_reason(skip.get('reason', ''))}",
-        })
+        }
+
+        if us_price is not None and jp_price is not None:
+            weight_kg = skip.get('weight_kg')
+            used_fallback_weight = weight_kg is None
+            if used_fallback_weight:
+                weight_kg = DEFAULT_WEIGHT_KG_FALLBACK
+                weight_missing.append(asin)
+
+            fee_kwargs = {}
+            used_fallback_fee = False
+            referral_pct = skip.get('referral_fee_percent')
+            if referral_pct is not None:
+                fee_kwargs['amazon_fee_rate'] = referral_pct / 100
+            else:
+                used_fallback_fee = True
+            fba_fee = skip.get('fba_pickpack_fee')
+            if fba_fee is not None:
+                fee_kwargs['fba_fee_usd'] = fba_fee
+            else:
+                used_fallback_fee = True
+            if used_fallback_fee:
+                fee_missing.append(asin)
+
+            profit = calc_unit_profit(
+                us_price_usd=us_price, jp_cost_jpy=jp_price,
+                weight_kg=weight_kg, exchange_rate=exchange_rate, **fee_kwargs,
+            )
+            entry.update(profit)  # unit_profit_usd, margin_pct など
+            entry['weight_kg'] = weight_kg
+            entry['weight_estimated'] = used_fallback_weight
+            entry['fee_estimated'] = used_fallback_fee
+
+        rejected.append(entry)
 
     return {
         'qualified': qualified,
@@ -698,6 +744,7 @@ def persist_agent_run(category: str, evaluation: dict, run_id: str = None) -> st
                 item.get('jp_cost_jpy'),
                 item.get('sales_rank'),
                 item.get('review_count'),
+                item.get('monthly_sold'),
                 item.get('price_volatility_90d'),
                 item.get('weight_kg'),
                 1 if item.get('weight_estimated') else 0,
@@ -717,11 +764,11 @@ def persist_agent_run(category: str, evaluation: dict, run_id: str = None) -> st
                 '''
                 INSERT INTO agent_candidates (
                     run_id, category, asin, title, image_url, us_url, jp_asin, jp_url,
-                    us_price_usd, jp_cost_jpy, sales_rank, review_count, price_volatility_90d,
+                    us_price_usd, jp_cost_jpy, sales_rank, review_count, monthly_sold, price_volatility_90d,
                     weight_kg, weight_estimated, fee_estimated,
                     price_diff_rate_gross, unit_profit_usd, margin_pct,
                     qualified, reason, data_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''',
                 rows,
             )

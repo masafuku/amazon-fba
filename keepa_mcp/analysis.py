@@ -63,6 +63,14 @@ def rating(product: Dict[str, Any]) -> Optional[float]:
     return val / 10 if val is not None else None
 
 
+def monthly_sold(product: Dict[str, Any]) -> Optional[int]:
+    """Keepa's own bucketed estimate of units sold in the past ~30 days
+    (Amazon's "X+ bought in past month" badge data). Already present on the
+    standard /product response we fetch - no extra token cost to read it."""
+    val = product.get("monthlySold")
+    return int(val) if isinstance(val, (int, float)) and val >= 0 else None
+
+
 def price_volatility_ratio(product: Dict[str, Any], domain: str) -> Optional[float]:
     """(max - min) / avg over the interval the product was fetched with
     (call get_products(..., stats_days=90) so this reflects the last 90 days).

@@ -344,6 +344,7 @@ export default function AgentPage() {
                                     {renderSortHeader('価格変動(90日)', 'priceVolatility90d')}
                                     {renderSortHeader('ランキング', 'salesRank')}
                                     {renderSortHeader('レビュー数', 'reviewCount')}
+                                    {renderSortHeader('先月の販売個数', 'monthlySold')}
                                     {renderSortHeader('調査日時', 'createdAt')}
                                     {renderSortHeader('発見回数', 'timesSeen')}
                                     <th className="px-4 py-3 font-medium text-slate-400">リンク</th>
@@ -407,6 +408,9 @@ export default function AgentPage() {
                                         </td>
                                         <td className="px-4 py-3 text-slate-200">{candidate.salesRank ?? '-'}</td>
                                         <td className="px-4 py-3 text-slate-200">{candidate.reviewCount ?? '-'}</td>
+                                        <td className="px-4 py-3 text-slate-200">
+                                            {candidate.monthlySold != null ? `${candidate.monthlySold.toLocaleString()}個` : '-'}
+                                        </td>
                                         <td className="px-4 py-3 text-slate-400">{formatDateTime(candidate.createdAt)}</td>
                                         <td className="px-4 py-3 text-slate-200">
                                             {candidate.timesSeen > 1 ? (
