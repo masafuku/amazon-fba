@@ -356,7 +356,7 @@ export default function KeepaFinderPage() {
                             {loading ? '検索中...' : '送信前に確認'}
                         </button>
                         <p className="text-sm text-slate-400">
-                            Keepa価格指定値: <span className="font-semibold text-slate-100">{formatNumber(minNewPriceKeepa)}</span>
+                            Keepa価格指定値: <span className="font-semibold text-slate-100">{formatNumber(Number(minNewPriceYen) * 100)}</span>
                             {' '}(
                             {formatNumber(minNewPriceYen)}円 × 100)
                         </p>
