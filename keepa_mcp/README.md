@@ -70,10 +70,12 @@ UPCの再検索でKeepaトークンを消費しないようにしています。
 
 ## 注意点
 
-- Amazon の ASIN はマーケットプレイスごとに異なるため、日本⇔北米の商品照合は
-  UPC/EAN バーコード（`upcList`/`eanList`）で行っています。UPC/EANが登録されていない
-  商品はマッチできず候補から除外されます（理由は `find_arbitrage_candidates` の
-  `skipped` に記録されます）。
+- `find_arbitrage_candidates` の日本⇔北米の商品照合は**同一ASINが日本側にも存在する
+  前提**で行っています。ただしAmazonのASINは本来マーケットプレイスごとに独立採番されるため、
+  この前提が成り立たない商品（同じ商品でもUS/JPで別ASIN）は「JPカタログに見つからない」
+  として正しく除外されます（理由は `find_arbitrage_candidates` の `skipped` に記録されます。
+  実測ではキッチン用品カテゴリで約4割の商品がASIN一致でJP価格を取得できました）。
+  より確実な照合が必要な場合は `find_jp_price(code)` でUPC/EANベースの個別検索も利用できます。
 - 価格差率は `(北米価格(円換算) - 日本価格) / 日本価格` で計算しています。FBA手数料や
   関税・送料は含まれていないため、実際の利益率とは異なります。
 - Keepa の API 利用はトークン制です。`find_arbitrage_candidates` はカテゴリ検索1回 +

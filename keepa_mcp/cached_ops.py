@@ -128,6 +128,16 @@ def cached_get_products(
     return ordered, cache_meta
 
 
+def is_product_cached(asin: str, domain: str) -> bool:
+    """Peek whether a single-ASIN product lookup is currently a fresh cache
+    hit, without triggering a live call. Mirrors is_code_lookup_cached()
+    but for the ASIN-based cross-domain match (see cached_get_products)."""
+    if not settings.cache_enabled:
+        return False
+    key = f"{domain.upper()}:{asin}"
+    return cache.get("product", key, _ttl(settings.cache_ttl_product_hours)) is not None
+
+
 def is_code_lookup_cached(code: str, domain: str) -> bool:
     """Peek whether a JP/etc. code lookup is currently a fresh cache hit,
     without triggering a live call. Used to let free cache hits through a

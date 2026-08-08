@@ -26,7 +26,7 @@ from .cached_ops import (
     cached_get_products,
     cached_lookup_by_code,
     cached_search_categories,
-    is_code_lookup_cached,
+    is_product_cached,
 )
 from .config import settings
 from .keepa_client import (
@@ -225,11 +225,13 @@ def find_arbitrage_candidates(
 ) -> Dict[str, Any]:
     """End-to-end search: find products in a category/rank/review-count band
     on the sell-side marketplace (default US), cross-reference their JPY cost
-    on Amazon Japan by UPC/EAN, and return only those clearing the requested
-    price-gap and price-stability thresholds.
+    on Amazon Japan by ASIN (assumes the same ASIN is listed on both
+    marketplaces - not always true, see the per-candidate skip reasons),
+    and return only those clearing the requested price-gap and
+    price-stability thresholds.
 
-    Pipeline: Product Finder (cheap) -> per-ASIN detail fetch (price/UPC/rank/
-    reviews/volatility) -> JP cross-domain price lookup by UPC/EAN -> filter.
+    Pipeline: Product Finder (cheap) -> per-ASIN detail fetch (price/rank/
+    reviews/volatility) -> JP cross-domain lookup by the same ASIN -> filter.
     Each live Keepa call costs tokens; results are cached locally (see cache.py)
     so re-running the same/overlapping search is free where the cache is warm.
     Pass force_refresh=True to ignore the cache and pull current prices/ranks
@@ -302,7 +304,6 @@ def find_arbitrage_candidates(
     for product in sell_products:
         asin = product.get("asin")
         sell_summary = _summarize_product(product, sell_domain, sell_cache_meta.get(asin))
-        code = sell_summary["upc"] or sell_summary["ean"]
 
         if sell_summary["price"] is None:
             skipped.append({"asin": sell_summary["asin"], "reason": "no current price"})
@@ -311,33 +312,37 @@ def find_arbitrage_candidates(
         if volatility is not None and volatility > price_volatility_max:
             skipped.append({"asin": sell_summary["asin"], "reason": f"price volatility {volatility:.2%} exceeds limit"})
             continue
-        if not code:
-            skipped.append({"asin": sell_summary["asin"], "reason": "no UPC/EAN to cross-reference against Amazon Japan"})
-            continue
 
-        # Cache hits are free - only gate on budget when a live call is actually needed.
-        needs_live_call = force_refresh or not is_code_lookup_cached(code, "JP")
+        # ASIN-based cross-domain match: assumes the same ASIN is used on
+        # both marketplaces. Note this does NOT hold in general - ASINs are
+        # assigned per-marketplace, so many genuinely-dual-market products
+        # (especially non-brand-registered ones) use a different ASIN in
+        # each catalog and will not be found this way. When Keepa has no
+        # such ASIN in the JP catalog it still returns a near-empty stub
+        # (no price/stats), which the price check below skips.
+        needs_live_call = force_refresh or not is_product_cached(asin, "JP")
         if needs_live_call and budget < estimate_product_request_cost(1):
             skipped.append({"asin": sell_summary["asin"], "reason": "stopped early: Keepa token budget ran out"})
             stopped_early = True
             continue
 
         try:
-            jp_matches, jp_cache_info = cached_lookup_by_code(api_key, code, domain="JP", force_refresh=force_refresh)
+            jp_matches, jp_cache_meta = cached_get_products(api_key, domain="JP", asins=[asin], stats_days=90, force_refresh=force_refresh)
         except KeepaError as exc:
             skipped.append({"asin": sell_summary["asin"], "reason": f"JP lookup failed (token budget likely exhausted): {exc}"})
             stopped_early = True
             continue
+        jp_cache_info = jp_cache_meta.get(asin, {"hit": False})
         if not jp_cache_info["hit"]:
             budget -= estimate_product_request_cost(1)
 
         if not jp_matches:
-            skipped.append({"asin": sell_summary["asin"], "reason": f"no Amazon Japan listing found for code {code}"})
+            skipped.append({"asin": sell_summary["asin"], "reason": "ASIN not found in Amazon Japan catalog"})
             continue
 
         jp_summary = _summarize_product(jp_matches[0], "JP", jp_cache_info)
         if jp_summary["price"] is None:
-            skipped.append({"asin": sell_summary["asin"], "reason": "matched JP listing has no current price"})
+            skipped.append({"asin": sell_summary["asin"], "reason": "no current price for this ASIN on Amazon Japan (may not exist in the JP catalog)"})
             continue
 
         diff_rate = analysis.price_diff_rate(
