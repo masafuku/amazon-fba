@@ -37,6 +37,7 @@ from ops_finance import (
     check_budget_alert,
     evaluate_mcp_candidates,
     init_ops_tables,
+    persist_agent_run,
 )
 
 # ---------------------------------------------------------------------------
@@ -106,6 +107,9 @@ def run_daily_scan(category_name: str | None, category_id: int | None, max_candi
         print(f"[WARN] 重量データなし(仮値で計算): {evaluation['weight_missing']}")
     if evaluation["fee_missing"]:
         print(f"[WARN] 手数料データなし(仮値で計算): {evaluation['fee_missing']}")
+
+    run_id = persist_agent_run(category_name, evaluation)
+    print(f"[INFO] 「エージェント」ページ用に保存しました (run_id={run_id})。ダッシュボードで確認できます。")
 
     # 候補の通知
     candidate_message = build_qualified_line_message(evaluation)

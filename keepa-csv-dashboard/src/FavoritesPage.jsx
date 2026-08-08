@@ -37,27 +37,60 @@ const getCalculatedRow = (favorite, shippingCost) => {
     const us = data.US || {};
     const jp = data.JP || {};
     const isFinderData = Boolean(data.US || data.JP);
-    const usPrice = isFinderData ? getMarketPrice(us) : data.buyBoxUsd ?? (data.usPriceJpy == null ? null : toNumber(data.usPriceJpy) / EXCHANGE_RATE);
-    const jpPrice = isFinderData ? getMarketPrice(jp) : data.jpCost ?? null;
-    const usPriceJpy = usPrice === null ? null : toNumber(usPrice) * EXCHANGE_RATE;
+    const isAgentData = favorite.source === 'agent';
+
+    let title, category, usPrice, jpPrice, referralPercent, pickPackUsd, sales, amazonSeller;
+
+    if (isFinderData) {
+        title = us.title || jp.title;
+        category = us.productCategory || jp.productCategory || '未分類';
+        usPrice = getMarketPrice(us);
+        jpPrice = getMarketPrice(jp);
+        referralPercent = toNumber(us.referralFeePercentage, 15);
+        pickPackUsd = toNumber(us.fbaPickAndPackFee, 0);
+        sales = us.monthlySold;
+        amazonSeller = us.amazonAvailability === 1;
+    } else if (isAgentData) {
+        // Researchエージェント(daily_scan.py)発見の候補。ops_finance.py が
+        // 既に実質利益率まで計算済みだが、このページ独自の送料入力
+        // (下の「1回の送料総額」欄)で再計算するため、そのための元データ
+        // (USD価格・JPY原価・手数料額)だけを取り出す。
+        title = data.title;
+        category = data.category || '未分類';
+        usPrice = data.us_price_usd ?? null;
+        jpPrice = data.jp_cost_jpy ?? null;
+        referralPercent = usPrice ? (toNumber(data.amazon_fee_usd, 0) / usPrice) * 100 : 15;
+        pickPackUsd = toNumber(data.fba_fee_usd, 0);
+        sales = null;
+        amazonSeller = null;
+    } else {
+        title = data.title;
+        category = data.productCategory || '未分類';
+        usPrice = data.buyBoxUsd ?? (data.usPriceJpy == null ? null : toNumber(data.usPriceJpy) / EXCHANGE_RATE);
+        jpPrice = data.jpCost ?? null;
+        referralPercent = toNumber(data.referralPercent, 15);
+        pickPackUsd = toNumber(data.fbaPickPackUsd, 0);
+        sales = data.lastMonthSales;
+        amazonSeller = Boolean(data.amazonSeller);
+    }
+
+    const usPriceJpy = usPrice === null || usPrice === undefined ? null : toNumber(usPrice) * EXCHANGE_RATE;
     const priceDiffJpy = usPriceJpy === null || jpPrice === null ? null : usPriceJpy - jpPrice;
-    const referralPercent = isFinderData ? toNumber(us.referralFeePercentage, 15) : toNumber(data.referralPercent, 15);
-    const pickPackUsd = isFinderData ? toNumber(us.fbaPickAndPackFee, 0) : toNumber(data.fbaPickPackUsd, 0);
     const amazonFee = usPriceJpy === null ? null : usPriceJpy * referralPercent / 100 + pickPackUsd * EXCHANGE_RATE;
     const profit = usPriceJpy === null || jpPrice === null || amazonFee === null || shippingCost === null
         ? null
         : usPriceJpy - jpPrice - amazonFee - shippingCost;
 
     return {
-        title: favorite.title || us.title || jp.title || data.title || '-',
-        category: isFinderData ? us.productCategory || jp.productCategory || '未分類' : data.productCategory || '未分類',
+        title: favorite.title || title || data.title || '-',
+        category,
         usPrice,
         usPriceJpy,
         jpPrice,
         priceDiffJpy,
         fee: amazonFee,
-        sales: isFinderData ? us.monthlySold : data.lastMonthSales,
-        amazonSeller: isFinderData ? us.amazonAvailability === 1 : Boolean(data.amazonSeller),
+        sales,
+        amazonSeller,
         profit,
         profitRate: profit !== null && usPriceJpy ? profit / usPriceJpy * 100 : null,
     };
@@ -255,18 +288,26 @@ export default function FavoritesPage() {
                                         <td className="px-4 py-3 text-slate-200">{calculated.amazonSeller ? 'Yes' : 'No'}</td>
                                         <td className={`px-4 py-3 font-semibold ${calculated.profit >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{calculated.profit === null ? '-' : `¥${calculated.profit.toFixed(0)}`}</td>
                                         <td className={`px-4 py-3 font-semibold ${calculated.profitRate >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{calculated.profitRate === null ? '-' : `${calculated.profitRate.toFixed(1)}%`}</td>
-                                        <td className="px-4 py-3 text-slate-400">{favorite.source === 'finder' ? 'Keepa Finder' : 'CSV分析'}</td>
+                                        <td className="px-4 py-3 text-slate-400">
+                                            {favorite.source === 'finder' ? 'Keepa Finder' : favorite.source === 'agent' ? '🤖 エージェント' : 'CSV分析'}
+                                        </td>
                                         <td className="px-4 py-3">
                                             <div className="flex flex-wrap gap-2">
                                                 <a href={`https://www.amazon.com/dp/${favorite.asin}`} target="_blank" rel="noreferrer" className="rounded-lg bg-slate-800 px-2 py-1 text-xs font-semibold text-slate-200 hover:bg-slate-700">US</a>
-                                                <a href={`https://www.amazon.co.jp/dp/${favorite.asin}`} target="_blank" rel="noreferrer" className="rounded-lg bg-slate-800 px-2 py-1 text-xs font-semibold text-slate-200 hover:bg-slate-700">JP</a>
+                                                <a href={favorite.data?.jp_url || `https://www.amazon.co.jp/dp/${favorite.asin}`} target="_blank" rel="noreferrer" className="rounded-lg bg-slate-800 px-2 py-1 text-xs font-semibold text-slate-200 hover:bg-slate-700">JP</a>
                                             </div>
                                         </td>
                                         <td className="px-4 py-3">
                                             <div className="flex flex-wrap gap-2">
-                                                <button type="button" onClick={() => refreshProduct(favorite)} disabled={loadingAsin === favorite.asin} className="rounded-lg bg-cyan-800/70 px-2 py-1 text-xs font-semibold text-cyan-100 hover:bg-cyan-700 disabled:opacity-50">
-                                                    {loadingAsin === favorite.asin ? '取得中...' : 'US/JP再取得'}
-                                                </button>
+                                                {favorite.source === 'agent' ? (
+                                                    <span className="rounded-lg bg-slate-800/50 px-2 py-1 text-xs text-slate-500" title="US/JPでASINが異なるため、この画面からの再取得には対応していません">
+                                                        再取得非対応
+                                                    </span>
+                                                ) : (
+                                                    <button type="button" onClick={() => refreshProduct(favorite)} disabled={loadingAsin === favorite.asin} className="rounded-lg bg-cyan-800/70 px-2 py-1 text-xs font-semibold text-cyan-100 hover:bg-cyan-700 disabled:opacity-50">
+                                                        {loadingAsin === favorite.asin ? '取得中...' : 'US/JP再取得'}
+                                                    </button>
+                                                )}
                                                 <button type="button" onClick={() => remove(favorite.asin)} className="inline-flex items-center gap-1 rounded-lg bg-rose-900/70 px-2 py-1 text-xs font-semibold text-rose-200 hover:bg-rose-800">
                                                     <Trash2 className="h-3.5 w-3.5" />削除
                                                 </button>

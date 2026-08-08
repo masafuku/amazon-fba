@@ -10,12 +10,18 @@ Ops/Finance エージェント
   4. record_sale() / record_inventory() - 売上・在庫のログ
   5. inventory_turnover()    - 在庫回転率
   6. weekly_report()         - CEOエージェント向け週次サマリー
+  7. evaluate_mcp_candidates() / persist_agent_run() - keepa_mcpの候補を
+     実質利益率でフィルタし、ダッシュボードの「エージェント」ページに
+     表示するため agent_candidates に保存する(favoritesへの追加は
+     CEOが手動で判断する運用)
 
 既存コードには手を加えず、このモジュールを import して使う。
 DBパスは sqlite_api_server.py と同じ場所を参照する。
 """
 
+import json
 import sqlite3
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -74,10 +80,41 @@ def init_ops_tables():
                 units_in_fba INTEGER NOT NULL
             );
 
+            -- Researchエージェント(daily_scan.py)が調べた候補の一覧。
+            -- 「エージェント」ページで人間(CEO)が見て、気に入ったものだけ
+            -- favorites に手動で追加する運用のためのテーブル。
+            CREATE TABLE IF NOT EXISTS agent_candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL,
+                category TEXT,
+                asin TEXT NOT NULL,
+                title TEXT,
+                us_url TEXT,
+                jp_asin TEXT,
+                jp_url TEXT,
+                us_price_usd REAL,
+                jp_cost_jpy REAL,
+                sales_rank INTEGER,
+                review_count INTEGER,
+                weight_kg REAL,
+                weight_estimated INTEGER,
+                fee_estimated INTEGER,
+                price_diff_rate_gross REAL,
+                unit_profit_usd REAL,
+                margin_pct REAL,
+                qualified INTEGER NOT NULL,      -- 実質利益率が閾値以上なら1
+                reason TEXT,                     -- 不合格理由(qualified=0のとき)
+                data_json TEXT NOT NULL,         -- favoritesに渡す用の詳細データ
+                created_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_daily_costs_date ON daily_costs(date);
             CREATE INDEX IF NOT EXISTS idx_sales_date ON sales(date);
             CREATE INDEX IF NOT EXISTS idx_sales_asin ON sales(asin);
             CREATE INDEX IF NOT EXISTS idx_inventory_log_asin ON inventory_log(asin);
+            CREATE INDEX IF NOT EXISTS idx_agent_candidates_run_id ON agent_candidates(run_id);
+            CREATE INDEX IF NOT EXISTS idx_agent_candidates_created_at ON agent_candidates(created_at);
+            CREATE INDEX IF NOT EXISTS idx_agent_candidates_asin ON agent_candidates(asin);
             '''
         )
 
@@ -322,13 +359,16 @@ def evaluate_mcp_candidates(
             'asin': asin,
             'title': sell.get('title'),
             'url': sell.get('url'),
+            'jp_asin': cost.get('asin'),
+            'jp_url': cost.get('url'),
             'sales_rank': sell.get('sales_rank'),
             'review_count': sell.get('review_count'),
             'price_diff_rate_gross': candidate.get('price_diff_rate'),  # 手数料・送料考慮前
             'weight_kg': weight_kg,
             'weight_estimated': used_fallback_weight,
             'fee_estimated': used_fallback_fee,
-            **profit,  # unit_profit_usd, margin_pct など
+            **profit,  # unit_profit_usd, margin_pct など (jp_cost_usd 含む)
+            'jp_cost_jpy': cost['price'],
         }
 
         if profit['margin_pct'] >= min_margin_pct:
@@ -368,6 +408,67 @@ def build_qualified_line_message(evaluation: dict, max_items: int = 5) -> str:
         lines.append(f"他 {len(qualified) - max_items} 件")
 
     return '\n'.join(lines)
+
+
+# ---------------------------------------------------------------------------
+# 6. 「エージェント」ページ向け: 調査結果の永続化
+# ---------------------------------------------------------------------------
+
+def persist_agent_run(category: str, evaluation: dict) -> str:
+    """evaluate_mcp_candidates() の結果(合格・不合格とも)を agent_candidates に
+    保存する。ダッシュボードの「エージェント」ページがこれを表示し、
+    CEOが気に入ったものだけ手動で favorites に追加する運用を想定。
+
+    Returns: 今回保存した run_id
+    """
+    init_ops_tables()  # このモジュール単体で先に呼ばれるケースに備えて念のため
+
+    run_id = f"agent-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    created_at = datetime.now(timezone.utc).isoformat()
+
+    rows = []
+    for qualified_flag, items in ((1, evaluation.get('qualified', [])), (0, evaluation.get('rejected', []))):
+        for item in items:
+            rows.append((
+                run_id,
+                category,
+                item['asin'],
+                item.get('title'),
+                item.get('url'),
+                item.get('jp_asin'),
+                item.get('jp_url'),
+                item.get('us_price_usd'),
+                item.get('jp_cost_jpy'),
+                item.get('sales_rank'),
+                item.get('review_count'),
+                item.get('weight_kg'),
+                1 if item.get('weight_estimated') else 0,
+                1 if item.get('fee_estimated') else 0,
+                item.get('price_diff_rate_gross'),
+                item.get('unit_profit_usd'),
+                item.get('margin_pct'),
+                qualified_flag,
+                item.get('reason'),
+                json.dumps(item, ensure_ascii=False),
+                created_at,
+            ))
+
+    if rows:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.executemany(
+                '''
+                INSERT INTO agent_candidates (
+                    run_id, category, asin, title, us_url, jp_asin, jp_url,
+                    us_price_usd, jp_cost_jpy, sales_rank, review_count,
+                    weight_kg, weight_estimated, fee_estimated,
+                    price_diff_rate_gross, unit_profit_usd, margin_pct,
+                    qualified, reason, data_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''',
+                rows,
+            )
+
+    return run_id
 
 
 if __name__ == '__main__':

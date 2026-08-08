@@ -5,7 +5,7 @@ import os
 import sqlite3
 import zlib
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -480,6 +480,40 @@ def init_db() -> None:
             )
             '''
         )
+        # ops_finance.py (Researchエージェント/daily_scan.py) が書き込む先。
+        # スキーマの定義元は ops_finance.py 側だが、このサーバーだけを先に
+        # 起動した場合でも /api/agent/candidates がエラーにならないよう
+        # ここでも同じ定義を用意しておく(どちらが先に作っても同じ結果)。
+        conn.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS agent_candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL,
+                category TEXT,
+                asin TEXT NOT NULL,
+                title TEXT,
+                us_url TEXT,
+                jp_asin TEXT,
+                jp_url TEXT,
+                us_price_usd REAL,
+                jp_cost_jpy REAL,
+                sales_rank INTEGER,
+                review_count INTEGER,
+                weight_kg REAL,
+                weight_estimated INTEGER,
+                fee_estimated INTEGER,
+                price_diff_rate_gross REAL,
+                unit_profit_usd REAL,
+                margin_pct REAL,
+                qualified INTEGER NOT NULL,
+                reason TEXT,
+                data_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            '''
+        )
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_run_id ON agent_candidates(run_id)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_created_at ON agent_candidates(created_at)')
         conn.execute(
             '''
             CREATE TABLE IF NOT EXISTS keepa_finder_items (
@@ -638,6 +672,67 @@ def load_favorites():
     return favorites
 
 
+def load_agent_candidates(days: int = 7):
+    """Researchエージェントが調べた候補一覧(直近 days 日分)を、
+    favoritesに既に追加済みかどうかのフラグ付きで返す。"""
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            '''
+            SELECT
+                ac.run_id, ac.category, ac.asin, ac.title, ac.us_url, ac.jp_asin, ac.jp_url,
+                ac.us_price_usd, ac.jp_cost_jpy, ac.sales_rank, ac.review_count,
+                ac.weight_kg, ac.weight_estimated, ac.fee_estimated,
+                ac.price_diff_rate_gross, ac.unit_profit_usd, ac.margin_pct,
+                ac.qualified, ac.reason, ac.data_json, ac.created_at,
+                CASE WHEN f.asin IS NULL THEN 0 ELSE 1 END AS already_favorited
+            FROM agent_candidates ac
+            LEFT JOIN favorites f ON f.asin = ac.asin
+            WHERE ac.created_at >= ?
+            ORDER BY ac.qualified DESC, ac.margin_pct DESC, ac.created_at DESC
+            ''',
+            (since,),
+        ).fetchall()
+
+    candidates = []
+    for row in rows:
+        (run_id, category, asin, title, us_url, jp_asin, jp_url,
+         us_price_usd, jp_cost_jpy, sales_rank, review_count,
+         weight_kg, weight_estimated, fee_estimated,
+         price_diff_rate_gross, unit_profit_usd, margin_pct,
+         qualified, reason, data_json, created_at, already_favorited) = row
+        try:
+            data = json.loads(data_json)
+        except Exception:
+            data = {}
+        candidates.append({
+            'runId': run_id,
+            'category': category,
+            'asin': asin,
+            'title': title,
+            'usUrl': us_url,
+            'jpAsin': jp_asin,
+            'jpUrl': jp_url,
+            'usPriceUsd': us_price_usd,
+            'jpCostJpy': jp_cost_jpy,
+            'salesRank': sales_rank,
+            'reviewCount': review_count,
+            'weightKg': weight_kg,
+            'weightEstimated': bool(weight_estimated),
+            'feeEstimated': bool(fee_estimated),
+            'priceDiffRateGross': price_diff_rate_gross,
+            'unitProfitUsd': unit_profit_usd,
+            'marginPct': margin_pct,
+            'qualified': bool(qualified),
+            'reason': reason,
+            'data': data,
+            'createdAt': created_at,
+            'alreadyFavorited': bool(already_favorited),
+        })
+    return candidates
+
+
 def delete_favorite(asin):
     asin = str(asin or '').strip().upper()
     with sqlite3.connect(DB_PATH) as conn:
@@ -780,6 +875,11 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed.path == '/api/favorites':
             self._send_json(200, {'ok': True, 'favorites': load_favorites()})
+            return
+
+        if parsed.path == '/api/agent/candidates':
+            days = to_int_or_default((params.get('days') or [None])[0], 7)
+            self._send_json(200, {'ok': True, 'candidates': load_agent_candidates(days=days)})
             return
 
         if parsed.path == '/api/latest':

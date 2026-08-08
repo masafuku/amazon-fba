@@ -57,6 +57,14 @@ export const deleteFavorite = async (asin) => {
     return response.json();
 };
 
+export const loadAgentCandidates = async (days = 7) => {
+    const params = new URLSearchParams({ days: String(days) });
+    const response = await fetch(`${API_BASE}/api/agent/candidates?${params.toString()}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const json = await response.json();
+    return json.candidates || [];
+};
+
 export const loadDbStatsFromDb = async () => {
     const response = await fetch(`${API_BASE}/api/health`);
     if (!response.ok) {
