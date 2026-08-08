@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import gzip
+import mimetypes
 import os
 import sqlite3
 import zlib
@@ -37,6 +38,13 @@ _load_dotenv(Path(__file__).resolve().parent.parent / '.env')
 HOST = os.getenv('API_HOST', '0.0.0.0')
 PORT = 8001
 DB_PATH = Path(__file__).resolve().parent / 'keepa_imports.sqlite3'
+
+# 本番デプロイ(AWS等)向け: `npm run build` の出力(dist/)がこの隣に
+# あれば、/api/* 以外のリクエストをその静的ファイルとして配信する。
+# ローカル開発時(Vite dev server + プロキシ)は dist/ が存在しないので
+# 何も変わらない - 単に無視される。1プロセスで完結させることで、Node/nginx
+# 等を別途動かさずに済む(メモリの小さいインスタンス向け)。
+DIST_DIR = Path(__file__).resolve().parent / 'dist'
 KEEPA_QUERY_URL = 'https://api.keepa.com/query'
 KEEPA_PRODUCT_URL = 'https://api.keepa.com/product'
 KEEPA_TOKEN_URL = 'https://api.keepa.com/token'
@@ -1120,6 +1128,37 @@ class Handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         self._send_json(200, {'ok': True})
 
+    def _serve_static(self, url_path):
+        """dist/ からの静的ファイル配信(本番デプロイ向け、_load_dotenv同様
+        DIST_DIRが存在しない場合は何もしない)。SPAはハッシュルーティング
+        (#agentなど)なので、/api/以外は基本的に常にindex.htmlを返せばよい。
+        """
+        if not DIST_DIR.is_dir():
+            self._send_json(404, {'error': 'Not found'})
+            return
+
+        # ディレクトリトラバーサル対策: 解決後のパスがDIST_DIR配下か必ず確認する。
+        relative = url_path.lstrip('/') or 'index.html'
+        candidate = (DIST_DIR / relative).resolve()
+        if not str(candidate).startswith(str(DIST_DIR.resolve()) + os.sep) and candidate != DIST_DIR.resolve():
+            candidate = DIST_DIR / 'index.html'
+        if not candidate.is_file():
+            candidate = DIST_DIR / 'index.html'  # SPAフォールバック
+
+        content_type, _ = mimetypes.guess_type(str(candidate))
+        body = candidate.read_bytes()
+        self.send_response(200)
+        self.send_header('Content-Type', content_type or 'application/octet-stream')
+        self.send_header('Content-Length', str(len(body)))
+        # index.html自体はキャッシュさせない(デプロイのたびに更新されるため)。
+        # ハッシュ付きファイル名のassetsは長期キャッシュしてよい。
+        if candidate.name == 'index.html':
+            self.send_header('Cache-Control', 'no-cache')
+        else:
+            self.send_header('Cache-Control', 'public, max-age=31536000, immutable')
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
@@ -1200,7 +1239,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(500, {'error': str(exc)})
             return
 
-        self._send_json(404, {'error': 'Not found'})
+        if parsed.path.startswith('/api/'):
+            self._send_json(404, {'error': 'Not found'})
+            return
+
+        self._serve_static(parsed.path)
 
     def do_POST(self):
         if self.path == '/api/favorites':
