@@ -77,6 +77,18 @@ def price_volatility_ratio(product: Dict[str, Any], domain: str) -> Optional[flo
     return None
 
 
+def package_weight_kg(product: Dict[str, Any]) -> Optional[float]:
+    """Package weight in kg, used for international-shipping cost estimates.
+    Keepa returns `packageWeight` in grams; falls back to `itemWeight` if the
+    package figure isn't present. Returns None if neither is available (the
+    caller should fall back to a manual/default estimate in that case)."""
+    for field in ("packageWeight", "itemWeight"):
+        raw = product.get(field)
+        if raw is not None and raw > 0:
+            return round(raw / 1000, 3)
+    return None
+
+
 def primary_code(product: Dict[str, Any]) -> Optional[str]:
     """Primary UPC, falling back to EAN, used to match the same physical
     product across Amazon marketplaces (ASINs differ per-domain)."""

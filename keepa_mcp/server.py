@@ -85,6 +85,7 @@ def _summarize_product(product: Dict[str, Any], domain: str, cache_info: Optiona
         "review_count": analysis.review_count(product),
         "rating": analysis.rating(product),
         "price_volatility_90d": analysis.price_volatility_ratio(product, domain),
+        "weight_kg": analysis.package_weight_kg(product),
         "upc": (product.get("upcList") or [None])[0],
         "ean": (product.get("eanList") or [None])[0],
         "url": analysis.product_url(asin, domain),
