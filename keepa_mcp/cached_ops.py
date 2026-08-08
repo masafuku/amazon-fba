@@ -60,13 +60,19 @@ def cached_find_products(
     review_count_max: Optional[int],
     review_count_min: Optional[int],
     per_page: int,
+    price_min: Optional[int] = None,
+    require_amazon_out_of_stock: bool = False,
+    monthly_sold_peak_min: Optional[int] = None,
+    product_type: Optional[List[str]] = None,
     force_refresh: bool = False,
 ) -> Tuple[Dict[str, Any], CacheInfo]:
     key = json.dumps({
         "domain": domain.upper(), "keyword": keyword, "category_id": category_id,
         "sales_rank_min": sales_rank_min, "sales_rank_max": sales_rank_max,
         "review_count_max": review_count_max, "review_count_min": review_count_min,
-        "per_page": per_page,
+        "per_page": per_page, "price_min": price_min,
+        "require_amazon_out_of_stock": require_amazon_out_of_stock,
+        "monthly_sold_peak_min": monthly_sold_peak_min, "product_type": product_type,
     }, sort_keys=True)
 
     if settings.cache_enabled and not force_refresh:
@@ -79,7 +85,9 @@ def cached_find_products(
         api_key, domain=domain, keyword=keyword, category_id=category_id,
         sales_rank_min=sales_rank_min, sales_rank_max=sales_rank_max,
         review_count_max=review_count_max, review_count_min=review_count_min,
-        per_page=per_page,
+        per_page=per_page, price_min=price_min,
+        require_amazon_out_of_stock=require_amazon_out_of_stock,
+        monthly_sold_peak_min=monthly_sold_peak_min, product_type=product_type,
     )
     if settings.cache_enabled:
         cache.set("finder", key, result)

@@ -154,31 +154,46 @@ def search_category(term: str, domain: str = "US", force_refresh: bool = False) 
 def find_candidates(
     keyword: str,
     category_id: Optional[int] = None,
-    sales_rank_min: int = 1000,
-    sales_rank_max: int = 20000,
-    review_count_max: int = 200,
+    price_min: Optional[int] = 3000,
+    require_amazon_out_of_stock: bool = True,
+    monthly_sold_peak_min: Optional[int] = 10,
+    sales_rank_min: Optional[int] = None,
+    sales_rank_max: Optional[int] = None,
+    review_count_max: Optional[int] = None,
     max_results: int = 50,
     domain: str = "US",
     force_refresh: bool = False,
 ) -> Dict[str, Any]:
     """Coarse, cheap product search via Keepa's Product Finder.
 
-    Filters by keyword (matched against the product title, same as the
-    dashboard's manual Finder search) plus sales rank range / max review
-    count, with an optional category as additional narrowing - no price
-    data yet (call get_product_detail or find_arbitrage_candidates for that).
-    Results are cached (default 6h; see KEEPA_CACHE_TTL_FINDER_HOURS) since
-    rankings/review counts do not change minute to minute; pass
-    force_refresh=True to force a live re-query.
+    Defaults mirror the dashboard's manual "在庫切れ候補を検索" recipe (see
+    keepa-csv-dashboard/sqlite_api_server.py's build_keepa_finder_selection):
+    keyword + Amazon-itself-has-no-offer (only 3rd-party sellers do) + a
+    buy-box price floor + a minimum peak monthly-sold signal. No price data
+    yet in the result (call get_product_detail or find_arbitrage_candidates
+    for that). Results are cached (default 6h; see
+    KEEPA_CACHE_TTL_FINDER_HOURS) since these do not change minute to
+    minute; pass force_refresh=True to force a live re-query.
 
     Args:
         keyword: Search term(s) matched against the product title (space-separated,
-            all terms required - e.g. "kitchen gadget").
+            all terms required - e.g. "kitchen gadget", "Japan Import").
         category_id: Optional Keepa category id (from search_category) to further
             narrow the keyword search.
-        sales_rank_min: Minimum current sales rank (lower rank = better seller).
-        sales_rank_max: Maximum current sales rank.
-        review_count_max: Maximum current review count.
+        price_min: Minimum current buy-box price (incl. shipping), in the
+            domain's smallest currency unit - cents for USD, whole yen for
+            JPY (so 3000 means $30 on domain="US" but Y3000 on domain="JP").
+            None to disable this filter.
+        require_amazon_out_of_stock: If True (default), only match listings
+            where Amazon itself has no offer - i.e. 3rd-party-seller-only,
+            typically less direct Amazon competition.
+        monthly_sold_peak_min: Minimum peak monthly-sold signal, a basic demand
+            floor. None to disable.
+        sales_rank_min: Optional minimum current sales rank (lower rank = better
+            seller). Not part of the default recipe; add if you also want to
+            filter by rank.
+        sales_rank_max: Optional maximum current sales rank.
+        review_count_max: Optional maximum current review count.
         max_results: Max ASINs to return (capped at 200 per Keepa Finder page).
         domain: Amazon marketplace code. Default "US".
         force_refresh: Bypass the cache and query Keepa live.
@@ -189,7 +204,10 @@ def find_candidates(
             api_key, domain=domain, keyword=keyword, category_id=category_id,
             sales_rank_min=sales_rank_min, sales_rank_max=sales_rank_max,
             review_count_max=review_count_max, review_count_min=None,
-            per_page=max_results, force_refresh=force_refresh,
+            per_page=max_results, price_min=price_min,
+            require_amazon_out_of_stock=require_amazon_out_of_stock,
+            monthly_sold_peak_min=monthly_sold_peak_min, product_type=["0"],
+            force_refresh=force_refresh,
         )
     except KeepaError as exc:
         status = get_token_status(api_key)
@@ -248,9 +266,12 @@ def find_jp_price(code: str, force_refresh: bool = False) -> Dict[str, Any]:
 def find_arbitrage_candidates(
     keyword: str,
     category_id: Optional[int] = None,
-    sales_rank_min: int = 1000,
-    sales_rank_max: int = 20000,
-    review_count_max: int = 200,
+    price_min: Optional[int] = 3000,
+    require_amazon_out_of_stock: bool = True,
+    monthly_sold_peak_min: Optional[int] = 10,
+    sales_rank_min: Optional[int] = None,
+    sales_rank_max: Optional[int] = None,
+    review_count_max: Optional[int] = None,
     price_diff_min: float = 0.4,
     price_volatility_max: float = 0.2,
     max_candidates: int = 30,
@@ -276,12 +297,20 @@ def find_arbitrage_candidates(
 
     Args:
         keyword: Search term(s) matched against the product title (space-separated,
-            all terms required - e.g. "kitchen gadget").
+            all terms required - e.g. "kitchen gadget", "Japan Import").
         category_id: Optional Keepa category id (from search_category) to further
             narrow the keyword search.
-        sales_rank_min: Minimum current sales rank on the sell side.
-        sales_rank_max: Maximum current sales rank on the sell side.
-        review_count_max: Maximum current review count on the sell side.
+        price_min: Minimum current buy-box price (incl. shipping) on the sell
+            side, in the domain's smallest currency unit (cents for USD, whole
+            yen for JPY). Mirrors the dashboard's manual Finder recipe. None
+            to disable.
+        require_amazon_out_of_stock: If True (default), only match sell-side
+            listings where Amazon itself has no offer (3rd-party-seller-only).
+        monthly_sold_peak_min: Minimum peak monthly-sold signal on the sell
+            side. None to disable.
+        sales_rank_min: Optional minimum current sales rank on the sell side.
+        sales_rank_max: Optional maximum current sales rank on the sell side.
+        review_count_max: Optional maximum current review count on the sell side.
         price_diff_min: Minimum required (sell - cost) / cost, e.g. 0.4 = 40%.
         price_volatility_max: Maximum allowed (max90-min90)/avg90 on the sell side, e.g. 0.2 = 20%.
         max_candidates: Max sell-side ASINs to evaluate (bounds API token usage).
@@ -339,7 +368,10 @@ def find_arbitrage_candidates(
             api_key, domain=sell_domain, keyword=keyword, category_id=category_id,
             sales_rank_min=sales_rank_min, sales_rank_max=sales_rank_max,
             review_count_max=review_count_max, review_count_min=None,
-            per_page=max_candidates, force_refresh=force_refresh,
+            per_page=max_candidates, price_min=price_min,
+            require_amazon_out_of_stock=require_amazon_out_of_stock,
+            monthly_sold_peak_min=monthly_sold_peak_min, product_type=["0"],
+            force_refresh=force_refresh,
         )
     except KeepaError as exc:
         return {"candidates": [], "evaluated": 0, "error": f"Product Finder call failed: {exc}", "note": budget_note}

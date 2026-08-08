@@ -66,9 +66,9 @@ KEYWORD_ROTATION = {
 }
 
 DEFAULT_SEARCH_PARAMS = dict(
-    sales_rank_min=1000,
-    sales_rank_max=20000,
-    review_count_max=200,
+    # price_min / require_amazon_out_of_stock / monthly_sold_peak_min は
+    # find_arbitrage_candidates() 側のデフォルト(ダッシュボードの手動Finderと
+    # 同じ「Amazon自体は在庫なし・3000円/ドル以上」レシピ)をそのまま使う。
     price_diff_min=0.30,   # MCP側の粗いフィルタ(実質利益率はここでは見ていない)
     price_volatility_max=0.20,
     max_candidates=30,

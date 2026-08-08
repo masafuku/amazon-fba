@@ -172,21 +172,34 @@ def find_products(
     domain: str = "US",
     keyword: Optional[str] = None,
     category_id: Optional[int] = None,
+    price_min: Optional[int] = None,
+    require_amazon_out_of_stock: bool = False,
+    monthly_sold_peak_min: Optional[int] = None,
+    product_type: Optional[List[str]] = None,
     sales_rank_min: Optional[int] = None,
     sales_rank_max: Optional[int] = None,
     review_count_max: Optional[int] = None,
     review_count_min: Optional[int] = None,
+    sort: Optional[List[List[str]]] = None,
     page: int = 0,
     per_page: int = 50,
 ) -> Dict[str, Any]:
-    """Product Finder: cheap, coarse filtering by keyword / category / rank /
-    review count. Does not return price data - fetch full product details
-    separately.
+    """Product Finder: cheap, coarse filtering. Does not return price data -
+    fetch full product details separately.
 
     `keyword` is the primary filter (matched against the product title,
     space-separated terms all required, Keepa keyword search - same as the
     dashboard's manual Finder search); `category_id` is an optional
     additional narrowing filter, combined with AND when both are given.
+
+    `price_min` / `require_amazon_out_of_stock` / `monthly_sold_peak_min` /
+    `product_type` mirror the dashboard's manual "在庫切れ候補を検索" recipe
+    (see keepa-csv-dashboard/sqlite_api_server.py's
+    build_keepa_finder_selection): Amazon itself has no offer (only 3rd-party
+    sellers do) and the buy-box price clears a floor - i.e. "Amazonに在庫が
+    ない、価格が閾値以上" niche/reseller-only listings. `price_min` is in the
+    domain's smallest currency unit (cents for USD, whole yen for JPY - so
+    price_min=3000 means $30 on domain="US" but Y3000 on domain="JP").
 
     Keepa requires perPage >= 50 (a 400 error otherwise); the result is
     trimmed back down to the caller's requested `per_page` before returning.
@@ -196,12 +209,21 @@ def find_products(
     selection: Dict[str, Any] = {
         "page": page,
         "perPage": keepa_per_page,
-        "sort": [["current_SALES", "asc"]],
+        "sort": sort if sort is not None else [["current_SALES", "asc"], ["monthlySold", "desc"]],
     }
     if keyword:
         selection["title"] = keyword
     if category_id is not None:
         selection["categories_include"] = [category_id]
+    if product_type is not None:
+        selection["productType"] = product_type
+    if require_amazon_out_of_stock:
+        selection["current_AMAZON_gte"] = -1
+        selection["current_AMAZON_lte"] = -1
+    if price_min is not None:
+        selection["current_BUY_BOX_SHIPPING_gte"] = price_min
+    if monthly_sold_peak_min is not None:
+        selection["monthlySoldPeak_gte"] = monthly_sold_peak_min
     if sales_rank_min is not None:
         selection["current_SALES_gte"] = sales_rank_min
     if sales_rank_max is not None:
