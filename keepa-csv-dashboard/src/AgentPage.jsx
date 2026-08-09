@@ -511,7 +511,40 @@ export default function AgentPage() {
                                             ) : null}
                                         </td>
                                         <td className={`px-4 py-3 font-semibold ${candidate.unitProfitUsd >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                                            {candidate.unitProfitUsd == null ? '-' : `¥${Math.round(Number(candidate.unitProfitUsd) * EXCHANGE_RATE).toLocaleString()}`}
+                                            {candidate.unitProfitUsd == null ? (
+                                                '-'
+                                            ) : (
+                                                <details className="group">
+                                                    <summary className="cursor-pointer list-none">
+                                                        ¥{Math.round(Number(candidate.unitProfitUsd) * EXCHANGE_RATE).toLocaleString()}
+                                                    </summary>
+                                                    <div className="mt-2 space-y-1 text-xs font-normal text-slate-400">
+                                                        <p>
+                                                            US価格: {candidate.data?.us_price_usd != null ? `$${Number(candidate.data.us_price_usd).toFixed(2)}` : '-'}
+                                                        </p>
+                                                        <p>
+                                                            JP原価: {candidate.data?.jp_cost_usd != null
+                                                                ? `$${Number(candidate.data.jp_cost_usd).toFixed(2)} (¥${Math.round(Number(candidate.data.jp_cost_usd) * EXCHANGE_RATE).toLocaleString()})`
+                                                                : '-'}
+                                                        </p>
+                                                        <p>
+                                                            Amazon手数料: {candidate.data?.amazon_fee_usd != null
+                                                                ? `$${Number(candidate.data.amazon_fee_usd).toFixed(2)} (¥${Math.round(Number(candidate.data.amazon_fee_usd) * EXCHANGE_RATE).toLocaleString()})`
+                                                                : '-'}
+                                                        </p>
+                                                        <p>
+                                                            FBA手数料: {candidate.data?.fba_fee_usd != null
+                                                                ? `$${Number(candidate.data.fba_fee_usd).toFixed(2)} (¥${Math.round(Number(candidate.data.fba_fee_usd) * EXCHANGE_RATE).toLocaleString()})`
+                                                                : '-'}
+                                                        </p>
+                                                        <p>
+                                                            国際送料: {candidate.data?.shipping_cost_usd != null
+                                                                ? `$${Number(candidate.data.shipping_cost_usd).toFixed(2)} (¥${Math.round(Number(candidate.data.shipping_cost_usd) * EXCHANGE_RATE).toLocaleString()})`
+                                                                : '-'}
+                                                        </p>
+                                                    </div>
+                                                </details>
+                                            )}
                                         </td>
                                         <td className="px-4 py-3 text-slate-200">
                                             {candidate.priceVolatility90d == null ? '-' : `±${(candidate.priceVolatility90d * 100).toFixed(0)}%`}
