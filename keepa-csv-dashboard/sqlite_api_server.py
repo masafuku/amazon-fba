@@ -872,6 +872,53 @@ def init_db() -> None:
         )
         conn.execute('CREATE INDEX IF NOT EXISTS idx_keyword_pool_status ON keyword_pool(status)')
 
+        # Sellerエージェントのセラープール。定義元はops_finance.py側だが、
+        # keyword_pool と同じ理由でここにも同じ定義を用意しておく。
+        conn.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS seller_pool (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                seller_id TEXT NOT NULL UNIQUE,
+                seller_name TEXT,
+                source TEXT NOT NULL,
+                seed_asin TEXT,
+                added_at TEXT NOT NULL,
+                last_mined_at TEXT,
+                times_mined INTEGER NOT NULL DEFAULT 0,
+                total_qualified INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'active'
+            )
+            '''
+        )
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_seller_pool_status ON seller_pool(status)')
+
+        # seller_poolの一度きりの自動バックフィル(ops_finance.py側と同じロジック、
+        # どちらのプロセスが先に起動しても安全 - INSERT OR IGNOREのため二重実行しても実害なし)。
+        seller_pool_count = conn.execute('SELECT COUNT(*) FROM seller_pool').fetchone()[0]
+        if seller_pool_count == 0:
+            backfill_rows = conn.execute(
+                '''
+                SELECT seller_id,
+                       MAX(seller_name) AS seller_name,
+                       MIN(seed_asin) AS seed_asin,
+                       MIN(created_at) AS added_at,
+                       MAX(created_at) AS last_mined_at,
+                       COUNT(DISTINCT run_id) AS times_mined,
+                       SUM(qualified) AS total_qualified
+                FROM agent_candidates
+                WHERE source_type = 'seller' AND seller_id IS NOT NULL AND seller_id != ''
+                GROUP BY seller_id
+                '''
+            ).fetchall()
+            conn.executemany(
+                '''
+                INSERT OR IGNORE INTO seller_pool
+                    (seller_id, seller_name, source, seed_asin, added_at, last_mined_at, times_mined, total_qualified, status)
+                VALUES (?, ?, 'keyword_expansion', ?, ?, ?, ?, ?, 'active')
+                ''',
+                backfill_rows,
+            )
+
 
 def insert_rows(rows, metadata):
     imported_at = metadata.get('importedAt') or datetime.now(timezone.utc).isoformat()
@@ -1152,6 +1199,60 @@ def delete_keyword_pool_entry(keyword):
     return {'ok': True, 'deleted': cursor.rowcount > 0, 'keyword': keyword}
 
 
+def load_seller_pool():
+    """Sellerエージェントのセラープール全体を返す
+    (daily_scan.py --list-sellers / ops_finance.list_seller_pool() と同じ並び順)。"""
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            '''
+            SELECT seller_id, seller_name, source, seed_asin, added_at, last_mined_at,
+                   times_mined, total_qualified, status
+            FROM seller_pool
+            ORDER BY times_mined ASC, COALESCE(last_mined_at, '') ASC
+            '''
+        ).fetchall()
+    return [
+        {
+            'sellerId': seller_id,
+            'sellerName': seller_name,
+            'source': source,
+            'seedAsin': seed_asin,
+            'addedAt': added_at,
+            'lastMinedAt': last_mined_at,
+            'timesMined': times_mined,
+            'totalQualified': total_qualified,
+            'status': status,
+        }
+        for seller_id, seller_name, source, seed_asin, added_at, last_mined_at, times_mined, total_qualified, status in rows
+    ]
+
+
+def add_seller_pool_entry(payload):
+    """ダッシュボードからのマニュアル追加。既存セラーは無視(重複追加しない)。"""
+    seller_id = str(payload.get('sellerId') or '').strip()
+    if not seller_id:
+        raise ValueError('sellerId is required')
+
+    now = datetime.now(timezone.utc).isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute(
+            '''
+            INSERT OR IGNORE INTO seller_pool
+                (seller_id, source, seed_asin, added_at, times_mined, total_qualified, status)
+            VALUES (?, 'manual', NULL, ?, 0, 0, 'active')
+            ''',
+            (seller_id, now),
+        )
+    return {'ok': True, 'added': cursor.rowcount > 0, 'sellerId': seller_id}
+
+
+def delete_seller_pool_entry(seller_id):
+    seller_id = str(seller_id or '').strip()
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute('DELETE FROM seller_pool WHERE seller_id = ?', (seller_id,))
+    return {'ok': True, 'deleted': cursor.rowcount > 0, 'sellerId': seller_id}
+
+
 def delete_favorite(asin):
     asin = str(asin or '').strip().upper()
     with sqlite3.connect(DB_PATH) as conn:
@@ -1389,6 +1490,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, {'ok': True, 'keywords': load_keyword_pool()})
             return
 
+        if parsed.path == '/api/seller-pool':
+            self._send_json(200, {'ok': True, 'sellers': load_seller_pool()})
+            return
+
         if parsed.path == '/api/keepa/finder-run':
             run_id = (params.get('runId') or [''])[0]
             try:
@@ -1424,6 +1529,18 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 payload = json.loads(raw.decode('utf-8')) if raw else {}
                 self._send_json(200, add_keyword_pool_entry(payload))
+            except ValueError as exc:
+                self._send_json(400, {'error': str(exc)})
+            except Exception as exc:
+                self._send_json(500, {'error': str(exc)})
+            return
+
+        if self.path == '/api/seller-pool':
+            length = int(self.headers.get('Content-Length', '0'))
+            raw = self.rfile.read(length)
+            try:
+                payload = json.loads(raw.decode('utf-8')) if raw else {}
+                self._send_json(200, add_seller_pool_entry(payload))
             except ValueError as exc:
                 self._send_json(400, {'error': str(exc)})
             except Exception as exc:
@@ -1517,6 +1634,11 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == '/api/keyword-pool':
             keyword = (parse_qs(parsed.query).get('keyword') or [''])[0]
             self._send_json(200, delete_keyword_pool_entry(keyword))
+            return
+
+        if parsed.path == '/api/seller-pool':
+            seller_id = (parse_qs(parsed.query).get('sellerId') or [''])[0]
+            self._send_json(200, delete_seller_pool_entry(seller_id))
             return
 
         if parsed.path != '/api/favorites':

@@ -34,6 +34,17 @@
 # 常駐させたい場合(macOSでログイン時に自動起動するなど)は、この
 # スクリプトを launchd の plist や `nohup ./scripts/run_all_day.sh &`
 # から起動する。
+#
+# Sellerエージェント(定期セラーマイニング、CEOの指示「夜中に一定時間
+# セラーマイニングの時間を使う」): JST の指定時間帯(デフォルト深夜1:00〜
+# 6:00)は、サイクルごとにキーワード検索の代わりにセラープールから1件選んで
+# マイニングする(daily_scan.py --seller-mining)。日中はCEOがダッシュボードを
+# 見ながらキーワード検索の進捗を追う可能性があるため、キーワード検索を
+# 優先させる形。時間帯以外は従来通り。AWS(Lightsail)はシステム時刻が
+# UTCなので、サーバーのTZ設定に依存せず `TZ=Asia/Tokyo date +%H` でJST時刻を
+# 明示的に取得する。
+#   SELLER_MINING_NIGHT_START_JST=0 SELLER_MINING_NIGHT_END_JST=0 ./scripts/run_all_day.sh
+#     (開始・終了を同じ値にすると実質無効化 = 常にキーワード検索のみ)
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -49,6 +60,12 @@ fi
 # 1回あたりの評価件数上限(小さいほどトークン消費が少なく、1日に回せる
 # キーワード数が増える。目安: 10〜15件なら1回あたり最大31〜41トークン)。
 MAX_CANDIDATES="${MAX_CANDIDATES:-12}"
+
+# 定期セラーマイニングの時間帯(JST、24時間表記、終了は排他的)。
+# start > end の場合は日をまたぐ範囲として扱う(例: 23〜4時)。
+SELLER_MINING_NIGHT_START_JST="${SELLER_MINING_NIGHT_START_JST:-1}"
+SELLER_MINING_NIGHT_END_JST="${SELLER_MINING_NIGHT_END_JST:-6}"
+SELLER_MINING_MAX_CANDIDATES="${SELLER_MINING_MAX_CANDIDATES:-10}"
 
 LOG_DIR="$REPO_ROOT/logs"
 mkdir -p "$LOG_DIR"
@@ -66,7 +83,25 @@ log() {
   echo "$(date '+%Y-%m-%d %H:%M:%S') $*" | tee -a "$LOG_FILE"
 }
 
-log "[INFO] run_all_day.sh 開始 (MAX_CANDIDATES=$MAX_CANDIDATES, PID=$$)"
+# 現在時刻(JST)がセラーマイニング時間帯に入っているかを判定する。
+# start==end の場合は常にfalse(機能の実質無効化)。
+is_seller_mining_hour() {
+  local hour start end
+  hour=$(TZ='Asia/Tokyo' date '+%H')
+  hour=$((10#$hour))  # 先頭0のある数字("08"等)が8進数扱いされるのを防ぐ
+  start="$SELLER_MINING_NIGHT_START_JST"
+  end="$SELLER_MINING_NIGHT_END_JST"
+  if [ "$start" -eq "$end" ]; then
+    return 1
+  elif [ "$start" -lt "$end" ]; then
+    [ "$hour" -ge "$start" ] && [ "$hour" -lt "$end" ]
+  else
+    [ "$hour" -ge "$start" ] || [ "$hour" -lt "$end" ]
+  fi
+}
+
+log "[INFO] run_all_day.sh 開始 (MAX_CANDIDATES=$MAX_CANDIDATES, "\
+"SELLER_MINING_NIGHT_JST=${SELLER_MINING_NIGHT_START_JST}-${SELLER_MINING_NIGHT_END_JST}, PID=$$)"
 log "[INFO] 追加引数: $*"
 
 cycle=0
@@ -77,15 +112,23 @@ while [ "$running" -eq 1 ]; do
   fi
 
   cycle=$((cycle + 1))
-  log "[INFO] --- サイクル $cycle 開始 ---"
 
-  if "$VENV_PYTHON" daily_scan.py --max-candidates "$MAX_CANDIDATES" "$@" >> "$LOG_FILE" 2>&1; then
-    log "[INFO] サイクル $cycle 完了。"
+  if is_seller_mining_hour; then
+    cycle_args=(daily_scan.py --seller-mining --seller-mining-max-candidates "$SELLER_MINING_MAX_CANDIDATES")
+    cycle_label="セラーマイニング"
+  else
+    cycle_args=(daily_scan.py --max-candidates "$MAX_CANDIDATES" "$@")
+    cycle_label="キーワード検索"
+  fi
+  log "[INFO] --- サイクル $cycle 開始 (${cycle_label}) ---"
+
+  if "$VENV_PYTHON" "${cycle_args[@]}" >> "$LOG_FILE" 2>&1; then
+    log "[INFO] サイクル $cycle 完了 (${cycle_label})。"
     consecutive_errors=0
     sleep_seconds="$NORMAL_SLEEP_SECONDS"
   else
     consecutive_errors=$((consecutive_errors + 1))
-    log "[WARN] サイクル $cycle が異常終了しました(連続 $consecutive_errors 回目)。詳細は $LOG_FILE を確認してください。"
+    log "[WARN] サイクル $cycle (${cycle_label}) が異常終了しました(連続 $consecutive_errors 回目)。詳細は $LOG_FILE を確認してください。"
     sleep_seconds="$ERROR_SLEEP_SECONDS"
   fi
 

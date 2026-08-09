@@ -161,6 +161,26 @@ def init_ops_tables():
             );
             CREATE INDEX IF NOT EXISTS idx_keyword_pool_status ON keyword_pool(status);
 
+            -- Sellerエージェント: セラーマイニング(expand_from_seller経由)の
+            -- 対象セラーのプール。keyword_poolと全く同じLRUパターン(times_mined昇順
+            -- →last_mined_at昇順で1件選ぶ)。3つの経路すべてがここに登録・記録する:
+            -- ①daily_scan.pyのexpand_from_top_seller(合格候補から自動発見)、
+            -- ②ダッシュボード(scripts/seller_mine_cli.py)からの手動発見/展開、
+            -- ③本テーブル導入後の定期セラーマイニングサイクル。
+            CREATE TABLE IF NOT EXISTS seller_pool (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                seller_id TEXT NOT NULL UNIQUE,
+                seller_name TEXT,
+                source TEXT NOT NULL,        -- keyword_expansion/manual_expand/manual
+                seed_asin TEXT,               -- このセラーを見つけたきっかけのASIN
+                added_at TEXT NOT NULL,
+                last_mined_at TEXT,
+                times_mined INTEGER NOT NULL DEFAULT 0,
+                total_qualified INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'active'  -- active/paused
+            );
+            CREATE INDEX IF NOT EXISTS idx_seller_pool_status ON seller_pool(status);
+
             -- 1日2回(朝8時/夜8時)のLINEダイジェスト通知が「前回の通知以降」
             -- を正しく判定するための状態テーブル(常に1行だけ)。
             CREATE TABLE IF NOT EXISTS digest_state (
@@ -209,6 +229,35 @@ def init_ops_tables():
             conn.execute('ALTER TABLE agent_runs ADD COLUMN seller_name TEXT')
         if 'seed_asin' not in agent_runs_columns:
             conn.execute('ALTER TABLE agent_runs ADD COLUMN seed_asin TEXT')
+
+        # seller_poolの一度きりの自動バックフィル: 既にsource_type='seller'の
+        # 実績がagent_candidatesにある(過去のセラーマイニング結果)場合、
+        # seller_poolがまだ空ならそこから再構築する。INSERT OR IGNOREなので
+        # 複数プロセスから同時に呼ばれても安全(二重実行しても実害なし)。
+        seller_pool_count = conn.execute('SELECT COUNT(*) FROM seller_pool').fetchone()[0]
+        if seller_pool_count == 0:
+            backfill_rows = conn.execute(
+                '''
+                SELECT seller_id,
+                       MAX(seller_name) AS seller_name,
+                       MIN(seed_asin) AS seed_asin,
+                       MIN(created_at) AS added_at,
+                       MAX(created_at) AS last_mined_at,
+                       COUNT(DISTINCT run_id) AS times_mined,
+                       SUM(qualified) AS total_qualified
+                FROM agent_candidates
+                WHERE source_type = 'seller' AND seller_id IS NOT NULL AND seller_id != ''
+                GROUP BY seller_id
+                '''
+            ).fetchall()
+            conn.executemany(
+                '''
+                INSERT OR IGNORE INTO seller_pool
+                    (seller_id, seller_name, source, seed_asin, added_at, last_mined_at, times_mined, total_qualified, status)
+                VALUES (?, ?, 'keyword_expansion', ?, ?, ?, ?, ?, 'active')
+                ''',
+                backfill_rows,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -1091,6 +1140,125 @@ def list_keyword_pool() -> list:
             'status': status,
         }
         for keyword, source, seed_keyword, added_at, last_used_at, times_used, total_qualified, status in rows
+    ]
+
+
+# ---------------------------------------------------------------------------
+# 8. Sellerエージェント: セラープール管理(keyword_poolと同じLRUパターン)
+# ---------------------------------------------------------------------------
+
+def add_sellers(seller_ids, source: str, seed_asin: str = None) -> int:
+    """セラーIDをプールに追加する(既存のものはスキップ)。追加できた件数を返す。"""
+    init_ops_tables()
+    seller_ids = [str(s).strip() for s in seller_ids if str(s or '').strip()]
+    if not seller_ids:
+        return 0
+
+    now = datetime.now(timezone.utc).isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.executemany(
+            '''
+            INSERT OR IGNORE INTO seller_pool (seller_id, source, seed_asin, added_at, times_mined, total_qualified, status)
+            VALUES (?, ?, ?, ?, 0, 0, 'active')
+            ''',
+            [(seller_id, source, seed_asin, now) for seller_id in seller_ids],
+        )
+        return cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+
+
+def pick_next_seller() -> str:
+    """次にマイニングするセラーを選ぶ。一度も調べていないものを優先し、
+    次に最後に調べてから時間が経っているものを優先する。
+    プールが空の場合は None を返す(呼び出し側でスキップする)。
+    """
+    init_ops_tables()
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            '''
+            SELECT seller_id FROM seller_pool
+            WHERE status = 'active'
+            ORDER BY times_mined ASC, COALESCE(last_mined_at, '') ASC
+            LIMIT 1
+            '''
+        ).fetchone()
+    return row[0] if row else None
+
+
+def record_seller_mined(seller_id: str, qualified_count: int = 0, seller_name: str = None) -> None:
+    """セラープール内のセラーを実際にマイニングした後、実績を記録する。
+    プールに無いセラー(手動でIDを直接指定した等)なら何もしない。
+    seller_nameが渡された場合は判明した名前で更新する(初回発見時はNoneのことが多い)。
+    """
+    init_ops_tables()
+    now = datetime.now(timezone.utc).isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        if seller_name:
+            conn.execute(
+                '''
+                UPDATE seller_pool
+                SET times_mined = times_mined + 1,
+                    last_mined_at = ?,
+                    total_qualified = total_qualified + ?,
+                    seller_name = ?
+                WHERE seller_id = ?
+                ''',
+                (now, qualified_count, seller_name, seller_id),
+            )
+        else:
+            conn.execute(
+                '''
+                UPDATE seller_pool
+                SET times_mined = times_mined + 1,
+                    last_mined_at = ?,
+                    total_qualified = total_qualified + ?
+                WHERE seller_id = ?
+                ''',
+                (now, qualified_count, seller_id),
+            )
+
+
+def set_seller_status(seller_id: str, status: str) -> bool:
+    """セラープール内の1件のstatusを変更する(active/paused)。
+    削除ではなくpausedにするので、いつ・なぜ止めたかの履歴
+    (times_mined/total_qualified)は残る。
+    戻り値: 対象行が見つかって更新できたか。
+    """
+    init_ops_tables()
+    if status not in ('active', 'paused'):
+        raise ValueError("status must be 'active' or 'paused'")
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute(
+            'UPDATE seller_pool SET status = ? WHERE seller_id = ?',
+            (status, seller_id),
+        )
+    return cursor.rowcount > 0
+
+
+def list_seller_pool() -> list:
+    """ダッシュボード表示用に、セラープール全体を返す。"""
+    init_ops_tables()
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            '''
+            SELECT seller_id, seller_name, source, seed_asin, added_at, last_mined_at,
+                   times_mined, total_qualified, status
+            FROM seller_pool
+            ORDER BY times_mined ASC, COALESCE(last_mined_at, '') ASC
+            '''
+        ).fetchall()
+    return [
+        {
+            'sellerId': seller_id,
+            'sellerName': seller_name,
+            'source': source,
+            'seedAsin': seed_asin,
+            'addedAt': added_at,
+            'lastMinedAt': last_mined_at,
+            'timesMined': times_mined,
+            'totalQualified': total_qualified,
+            'status': status,
+        }
+        for seller_id, seller_name, source, seed_asin, added_at, last_mined_at, times_mined, total_qualified, status in rows
     ]
 
 

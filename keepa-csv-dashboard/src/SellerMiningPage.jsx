@@ -1,14 +1,23 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Star } from 'lucide-react';
+import { Star, Trash2 } from 'lucide-react';
 import {
+    addSellerToPool,
+    deleteSellerFromPool,
     discoverSellersForAsin,
     expandFromSeller,
     loadAgentCandidates,
     loadAgentRuns,
     loadKeepaTokenStatus,
+    loadSellerPool,
     saveFavorite,
 } from './db';
 import { formatDateTime } from './formatters';
+
+const SELLER_SOURCE_LABEL = {
+    manual: '手動追加',
+    manual_expand: 'ダッシュボード発見',
+    keyword_expansion: 'キーワード検索経由',
+};
 
 const EXCHANGE_RATE = 150;
 const DEFAULT_MAX_SELLERS = 5;
@@ -45,6 +54,27 @@ export default function SellerMiningPage() {
     const [expandBusy, setExpandBusy] = useState(false);
     const [expandResult, setExpandResult] = useState(null);
 
+    // セラープール(定期セラーマイニングが巡回する対象。run_all_day.shの
+    // 深夜時間帯にキーワード検索の代わりに1件ずつマイニングされる)。
+    const [sellerPool, setSellerPool] = useState([]);
+    const [sellerPoolLoading, setSellerPoolLoading] = useState(true);
+    const [sellerPoolError, setSellerPoolError] = useState('');
+    const [newPoolSellerId, setNewPoolSellerId] = useState('');
+    const [addingToPool, setAddingToPool] = useState(false);
+    const [deletingSellerId, setDeletingSellerId] = useState('');
+
+    const refreshSellerPool = async () => {
+        setSellerPoolLoading(true);
+        setSellerPoolError('');
+        try {
+            setSellerPool(await loadSellerPool());
+        } catch (poolError) {
+            setSellerPoolError(poolError?.message || 'セラープールの読み込みに失敗しました。');
+        } finally {
+            setSellerPoolLoading(false);
+        }
+    };
+
     const refresh = async (period) => {
         setLoading(true);
         setError('');
@@ -73,8 +103,49 @@ export default function SellerMiningPage() {
     useEffect(() => {
         refresh(days);
         refreshTokenStatus();
+        refreshSellerPool();
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [days]);
+
+    const handleAddToPool = async (event) => {
+        event.preventDefault();
+        const sellerId = newPoolSellerId.trim();
+        if (!sellerId) return;
+        setAddingToPool(true);
+        setSellerPoolError('');
+        try {
+            const result = await addSellerToPool(sellerId);
+            if (!result.added) {
+                setSellerPoolError(`セラー「${sellerId}」はすでにプールに存在します。`);
+            }
+            setNewPoolSellerId('');
+            await refreshSellerPool();
+        } catch (addError) {
+            setSellerPoolError(addError?.message || 'セラーの追加に失敗しました。');
+        } finally {
+            setAddingToPool(false);
+        }
+    };
+
+    const handleDeleteFromPool = async (sellerId) => {
+        setDeletingSellerId(sellerId);
+        setSellerPoolError('');
+        try {
+            await deleteSellerFromPool(sellerId);
+            setSellerPool((current) => current.filter((item) => item.sellerId !== sellerId));
+        } catch (deleteError) {
+            setSellerPoolError(deleteError?.message || `「${sellerId}」の削除に失敗しました。`);
+        } finally {
+            setDeletingSellerId('');
+        }
+    };
+
+    // seller_pool は times_mined昇順→last_mined_at昇順で返ってくる(pick_next_seller()と
+    // 同じ並び順)ので、最初のactive行が次に定期マイニングで選ばれる。
+    const nextPickSellerId = useMemo(
+        () => sellerPool.find((item) => item.status === 'active')?.sellerId,
+        [sellerPool]
+    );
 
     const selectSortKey = (nextSortKey) => {
         if (sortKey === nextSortKey) {
@@ -661,6 +732,121 @@ export default function SellerMiningPage() {
                                                     {savingAsin === candidate.asin ? '追加中...' : 'お気に入りに追加'}
                                                 </button>
                                             )}
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                )}
+            </section>
+
+            {/* セラープール(定期セラーマイニングの巡回対象) */}
+            <section className="rounded-3xl border border-slate-800 bg-slate-900/80 p-6 shadow-xl shadow-slate-950/10">
+                <h2 className="mb-1 text-lg font-semibold text-white">セラープール(定期マイニング対象)</h2>
+                <p className="mb-4 text-sm text-slate-400">
+                    合格候補から自動発見・ダッシュボードから手動発見したセラーが貯まるプールです。
+                    深夜1:00〜6:00(JST、既定)の間、run_all_day.shがここから調査回数の少ないセラーを
+                    1件ずつ選んでマイニングします(<span className="text-cyan-300">次回選択</span>マークが目印)。
+                </p>
+
+                <form onSubmit={handleAddToPool} className="mb-4 flex flex-wrap gap-2">
+                    <input
+                        type="text"
+                        value={newPoolSellerId}
+                        onChange={(event) => setNewPoolSellerId(event.target.value)}
+                        placeholder="セラーIDを手動追加: A1234567890ABC"
+                        className="min-w-0 flex-1 rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:border-cyan-400"
+                    />
+                    <button
+                        type="submit"
+                        disabled={addingToPool || !newPoolSellerId.trim()}
+                        className="rounded-xl bg-cyan-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-cyan-400 disabled:opacity-50"
+                    >
+                        {addingToPool ? '追加中...' : '追加'}
+                    </button>
+                </form>
+
+                {sellerPoolError ? (
+                    <p className="mb-4 rounded-2xl border border-rose-800 bg-rose-950/40 p-4 text-sm text-rose-200">{sellerPoolError}</p>
+                ) : null}
+
+                <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                    <div className="text-slate-300">
+                        プール <span className="font-semibold text-cyan-300">{sellerPool.length}</span>件
+                    </div>
+                    <button
+                        type="button"
+                        onClick={refreshSellerPool}
+                        className="rounded-2xl bg-slate-800 px-4 py-2 text-sm font-semibold text-slate-200"
+                    >
+                        再読み込み
+                    </button>
+                </div>
+
+                {sellerPoolLoading ? (
+                    <p className="py-12 text-center text-slate-500">読み込み中...</p>
+                ) : sellerPool.length === 0 ? (
+                    <p className="py-12 text-center text-slate-500">
+                        セラープールは空です。上のフォームで手動追加するか、合格候補が出ると自動的に追加されます。
+                    </p>
+                ) : (
+                    <div className="overflow-x-auto">
+                        <table className="min-w-full border-collapse text-left text-sm">
+                            <thead className="bg-slate-950/90">
+                                <tr>
+                                    <th className="px-4 py-3 font-medium text-slate-400">セラーID</th>
+                                    <th className="px-4 py-3 font-medium text-slate-400">名前</th>
+                                    <th className="px-4 py-3 font-medium text-slate-400">由来</th>
+                                    <th className="px-4 py-3 font-medium text-slate-400">調査回数</th>
+                                    <th className="px-4 py-3 font-medium text-slate-400">合格件数</th>
+                                    <th className="px-4 py-3 font-medium text-slate-400">最終調査日時</th>
+                                    <th className="px-4 py-3 font-medium text-slate-400">状態</th>
+                                    <th className="px-4 py-3 font-medium text-slate-400">操作</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {sellerPool.map((item) => (
+                                    <tr
+                                        key={item.sellerId}
+                                        className={`border-t border-slate-800 ${
+                                            item.sellerId === nextPickSellerId ? 'bg-cyan-950/30' : 'bg-slate-950/80'
+                                        }`}
+                                    >
+                                        <td className="px-4 py-3 font-mono text-xs text-white">
+                                            {item.sellerId}
+                                            {item.sellerId === nextPickSellerId ? (
+                                                <span className="ml-2 rounded-lg bg-cyan-500 px-2 py-0.5 text-[10px] font-semibold text-slate-950">
+                                                    次回選択
+                                                </span>
+                                            ) : null}
+                                        </td>
+                                        <td className="px-4 py-3 text-slate-200">{item.sellerName || '-'}</td>
+                                        <td className="px-4 py-3 text-slate-400">{SELLER_SOURCE_LABEL[item.source] || item.source}</td>
+                                        <td className="px-4 py-3 text-slate-200">{item.timesMined ?? 0}</td>
+                                        <td className="px-4 py-3 text-slate-200">{item.totalQualified ?? 0}</td>
+                                        <td className="px-4 py-3 text-slate-400">
+                                            {item.lastMinedAt ? formatDateTime(item.lastMinedAt) : '未調査'}
+                                        </td>
+                                        <td className="px-4 py-3">
+                                            <span
+                                                className={`rounded-lg px-2 py-1 text-xs font-semibold ${
+                                                    item.status === 'active' ? 'bg-emerald-900/60 text-emerald-200' : 'bg-slate-800 text-slate-400'
+                                                }`}
+                                            >
+                                                {item.status === 'active' ? '有効' : '一時停止'}
+                                            </span>
+                                        </td>
+                                        <td className="px-4 py-3">
+                                            <button
+                                                type="button"
+                                                onClick={() => handleDeleteFromPool(item.sellerId)}
+                                                disabled={deletingSellerId === item.sellerId}
+                                                className="inline-flex items-center gap-1 rounded-lg bg-rose-950/60 px-2 py-1 text-xs font-semibold text-rose-200 hover:bg-rose-900 disabled:opacity-50"
+                                            >
+                                                <Trash2 className="h-3.5 w-3.5" />
+                                                {deletingSellerId === item.sellerId ? '削除中...' : '削除'}
+                                            </button>
                                         </td>
                                     </tr>
                                 ))}

@@ -236,6 +236,29 @@ export const deleteKeywordFromPool = async (keyword) => {
     return response.json();
 };
 
+export const loadSellerPool = async () => {
+    const response = await fetch(`${API_BASE}/api/seller-pool`);
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    const json = await response.json();
+    return json.sellers || [];
+};
+
+export const addSellerToPool = async (sellerId) => {
+    const response = await fetch(`${API_BASE}/api/seller-pool`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sellerId }),
+    });
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    return response.json();
+};
+
+export const deleteSellerFromPool = async (sellerId) => {
+    const response = await fetch(`${API_BASE}/api/seller-pool?sellerId=${encodeURIComponent(sellerId)}`, { method: 'DELETE' });
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    return response.json();
+};
+
 export const loadKeepaFinderRun = async (runId) => {
     const params = new URLSearchParams({ runId });
     const response = await fetch(`${API_BASE}/api/keepa/finder-run?${params.toString()}`);

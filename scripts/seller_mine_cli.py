@@ -35,11 +35,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from keepa_mcp.keepa_client import KeepaError
 from keepa_mcp.server import expand_from_seller, find_other_sellers_for_candidate
 from ops_finance import (
+    add_sellers,
     evaluate_mcp_candidates,
     init_ops_tables,
     log_agent_run,
     new_agent_run_id,
     persist_agent_run,
+    record_seller_mined,
 )
 
 
@@ -54,9 +56,13 @@ def cmd_discover_sellers(args: argparse.Namespace) -> dict:
             "ok": True, "asin": args.asin, "found": False, "sellerIds": [],
             "note": result.get("note") or result.get("error"),
         }
+    seller_ids = result.get("seller_ids") or []
+    # 定期セラーマイニング(Sellerエージェント)が後で巡回できるよう、
+    # ダッシュボードから手動発見したセラーもプールに登録しておく。
+    add_sellers(seller_ids, source="manual_expand", seed_asin=args.asin)
     return {
         "ok": True, "asin": args.asin, "found": True,
-        "sellerIds": result.get("seller_ids") or [],
+        "sellerIds": seller_ids,
         "domain": result.get("domain"),
     }
 
@@ -64,6 +70,9 @@ def cmd_discover_sellers(args: argparse.Namespace) -> dict:
 def cmd_expand(args: argparse.Namespace) -> dict:
     init_ops_tables()
     started_at = datetime.now(timezone.utc).isoformat()
+    # プールに無いセラーIDが直接指定された場合(コピペしたばかりのセラーURL等)
+    # にも登録しておく - INSERT OR IGNOREなので既存なら何もしない。
+    add_sellers([args.seller_id], source="manual_expand", seed_asin=args.seed_asin)
 
     try:
         result = expand_from_seller(
@@ -81,6 +90,7 @@ def cmd_expand(args: argparse.Namespace) -> dict:
 
     seller_name = result.get("seller_name") or args.seller_id
     evaluation = evaluate_mcp_candidates(result)
+    record_seller_mined(args.seller_id, qualified_count=len(evaluation["qualified"]), seller_name=seller_name)
 
     run_id = new_agent_run_id()
     label = "セラーマイニング(手動)"

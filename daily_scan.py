@@ -47,6 +47,19 @@ Keyword/Categoryエージェント(キーワードプールの管理):
     python3 daily_scan.py --list-keywords
         プールの内容(使用回数・最終使用日時・合格件数)を一覧表示
 
+Sellerエージェント(セラープールの管理・定期セラーマイニング):
+  合格候補から自動発見したセラー・ダッシュボードから手動発見したセラーは
+  すべて seller_pool に貯まる。以下のコマンドで、キーワード検索の代わりに
+  セラープールから1件選んでマイニングできる(run_all_day.shが深夜の時間帯に
+  自動的に呼ぶ想定):
+
+    python3 daily_scan.py --seller-mining
+        セラープールから次の1件(最も調査回数が少ない/久しく調べていないもの)
+        を選び、その出品を評価する(Keepaトークンを消費する)
+
+    python3 daily_scan.py --list-sellers
+        セラープールの内容(調査回数・最終調査日時・合格件数)を一覧表示
+
 使い方:
     python3 daily_scan.py
     python3 daily_scan.py --keyword "kitchen gadget"
@@ -75,14 +88,18 @@ from keepa_mcp.server import (
 )
 from ops_finance import (
     add_keywords,
+    add_sellers,
     evaluate_mcp_candidates,
     init_ops_tables,
     list_keyword_pool,
+    list_seller_pool,
     log_agent_run,
     new_agent_run_id,
     persist_agent_run,
     pick_next_keyword,
+    pick_next_seller,
     record_keyword_used,
+    record_seller_mined,
     seed_keyword_pool_from_favorites,
 )
 
@@ -132,30 +149,37 @@ SELLER_EXPANSION_MAX_CANDIDATES = 10
 MAX_SELLERS_PER_CANDIDATE = 3
 
 
-def _expand_from_one_seller(seller_id: str, source_label: str, wait_for_tokens: bool, seed_asin: str = None) -> None:
+def _expand_from_one_seller(
+    seller_id: str, source_label: str, wait_for_tokens: bool,
+    seed_asin: str = None, max_candidates: int = SELLER_EXPANSION_MAX_CANDIDATES,
+) -> int | None:
     """1セラー分の出品をパイプラインで評価し、結果を保存する。失敗しても
     メインのスキャン結果には影響させない(例外を握りつぶしてログのみ)。
     seed_asin: このセラーを見つけるきっかけになったASIN(呼び出し元の
     合格候補) - agent_candidates/agent_runsのseed_asin列にそのまま入る。
+    自動発動・定期サイクルの両方がここを通るので、seller_poolへの実績記録
+    (record_seller_mined)もここで一元化する。
+    戻り値: 合格件数(実行できた場合)。失敗した場合はNone。
     """
-    print(f"[INFO] セラー {seller_id} の出品一覧を取得して評価します(最大{SELLER_EXPANSION_MAX_CANDIDATES}件)...")
+    print(f"[INFO] セラー {seller_id} の出品一覧を取得して評価します(最大{max_candidates}件)...")
     try:
         seller_result = expand_from_seller(
-            seller_id=seller_id, max_candidates=SELLER_EXPANSION_MAX_CANDIDATES,
+            seller_id=seller_id, max_candidates=max_candidates,
             price_diff_min=0.30, price_volatility_max=None, wait_for_tokens=wait_for_tokens,
         )
     except KeepaError as exc:
         print(f"[WARN] セラー出品の評価に失敗しました: {exc}")
-        return
+        return None
 
     if seller_result.get("error"):
         print(f"[WARN] セラー出品の評価に失敗しました: {seller_result['error']}")
-        return
+        return None
 
     seller_name = seller_result.get("seller_name") or seller_id
     seller_evaluation = evaluate_mcp_candidates(seller_result)
+    qualified_count = len(seller_evaluation["qualified"])
     print(f"[INFO] セラー「{seller_name}」の出品: {seller_result.get('evaluated', 0)}件評価 / "
-          f"実質利益率20%以上: {len(seller_evaluation['qualified'])}件")
+          f"実質利益率20%以上: {qualified_count}件")
 
     if seller_evaluation["qualified"] or seller_evaluation["rejected"]:
         seller_run_id = new_agent_run_id()
@@ -166,12 +190,15 @@ def _expand_from_one_seller(seller_id: str, source_label: str, wait_for_tokens: 
         log_agent_run(
             seller_run_id, datetime.now(timezone.utc).isoformat(), 0,
             keyword=f"[seller] {seller_name}", category=source_label,
-            max_candidates=SELLER_EXPANSION_MAX_CANDIDATES, wait_for_tokens=wait_for_tokens,
+            max_candidates=max_candidates, wait_for_tokens=wait_for_tokens,
             mcp_result=seller_result, evaluation=seller_evaluation,
             notify_status="deferred_to_digest",
             source_type="seller", seller_id=seller_id, seller_name=seller_name, seed_asin=seed_asin,
         )
         print(f"[INFO] セラー出品の評価結果も「エージェント」ページに保存しました (run_id={seller_run_id})。")
+
+    record_seller_mined(seller_id, qualified_count=qualified_count, seller_name=seller_name)
+    return qualified_count
 
 
 def expand_from_top_seller(top_qualified: dict, source_label: str, wait_for_tokens: bool) -> None:
@@ -194,8 +221,30 @@ def expand_from_top_seller(top_qualified: dict, source_label: str, wait_for_toke
         return
 
     print(f"[INFO] セラー{len(seller_ids)}件を特定: {seller_ids}")
+    # 定期セラーマイニング(Sellerエージェント)がこのセラーたちも巡回できるよう、
+    # 実際にこの場でマイニングするかに関わらず全員をプールに登録しておく。
+    add_sellers(seller_ids, source="keyword_expansion", seed_asin=asin)
     for seller_id in seller_ids:
         _expand_from_one_seller(seller_id, source_label, wait_for_tokens, seed_asin=asin)
+
+
+def run_seller_mining_cycle(max_candidates: int, wait_for_tokens: bool) -> bool:
+    """Sellerエージェント: セラープールから次に調べるべき1件を選び、マイニングする。
+    深夜のセラーマイニング時間帯(run_all_day.sh)に、キーワード検索の代わりに
+    呼ばれる想定。プールが空なら何もせずFalseを返す(トークン消費なし)。
+    """
+    init_ops_tables()
+    seller_id = pick_next_seller()
+    if not seller_id:
+        print("[INFO] セラープールが空のため、定期セラーマイニングをスキップしました。")
+        return False
+
+    print(f"[INFO] セラープールから選択: {seller_id}")
+    result = _expand_from_one_seller(
+        seller_id, "定期セラーマイニング", wait_for_tokens,
+        seed_asin=None, max_candidates=max_candidates,
+    )
+    return result is not None
 
 
 def run_daily_scan(
@@ -364,6 +413,22 @@ def cmd_list_keywords() -> None:
               f"used={used:>3} qualified={qualified:>3} last_used={last_used}")
 
 
+def cmd_list_sellers() -> None:
+    init_ops_tables()
+    rows = list_seller_pool()
+    if not rows:
+        print("[INFO] セラープールは空です。合格候補が出るか、ダッシュボードから手動発見すると自動的に追加されます。")
+        return
+    print(f"[INFO] セラープール ({len(rows)}件):")
+    for row in rows:
+        mined = row.get("timesMined", 0)
+        qualified = row.get("totalQualified", 0)
+        last_mined = row.get("lastMinedAt") or "未調査"
+        name = row.get("sellerName") or "(名前未取得)"
+        print(f"  - {row['sellerId']:<20} {name:<30} source={row['source']:<18} "
+              f"mined={mined:>3} qualified={qualified:>3} last_mined={last_mined}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="毎朝の候補スキャン + 実質利益率フィルタ + メール通知")
     parser.add_argument("--keyword", type=str, default=None,
@@ -390,16 +455,30 @@ def main() -> None:
     parser.add_argument("--list-keywords", action="store_true",
                          help="キーワードプールの内容を表示して終了する")
 
+    # --- Sellerエージェント: 定期セラーマイニング(run_all_day.shの深夜時間帯から呼ばれる想定) ---
+    parser.add_argument("--seller-mining", action="store_true",
+                         help="通常のキーワード検索の代わりに、セラープールから次の1件を選んでマイニングする")
+    parser.add_argument("--seller-mining-max-candidates", type=int, default=SELLER_EXPANSION_MAX_CANDIDATES,
+                         help="--seller-mining 使用時に1セラーあたり評価する出品数の上限")
+    parser.add_argument("--list-sellers", action="store_true",
+                         help="セラープールの内容を表示して終了する")
+
     args = parser.parse_args()
 
     if args.list_keywords:
         cmd_list_keywords()
+        return
+    if args.list_sellers:
+        cmd_list_sellers()
         return
     if args.seed_from_favorites:
         cmd_seed_from_favorites()
         return
     if args.expand:
         cmd_expand(args.expand, args.max_categories)
+        return
+    if args.seller_mining:
+        run_seller_mining_cycle(args.seller_mining_max_candidates, args.wait_for_tokens)
         return
 
     run_daily_scan(
