@@ -346,6 +346,59 @@ def control_scan_loop(action):
     return {'ok': True, **get_scan_loop_status()}
 
 
+# セラーマイニング(ダッシュボードから直接、合格候補のセラーを特定→その
+# 出品を評価する)。このAPIサーバー自体はstdlib-onlyで動く前提(mcp
+# パッケージを直接importできない)なので、.venv/bin/pythonで
+# scripts/seller_mine_cli.pyをサブプロセスとして呼ぶ - control_scan_loop()の
+# systemctl呼び出しと同じ「別プロセスに任せる」設計。
+VENV_PYTHON = Path(__file__).resolve().parent.parent / '.venv' / 'bin' / 'python'
+SELLER_MINE_CLI = Path(__file__).resolve().parent.parent / 'scripts' / 'seller_mine_cli.py'
+SELLER_MINE_TIMEOUT_SECONDS = 180  # 最大候補数×2回のKeepa往復を見込んだ余裕
+
+
+def _run_seller_mine_cli(args):
+    if not VENV_PYTHON.exists():
+        return {'ok': False, 'error': f'{VENV_PYTHON} が見つかりません(.venvのセットアップが必要です)'}
+    try:
+        result = subprocess.run(
+            [str(VENV_PYTHON), str(SELLER_MINE_CLI), *args],
+            capture_output=True, text=True, timeout=SELLER_MINE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return {'ok': False, 'error': f'セラーマイニング処理がタイムアウトしました({SELLER_MINE_TIMEOUT_SECONDS}秒)'}
+    stdout = (result.stdout or '').strip()
+    if stdout:
+        # seller_mine_cli.py はJSON1行だけを出す設計だが、依存パッケージ側の
+        # 警告出力などが紛れ込む可能性を考慮し、末尾の行だけをパースする。
+        last_line = stdout.splitlines()[-1]
+        try:
+            return json.loads(last_line)
+        except ValueError:
+            pass
+    detail = (result.stderr or stdout or '').strip()
+    return {'ok': False, 'error': detail or f'seller_mine_cli.py が異常終了しました(exit {result.returncode})'}
+
+
+def discover_sellers_for_asin(payload):
+    asin = str(payload.get('asin') or '').strip().upper()
+    if not asin:
+        raise ValueError('asin is required')
+    max_sellers = to_int_or_default(payload.get('maxSellers'), 5)
+    return _run_seller_mine_cli(['discover-sellers', '--asin', asin, '--max-sellers', str(max_sellers)])
+
+
+def expand_from_seller_action(payload):
+    seller_id = str(payload.get('sellerId') or '').strip()
+    if not seller_id:
+        raise ValueError('sellerId is required')
+    max_candidates = to_int_or_default(payload.get('maxCandidates'), 15)
+    args = ['expand', '--seller-id', seller_id, '--max-candidates', str(max_candidates)]
+    seed_asin = str(payload.get('seedAsin') or '').strip().upper()
+    if seed_asin:
+        args += ['--seed-asin', seed_asin]
+    return _run_seller_mine_cli(args)
+
+
 def keepa_product_request(payload):
     api_key = os.getenv('KEEPA_API_KEY', '').strip()
     if not api_key:
@@ -681,6 +734,18 @@ def init_db() -> None:
             conn.execute('ALTER TABLE agent_candidates ADD COLUMN price_volatility_90d REAL')
         if 'monthly_sold' not in agent_candidates_columns:
             conn.execute('ALTER TABLE agent_candidates ADD COLUMN monthly_sold INTEGER')
+        # セラーマイニング由来の候補を区別する列(ops_finance.pyのinit_ops_tables()と
+        # 揃える - 定義元はops_finance.py側)。
+        if 'source_type' not in agent_candidates_columns:
+            conn.execute("ALTER TABLE agent_candidates ADD COLUMN source_type TEXT NOT NULL DEFAULT 'keyword'")
+        if 'seller_id' not in agent_candidates_columns:
+            conn.execute('ALTER TABLE agent_candidates ADD COLUMN seller_id TEXT')
+        if 'seller_name' not in agent_candidates_columns:
+            conn.execute('ALTER TABLE agent_candidates ADD COLUMN seller_name TEXT')
+        if 'seed_asin' not in agent_candidates_columns:
+            conn.execute('ALTER TABLE agent_candidates ADD COLUMN seed_asin TEXT')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_seller_id ON agent_candidates(seller_id)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_source_type ON agent_candidates(source_type)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_run_id ON agent_candidates(run_id)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_created_at ON agent_candidates(created_at)')
         # ops_finance.py (daily_scan.py) が書き込む実行履歴。定義元はops_finance.py
@@ -711,6 +776,14 @@ def init_db() -> None:
         agent_runs_columns = {row[1] for row in conn.execute('PRAGMA table_info(agent_runs)').fetchall()}
         if 'status' not in agent_runs_columns:
             conn.execute("ALTER TABLE agent_runs ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'")
+        if 'source_type' not in agent_runs_columns:
+            conn.execute("ALTER TABLE agent_runs ADD COLUMN source_type TEXT NOT NULL DEFAULT 'keyword'")
+        if 'seller_id' not in agent_runs_columns:
+            conn.execute('ALTER TABLE agent_runs ADD COLUMN seller_id TEXT')
+        if 'seller_name' not in agent_runs_columns:
+            conn.execute('ALTER TABLE agent_runs ADD COLUMN seller_name TEXT')
+        if 'seed_asin' not in agent_runs_columns:
+            conn.execute('ALTER TABLE agent_runs ADD COLUMN seed_asin TEXT')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_runs_started_at ON agent_runs(started_at)')
         conn.execute(
             '''
@@ -917,6 +990,7 @@ def load_agent_candidates(days: int = 7):
                 r.weight_kg, r.weight_estimated, r.fee_estimated,
                 r.price_diff_rate_gross, r.unit_profit_usd, r.margin_pct,
                 r.qualified, r.reason, r.data_json, r.created_at, r.times_seen,
+                r.source_type, r.seller_id, r.seller_name, r.seed_asin,
                 CASE WHEN f.asin IS NULL THEN 0 ELSE 1 END AS already_favorited
             FROM ranked r
             LEFT JOIN favorites f ON f.asin = r.asin
@@ -932,7 +1006,8 @@ def load_agent_candidates(days: int = 7):
          us_price_usd, jp_cost_jpy, sales_rank, review_count, monthly_sold, price_volatility_90d,
          weight_kg, weight_estimated, fee_estimated,
          price_diff_rate_gross, unit_profit_usd, margin_pct,
-         qualified, reason, data_json, created_at, times_seen, already_favorited) = row
+         qualified, reason, data_json, created_at, times_seen,
+         source_type, seller_id, seller_name, seed_asin, already_favorited) = row
         try:
             data = json.loads(data_json)
         except Exception:
@@ -963,6 +1038,10 @@ def load_agent_candidates(days: int = 7):
             'data': data,
             'createdAt': created_at,
             'timesSeen': times_seen,
+            'sourceType': source_type or 'keyword',
+            'sellerId': seller_id,
+            'sellerName': seller_name,
+            'seedAsin': seed_asin,
             'alreadyFavorited': bool(already_favorited),
         })
     return candidates
@@ -978,7 +1057,8 @@ def load_agent_runs(days: int = 30):
             SELECT run_id, started_at, duration_seconds, keyword, category, category_id,
                    max_candidates, wait_for_tokens, evaluated, mcp_matched,
                    qualified_count, rejected_count, stopped_early_for_tokens,
-                   error, notify_status, notify_error, status
+                   error, notify_status, notify_error, status,
+                   source_type, seller_id, seller_name, seed_asin
             FROM agent_runs
             WHERE started_at >= ?
             ORDER BY started_at DESC
@@ -991,7 +1071,8 @@ def load_agent_runs(days: int = 30):
         (run_id, started_at, duration_seconds, keyword, category, category_id,
          max_candidates, wait_for_tokens, evaluated, mcp_matched,
          qualified_count, rejected_count, stopped_early_for_tokens,
-         error, notify_status, notify_error, status) = row
+         error, notify_status, notify_error, status,
+         source_type, seller_id, seller_name, seed_asin) = row
         runs.append({
             'runId': run_id,
             'startedAt': started_at,
@@ -1010,6 +1091,10 @@ def load_agent_runs(days: int = 30):
             'notifyStatus': notify_status,
             'notifyError': notify_error,
             'status': status or 'completed',
+            'sourceType': source_type or 'keyword',
+            'sellerId': seller_id,
+            'sellerName': seller_name,
+            'seedAsin': seed_asin,
         })
     return runs
 
@@ -1352,6 +1437,30 @@ class Handler(BaseHTTPRequestHandler):
                 payload = json.loads(raw.decode('utf-8')) if raw else {}
                 action = str(payload.get('action') or '').strip()
                 self._send_json(200, control_scan_loop(action))
+            except ValueError as exc:
+                self._send_json(400, {'error': str(exc)})
+            except Exception as exc:
+                self._send_json(500, {'error': str(exc)})
+            return
+
+        if self.path == '/api/seller-mining/discover-sellers':
+            length = int(self.headers.get('Content-Length', '0'))
+            raw = self.rfile.read(length)
+            try:
+                payload = json.loads(raw.decode('utf-8')) if raw else {}
+                self._send_json(200, discover_sellers_for_asin(payload))
+            except ValueError as exc:
+                self._send_json(400, {'error': str(exc)})
+            except Exception as exc:
+                self._send_json(500, {'error': str(exc)})
+            return
+
+        if self.path == '/api/seller-mining/expand':
+            length = int(self.headers.get('Content-Length', '0'))
+            raw = self.rfile.read(length)
+            try:
+                payload = json.loads(raw.decode('utf-8')) if raw else {}
+                self._send_json(200, expand_from_seller_action(payload))
             except ValueError as exc:
                 self._send_json(400, {'error': str(exc)})
             except Exception as exc:

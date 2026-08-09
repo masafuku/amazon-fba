@@ -104,6 +104,26 @@ export const controlScanLoop = async (action) => {
     return response.json();
 };
 
+export const discoverSellersForAsin = async ({ asin, maxSellers }) => {
+    const response = await fetch(`${API_BASE}/api/seller-mining/discover-sellers`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ asin, maxSellers }),
+    });
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    return response.json();
+};
+
+export const expandFromSeller = async ({ sellerId, maxCandidates, seedAsin }) => {
+    const response = await fetch(`${API_BASE}/api/seller-mining/expand`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sellerId, maxCandidates, seedAsin }),
+    });
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    return response.json();
+};
+
 export const loadDbStatsFromDb = async () => {
     const response = await fetch(`${API_BASE}/api/health`);
     if (!response.ok) {

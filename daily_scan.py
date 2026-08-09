@@ -132,9 +132,12 @@ SELLER_EXPANSION_MAX_CANDIDATES = 10
 MAX_SELLERS_PER_CANDIDATE = 3
 
 
-def _expand_from_one_seller(seller_id: str, source_label: str, wait_for_tokens: bool) -> None:
+def _expand_from_one_seller(seller_id: str, source_label: str, wait_for_tokens: bool, seed_asin: str = None) -> None:
     """1セラー分の出品をパイプラインで評価し、結果を保存する。失敗しても
-    メインのスキャン結果には影響させない(例外を握りつぶしてログのみ)。"""
+    メインのスキャン結果には影響させない(例外を握りつぶしてログのみ)。
+    seed_asin: このセラーを見つけるきっかけになったASIN(呼び出し元の
+    合格候補) - agent_candidates/agent_runsのseed_asin列にそのまま入る。
+    """
     print(f"[INFO] セラー {seller_id} の出品一覧を取得して評価します(最大{SELLER_EXPANSION_MAX_CANDIDATES}件)...")
     try:
         seller_result = expand_from_seller(
@@ -156,13 +159,17 @@ def _expand_from_one_seller(seller_id: str, source_label: str, wait_for_tokens: 
 
     if seller_evaluation["qualified"] or seller_evaluation["rejected"]:
         seller_run_id = new_agent_run_id()
-        persist_agent_run(f"{source_label} (セラー: {seller_name})", seller_evaluation, run_id=seller_run_id)
+        persist_agent_run(
+            f"{source_label} (セラー: {seller_name})", seller_evaluation, run_id=seller_run_id,
+            source_type="seller", seller_id=seller_id, seller_name=seller_name, seed_asin=seed_asin,
+        )
         log_agent_run(
             seller_run_id, datetime.now(timezone.utc).isoformat(), 0,
             keyword=f"[seller] {seller_name}", category=source_label,
             max_candidates=SELLER_EXPANSION_MAX_CANDIDATES, wait_for_tokens=wait_for_tokens,
             mcp_result=seller_result, evaluation=seller_evaluation,
             notify_status="deferred_to_digest",
+            source_type="seller", seller_id=seller_id, seller_name=seller_name, seed_asin=seed_asin,
         )
         print(f"[INFO] セラー出品の評価結果も「エージェント」ページに保存しました (run_id={seller_run_id})。")
 
@@ -188,7 +195,7 @@ def expand_from_top_seller(top_qualified: dict, source_label: str, wait_for_toke
 
     print(f"[INFO] セラー{len(seller_ids)}件を特定: {seller_ids}")
     for seller_id in seller_ids:
-        _expand_from_one_seller(seller_id, source_label, wait_for_tokens)
+        _expand_from_one_seller(seller_id, source_label, wait_for_tokens, seed_asin=asin)
 
 
 def run_daily_scan(

@@ -5,6 +5,7 @@ import KeepaFinderPage from './KeepaFinderPage.jsx';
 import FavoritesPage from './FavoritesPage.jsx';
 import AgentPage from './AgentPage.jsx';
 import KeywordPoolPage from './KeywordPoolPage.jsx';
+import SellerMiningPage from './SellerMiningPage.jsx';
 import './index.css';
 
 function Root() {
@@ -20,12 +21,13 @@ function Root() {
     const isFavorites = hash === '#favorites';
     const isAgent = hash === '#agent';
     const isKeywords = hash === '#keywords';
-    const isDashboard = !isFinder && !isFavorites && !isAgent && !isKeywords;
+    const isSellerMining = hash === '#seller-mining';
+    const isDashboard = !isFinder && !isFavorites && !isAgent && !isKeywords && !isSellerMining;
 
     return (
         <div className="min-h-screen bg-slate-950 text-slate-100">
             <div className="mx-auto max-w-7xl px-3 py-3 sm:px-6 sm:py-4 lg:px-8">
-                <nav className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-5" aria-label="メインメニュー">
+                <nav className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-6" aria-label="メインメニュー">
                     <a
                         href="#dashboard"
                         className={`min-h-11 rounded-xl px-2 py-2 text-center text-xs font-semibold sm:px-4 sm:text-sm ${isDashboard ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-100'}`}
@@ -45,6 +47,12 @@ function Root() {
                         🤖 エージェント
                     </a>
                     <a
+                        href="#seller-mining"
+                        className={`min-h-11 rounded-xl px-2 py-2 text-center text-xs font-semibold sm:px-4 sm:text-sm ${isSellerMining ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-100'}`}
+                    >
+                        🕵️ セラーマイニング
+                    </a>
+                    <a
                         href="#keywords"
                         className={`min-h-11 rounded-xl px-2 py-2 text-center text-xs font-semibold sm:px-4 sm:text-sm ${isKeywords ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-100'}`}
                     >
@@ -57,7 +65,7 @@ function Root() {
                         お気に入り
                     </a>
                 </nav>
-                {isFinder ? <KeepaFinderPage /> : isFavorites ? <FavoritesPage /> : isAgent ? <AgentPage /> : isKeywords ? <KeywordPoolPage /> : <App />}
+                {isFinder ? <KeepaFinderPage /> : isFavorites ? <FavoritesPage /> : isAgent ? <AgentPage /> : isKeywords ? <KeywordPoolPage /> : isSellerMining ? <SellerMiningPage /> : <App />}
             </div>
         </div>
     );

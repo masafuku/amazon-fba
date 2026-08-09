@@ -178,6 +178,22 @@ def init_ops_tables():
             conn.execute('ALTER TABLE agent_candidates ADD COLUMN price_volatility_90d REAL')
         if 'monthly_sold' not in agent_candidates_columns:
             conn.execute('ALTER TABLE agent_candidates ADD COLUMN monthly_sold INTEGER')
+        # セラーマイニング(keepa_mcp.server.expand_from_seller経由で見つかった候補)を
+        # キーワード検索経由の候補と区別するための列。source_typeのデフォルトは
+        # 'keyword'なので、既存行(このマイグレーション以前のもの)は全て
+        # 'keyword'扱いになる - 過去のセラーマイニング結果はcategory列の
+        # テキスト("... (セラー: X)")に頼ったままで、一括バックフィルはしない
+        # (本番データへの一括UPDATEのリスクを避けるため、必要になれば別途)。
+        if 'source_type' not in agent_candidates_columns:
+            conn.execute("ALTER TABLE agent_candidates ADD COLUMN source_type TEXT NOT NULL DEFAULT 'keyword'")
+        if 'seller_id' not in agent_candidates_columns:
+            conn.execute('ALTER TABLE agent_candidates ADD COLUMN seller_id TEXT')
+        if 'seller_name' not in agent_candidates_columns:
+            conn.execute('ALTER TABLE agent_candidates ADD COLUMN seller_name TEXT')
+        if 'seed_asin' not in agent_candidates_columns:
+            conn.execute('ALTER TABLE agent_candidates ADD COLUMN seed_asin TEXT')  # このセラーを見つけたきっかけのASIN
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_seller_id ON agent_candidates(seller_id)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_source_type ON agent_candidates(source_type)')
 
         agent_runs_columns = {row[1] for row in conn.execute('PRAGMA table_info(agent_runs)').fetchall()}
         if 'status' not in agent_runs_columns:
@@ -185,6 +201,14 @@ def init_ops_tables():
             # 既存の行は(このカラム追加以前は)すべて完了済みのランなので'completed'を
             # デフォルトにする。今後の新規ランはlog_agent_run()が明示的に'running'から
             # 始めて更新する。
+        if 'source_type' not in agent_runs_columns:
+            conn.execute("ALTER TABLE agent_runs ADD COLUMN source_type TEXT NOT NULL DEFAULT 'keyword'")
+        if 'seller_id' not in agent_runs_columns:
+            conn.execute('ALTER TABLE agent_runs ADD COLUMN seller_id TEXT')
+        if 'seller_name' not in agent_runs_columns:
+            conn.execute('ALTER TABLE agent_runs ADD COLUMN seller_name TEXT')
+        if 'seed_asin' not in agent_runs_columns:
+            conn.execute('ALTER TABLE agent_runs ADD COLUMN seed_asin TEXT')
 
 
 # ---------------------------------------------------------------------------
@@ -713,13 +737,22 @@ def new_agent_run_id() -> str:
     return f"agent-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
 
 
-def persist_agent_run(category: str, evaluation: dict, run_id: str = None) -> str:
+def persist_agent_run(
+    category: str, evaluation: dict, run_id: str = None,
+    source_type: str = 'keyword', seller_id: str = None,
+    seller_name: str = None, seed_asin: str = None,
+) -> str:
     """evaluate_mcp_candidates() の結果(合格・不合格とも)を agent_candidates に
     保存する。ダッシュボードの「エージェント」ページがこれを表示し、
     CEOが気に入ったものだけ手動で favorites に追加する運用を想定。
 
     run_id を渡さない場合は新規採番する。log_agent_run() と同じ実行に
     紐付けたい場合は new_agent_run_id() で採番したものを両方に渡す。
+
+    source_type='seller' + seller_id/seller_name/seed_asin は
+    keepa_mcp.server.expand_from_seller() 経由(セラーマイニング)で見つかった
+    候補であることを示す(daily_scan.py / scripts/seller_mine_cli.py が使う)。
+    通常のキーワード検索候補は source_type='keyword' のまま(デフォルト)。
 
     Returns: 今回使った run_id
     """
@@ -756,6 +789,10 @@ def persist_agent_run(category: str, evaluation: dict, run_id: str = None) -> st
                 item.get('reason'),
                 json.dumps(item, ensure_ascii=False),
                 created_at,
+                source_type,
+                seller_id,
+                seller_name,
+                seed_asin,
             ))
 
     if rows:
@@ -767,8 +804,9 @@ def persist_agent_run(category: str, evaluation: dict, run_id: str = None) -> st
                     us_price_usd, jp_cost_jpy, sales_rank, review_count, monthly_sold, price_volatility_90d,
                     weight_kg, weight_estimated, fee_estimated,
                     price_diff_rate_gross, unit_profit_usd, margin_pct,
-                    qualified, reason, data_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    qualified, reason, data_json, created_at,
+                    source_type, seller_id, seller_name, seed_asin
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''',
                 rows,
             )
@@ -791,6 +829,10 @@ def log_agent_run(
     notify_status: str = None,
     notify_error: str = None,
     status: str = None,
+    source_type: str = 'keyword',
+    seller_id: str = None,
+    seller_name: str = None,
+    seed_asin: str = None,
 ) -> None:
     """daily_scan.py の1回の実行を agent_runs に記録する(エージェントページの
     「実行履歴」用)。persist_agent_run() が候補の中身を保存するのに対し、
@@ -804,6 +846,11 @@ def log_agent_run(
     `status` を明示しなければ、error があれば'failed'、mcp_result/evaluation
     のどちらかにデータがあれば'completed'、それ以外(まだ何も結果が無い=
     開始直後の呼び出し)は'running'と推測する。
+
+    source_type/seller_id/seller_name/seed_asin は persist_agent_run() と
+    同じ意味(セラーマイニング由来のランかどうか)。INSERT時のみ設定され、
+    ON CONFLICT更新では変更しない(keyword/categoryなど他の実行条件列と
+    同じく、running→completedの更新で変わるものではないため)。
     """
     init_ops_tables()
 
@@ -825,8 +872,9 @@ def log_agent_run(
                 run_id, started_at, duration_seconds, keyword, category, category_id,
                 max_candidates, wait_for_tokens, evaluated, mcp_matched,
                 qualified_count, rejected_count, stopped_early_for_tokens,
-                error, notify_status, notify_error, status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                error, notify_status, notify_error, status,
+                source_type, seller_id, seller_name, seed_asin
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(run_id) DO UPDATE SET
                 duration_seconds = excluded.duration_seconds,
                 evaluated = excluded.evaluated,
@@ -846,6 +894,7 @@ def log_agent_run(
                 len(evaluation.get('qualified', [])), len(evaluation.get('rejected', [])),
                 1 if mcp_result.get('stopped_early_for_tokens') else 0,
                 error, notify_status, notify_error, status,
+                source_type, seller_id, seller_name, seed_asin,
             ),
         )
 
