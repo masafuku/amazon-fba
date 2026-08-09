@@ -149,17 +149,47 @@ SELLER_EXPANSION_MAX_CANDIDATES = 10
 MAX_SELLERS_PER_CANDIDATE = 3
 
 
+def discover_and_register_sellers(
+    asin: str, source: str, seed_asin: str = None, seed_keyword: str = None,
+) -> list[str]:
+    """指定ASINの出品セラー一覧(Amazonの「他のセラー」欄相当、最大
+    MAX_SELLERS_PER_CANDIDATE件)を取得し、seller_poolに登録する
+    (この場では即座にマイニングしない - 呼び出し元が必要に応じて行う)。
+    トークン消費は約7(offers取得)のみで済むため、広さ優先(CEO: 「多くの
+    ものを輸出してる優秀なセラー候補を探したいので広さ優先の方が良い」)で
+    プールを育てるのに向いている。
+    戻り値: 発見できたセラーID一覧(0件の場合は空リスト)。
+    """
+    print(f"[INFO] {asin} の出品セラーを調べています...")
+    try:
+        sellers_lookup = find_other_sellers_for_candidate(asin=asin, max_sellers=MAX_SELLERS_PER_CANDIDATE)
+    except KeepaError as exc:
+        print(f"[WARN] セラー一覧の取得に失敗しました: {exc}")
+        return []
+
+    seller_ids = sellers_lookup.get("seller_ids") or []
+    if not seller_ids:
+        print(f"[INFO] {asin} の出品セラーを特定できませんでした({sellers_lookup.get('note') or sellers_lookup.get('error')})。")
+        return []
+
+    print(f"[INFO] セラー{len(seller_ids)}件を特定: {seller_ids}")
+    add_sellers(seller_ids, source=source, seed_asin=seed_asin or asin, seed_keyword=seed_keyword)
+    return seller_ids
+
+
 def _expand_from_one_seller(
     seller_id: str, source_label: str, wait_for_tokens: bool,
     seed_asin: str = None, max_candidates: int = SELLER_EXPANSION_MAX_CANDIDATES,
-) -> int | None:
+) -> dict | None:
     """1セラー分の出品をパイプラインで評価し、結果を保存する。失敗しても
     メインのスキャン結果には影響させない(例外を握りつぶしてログのみ)。
     seed_asin: このセラーを見つけるきっかけになったASIN(呼び出し元の
     合格候補) - agent_candidates/agent_runsのseed_asin列にそのまま入る。
     自動発動・定期サイクルの両方がここを通るので、seller_poolへの実績記録
     (record_seller_mined)もここで一元化する。
-    戻り値: 合格件数(実行できた場合)。失敗した場合はNone。
+    戻り値: evaluate_mcp_candidates()の評価結果(qualified/rejectedを含む
+    辞書、呼び出し元が合格候補の中身を見て連鎖発見に使えるように)。
+    失敗した場合はNone。
     """
     print(f"[INFO] セラー {seller_id} の出品一覧を取得して評価します(最大{max_candidates}件)...")
     try:
@@ -198,7 +228,7 @@ def _expand_from_one_seller(
         print(f"[INFO] セラー出品の評価結果も「エージェント」ページに保存しました (run_id={seller_run_id})。")
 
     record_seller_mined(seller_id, qualified_count=qualified_count, seller_name=seller_name)
-    return qualified_count
+    return seller_evaluation
 
 
 def expand_from_top_seller(top_qualified: dict, source_label: str, keyword: str, wait_for_tokens: bool) -> None:
@@ -212,21 +242,7 @@ def expand_from_top_seller(top_qualified: dict, source_label: str, keyword: str,
     """
     asin = top_qualified["asin"]
     print(f"[INFO] セラーマイニング: 合格候補 {asin} の出品セラーを調べています...")
-    try:
-        sellers_lookup = find_other_sellers_for_candidate(asin=asin, max_sellers=MAX_SELLERS_PER_CANDIDATE)
-    except KeepaError as exc:
-        print(f"[WARN] セラー一覧の取得に失敗しました: {exc}")
-        return
-
-    seller_ids = sellers_lookup.get("seller_ids") or []
-    if not seller_ids:
-        print(f"[INFO] {asin} の出品セラーを特定できませんでした({sellers_lookup.get('note') or sellers_lookup.get('error')})。")
-        return
-
-    print(f"[INFO] セラー{len(seller_ids)}件を特定: {seller_ids}")
-    # 定期セラーマイニング(Sellerエージェント)がこのセラーたちも巡回できるよう、
-    # 実際にこの場でマイニングするかに関わらず全員をプールに登録しておく。
-    add_sellers(seller_ids, source="keyword_expansion", seed_asin=asin, seed_keyword=keyword)
+    seller_ids = discover_and_register_sellers(asin, source="keyword_expansion", seed_keyword=keyword)
     for seller_id in seller_ids:
         _expand_from_one_seller(seller_id, source_label, wait_for_tokens, seed_asin=asin)
 
@@ -243,11 +259,21 @@ def run_seller_mining_cycle(max_candidates: int, wait_for_tokens: bool) -> bool:
         return False
 
     print(f"[INFO] セラープールから選択: {seller_id}")
-    result = _expand_from_one_seller(
+    seller_evaluation = _expand_from_one_seller(
         seller_id, "定期セラーマイニング", wait_for_tokens,
         seed_asin=None, max_candidates=max_candidates,
     )
-    return result is not None
+
+    if seller_evaluation and seller_evaluation["qualified"]:
+        # 広さ優先(CEO: 「多くのものを輸出してる優秀なセラー候補を探したいので
+        # 広さ優先の方が良い」)。このセラーの合格候補が見つかったら、その商品を
+        # 売っている他のセラーも新たに発見してプールに登録する(即座にはマイニング
+        # しない - トークンを抑えつつプールを広げ、次回以降のLRUサイクルで自然に
+        # 巡回されるようにする)。
+        top = seller_evaluation["qualified"][0]
+        discover_and_register_sellers(top["asin"], source="seller_mining_chain")
+
+    return seller_evaluation is not None
 
 
 def run_daily_scan(

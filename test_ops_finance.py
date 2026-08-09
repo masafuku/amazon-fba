@@ -1,6 +1,44 @@
 import unittest
 
-from ops_finance import _classify_tier
+from ops_finance import _classify_tier, calc_unit_profit
+
+
+class TestCalcUnitProfitShipping(unittest.TestCase):
+    """国際送料の想定(CEO: 「国際便なので一万円くらいはしそうです。ただし何個纏めて
+    仕入れるかで損益分岐点が変わらそうです」) - 1回の発送固定費用(既定¥10,000)を、
+    JP原価から逆算した「まとめ買い個数」(総額が概ね¥50,000になる個数)で按分する。
+    """
+
+    def test_cheap_item_splits_shipping_across_many_units(self):
+        # JP原価¥300 -> 50000 // 300 = 166個まとめ買い -> 10000/166/150 ≈ $0.40
+        result = calc_unit_profit(us_price_usd=50.0, jp_cost_jpy=300.0, weight_kg=0.1)
+        self.assertAlmostEqual(result['shipping_cost_usd'], 0.4, places=2)
+
+    def test_expensive_item_bears_full_shipment_cost_alone(self):
+        # JP原価¥60,000は予算¥50,000を超えるため、まとめ買い個数は最低1個 ->
+        # 送料按分は1個で発送費用¥10,000を丸ごと負担 -> 10000/150 ≈ $66.67
+        result = calc_unit_profit(us_price_usd=200.0, jp_cost_jpy=60000.0, weight_kg=2.0)
+        self.assertAlmostEqual(result['shipping_cost_usd'], 66.67, places=2)
+
+    def test_boundary_cost_equals_budget(self):
+        # JP原価がちょうど予算(¥50,000)と一致する場合も、まとめ買い個数は1個
+        result = calc_unit_profit(us_price_usd=200.0, jp_cost_jpy=50000.0, weight_kg=2.0)
+        self.assertAlmostEqual(result['shipping_cost_usd'], 66.67, places=2)
+
+    def test_custom_shipment_params_are_honored(self):
+        # shipment_fixed_cost_jpy/shipment_budget_jpyを明示的に上書きできること
+        result = calc_unit_profit(
+            us_price_usd=50.0, jp_cost_jpy=5000.0, weight_kg=0.5,
+            shipment_fixed_cost_jpy=15_000.0, shipment_budget_jpy=30_000.0,
+        )
+        # 30000 // 5000 = 6個まとめ買い -> 15000/6/150 = $16.67
+        self.assertAlmostEqual(result['shipping_cost_usd'], 16.67, places=2)
+
+    def test_weight_kg_no_longer_affects_shipping(self):
+        # 重量が大きく違っても(JP原価が同じなら)送料は変わらない
+        light = calc_unit_profit(us_price_usd=50.0, jp_cost_jpy=1000.0, weight_kg=0.01)
+        heavy = calc_unit_profit(us_price_usd=50.0, jp_cost_jpy=1000.0, weight_kg=20.0)
+        self.assertEqual(light['shipping_cost_usd'], heavy['shipping_cost_usd'])
 
 
 class TestClassifyTier(unittest.TestCase):

@@ -15,6 +15,7 @@ const SELLER_SOURCE_LABEL = {
     manual: '手動追加',
     manual_expand: 'ダッシュボード発見',
     keyword_expansion: 'キーワード検索経由',
+    seller_mining_chain: 'セラーマイニング連鎖発見',
 };
 
 const DEFAULT_MAX_SELLERS = 5;

@@ -297,15 +297,28 @@ def calc_unit_profit(
     exchange_rate: float = 150.0,      # 円/ドル
     amazon_fee_rate: float = 0.15,     # Amazon販売手数料(カテゴリにより8〜15%)
     fba_fee_usd: float = 3.5,          # FBAピック&パック手数料(サイズ依存、要調整)
-    intl_shipping_per_kg_usd: float = 8.0,  # 日本→FBA倉庫の国際配送費/kg
+    shipment_fixed_cost_jpy: float = 10_000.0,  # 1回の国際発送にかかる想定固定費用
+    shipment_budget_jpy: float = 50_000.0,      # 1回にまとめて仕入れる想定総額
 ) -> dict:
     """1個あたりの利益・利益率を計算する。
 
     候補が出た瞬間にこの関数を通し、利益率が閾値未満なら自動除外できる。
+
+    国際送料の想定(CEO: 「国際便なので一万円くらいはしそうです。ただし何個纏めて
+    仕入れるかで損益分岐点が変わらそうです」): 重量ベースの単価ではなく、「1回の発送に
+    かかる固定費用(shipment_fixed_cost_jpy、既定¥10,000)を、まとめて仕入れる個数で
+    割る」方式。個数そのものを直接指定するのではなく、「総額が概ねshipment_budget_jpy
+    (既定¥50,000)程度になる」ように、その商品のJP原価から逆算する——安い商品ほど多く
+    まとめ買いできる(=送料の按分先が増えて1個あたりの送料は下がる)、高い商品は逆に
+    按分先が減って1個あたりの送料が上がる、という関係になる。JP原価が予算を超える場合は
+    最低1個として扱う(その1個で発送費用を丸ごと負担する形)。
+    weight_kgはこの計算では使わないが、記録用(agent_candidates.weight_kg列)として
+    引数・戻り値には残している。
     """
     jp_cost_usd = jp_cost_jpy / exchange_rate
     amazon_fee_usd = us_price_usd * amazon_fee_rate
-    shipping_cost_usd = weight_kg * intl_shipping_per_kg_usd
+    units_per_shipment = max(1, int(shipment_budget_jpy // jp_cost_jpy)) if jp_cost_jpy > 0 else 1
+    shipping_cost_usd = (shipment_fixed_cost_jpy / units_per_shipment) / exchange_rate
 
     unit_profit_usd = (
         us_price_usd - amazon_fee_usd - fba_fee_usd - shipping_cost_usd - jp_cost_usd
