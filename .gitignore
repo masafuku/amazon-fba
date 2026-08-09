@@ -21,6 +21,11 @@ keepa-csv-dashboard/node_modules/
 keepa-csv-dashboard/dist/
 keepa-csv-dashboard/.env
 
+# run_all_day.sh runtime state (touched/removed at runtime, not code)
+.scan_loop_stop_requested
+.scan_loop_mode_override
+logs/
+
 # Dropbox and macOS metadata
 .DS_Store
 .dropbox/

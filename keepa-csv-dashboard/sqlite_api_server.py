@@ -288,10 +288,40 @@ def request_keepa_token_status():
 SCAN_LOOP_SERVICE = 'fba-scan-loop.service'
 SCAN_LOOP_STOP_FLAG = Path(__file__).resolve().parent.parent / '.scan_loop_stop_requested'
 
+# セラーマイニング/キーワード検索モードの手動切り替え(CEOの指示「セラー
+# マイニングと検索モードの手動切り替もできるようにして欲しい」)。
+# scripts/run_all_day.shが同じファイルを読む(get_mode_override())。
+# 'auto'はファイルを消すことで表現する(停止フラグのresumeがunlinkするのと対称)。
+SCAN_LOOP_MODE_FILE = Path(__file__).resolve().parent.parent / '.scan_loop_mode_override'
+SCAN_LOOP_VALID_MODES = ('auto', 'seller-mining', 'keyword-search')
+
+
+def get_scan_loop_mode():
+    """不正な内容(空・破損・想定外の文字列)は安全側に倒してautoにする。"""
+    try:
+        raw = SCAN_LOOP_MODE_FILE.read_text(encoding='utf-8').strip()
+    except (FileNotFoundError, OSError):
+        return 'auto'
+    return raw if raw in ('seller-mining', 'keyword-search') else 'auto'
+
+
+def set_scan_loop_mode(mode):
+    if mode not in SCAN_LOOP_VALID_MODES:
+        raise ValueError("mode must be one of 'auto', 'seller-mining', 'keyword-search'")
+    if mode == 'auto':
+        SCAN_LOOP_MODE_FILE.unlink(missing_ok=True)
+    else:
+        tmp_path = SCAN_LOOP_MODE_FILE.with_suffix('.tmp')
+        tmp_path.write_text(mode, encoding='utf-8')
+        tmp_path.replace(SCAN_LOOP_MODE_FILE)  # run_all_day.shが半端な書き込みを読まないようアトミックに置換
+    return {'mode': mode}
+
 
 def get_scan_loop_status():
-    """状態確認はsudo不要(systemctl is-activeは誰でも実行可能)。"""
+    """状態確認はsudo不要(systemctl is-activeは誰でも実行可能)。
+    modeの読み取りはsystemctlに依存しないため、全ての分岐で常に含める。"""
     stop_requested = SCAN_LOOP_STOP_FLAG.exists()
+    mode = get_scan_loop_mode()
     try:
         result = subprocess.run(
             ['systemctl', 'is-active', SCAN_LOOP_SERVICE],
@@ -300,11 +330,11 @@ def get_scan_loop_status():
         systemd_status = (result.stdout or '').strip() or 'unknown'
     except FileNotFoundError:
         return {
-            'status': 'unavailable', 'running': False, 'stopRequested': stop_requested,
+            'status': 'unavailable', 'running': False, 'stopRequested': stop_requested, 'mode': mode,
             'note': 'systemctl not found (not a systemd deployment)',
         }
     except Exception as exc:
-        return {'status': 'unknown', 'running': False, 'stopRequested': stop_requested, 'error': str(exc)}
+        return {'status': 'unknown', 'running': False, 'stopRequested': stop_requested, 'mode': mode, 'error': str(exc)}
 
     is_active = systemd_status == 'active'
     if is_active and stop_requested:
@@ -313,7 +343,7 @@ def get_scan_loop_status():
         status = 'running'
     else:
         status = 'stopped'
-    return {'status': status, 'running': is_active, 'stopRequested': stop_requested}
+    return {'status': status, 'running': is_active, 'stopRequested': stop_requested, 'mode': mode}
 
 
 def control_scan_loop(action):
@@ -744,10 +774,28 @@ def init_db() -> None:
             conn.execute('ALTER TABLE agent_candidates ADD COLUMN seller_name TEXT')
         if 'seed_asin' not in agent_candidates_columns:
             conn.execute('ALTER TABLE agent_candidates ADD COLUMN seed_asin TEXT')
+        if 'tier' not in agent_candidates_columns:
+            conn.execute('ALTER TABLE agent_candidates ADD COLUMN tier TEXT')
+            # ops_finance.py側と同じ一度きりのバックフィル(この2ファイルの並行
+            # スキーマ管理という既存の規約通り)。
+            conn.execute(
+                '''
+                UPDATE agent_candidates
+                SET tier = CASE
+                    WHEN margin_pct IS NULL THEN 'reject'
+                    WHEN margin_pct >= 0.20 THEN 'pass'
+                    WHEN margin_pct >= 0 THEN 'consider'
+                    WHEN (us_price_usd - jp_cost_jpy / 150.0) >= 0 THEN 'reference'
+                    ELSE 'reject'
+                END
+                WHERE tier IS NULL
+                '''
+            )
         conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_seller_id ON agent_candidates(seller_id)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_source_type ON agent_candidates(source_type)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_run_id ON agent_candidates(run_id)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_created_at ON agent_candidates(created_at)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_tier ON agent_candidates(tier)')
         # ops_finance.py (daily_scan.py) が書き込む実行履歴。定義元はops_finance.py
         # 側だが、agent_candidates と同じ理由でここにも同じ定義を用意しておく。
         conn.execute(
@@ -1036,7 +1084,7 @@ def load_agent_candidates(days: int = 7):
                 r.us_price_usd, r.jp_cost_jpy, r.sales_rank, r.review_count, r.monthly_sold, r.price_volatility_90d,
                 r.weight_kg, r.weight_estimated, r.fee_estimated,
                 r.price_diff_rate_gross, r.unit_profit_usd, r.margin_pct,
-                r.qualified, r.reason, r.data_json, r.created_at, r.times_seen,
+                r.qualified, r.tier, r.reason, r.data_json, r.created_at, r.times_seen,
                 r.source_type, r.seller_id, r.seller_name, r.seed_asin,
                 CASE WHEN f.asin IS NULL THEN 0 ELSE 1 END AS already_favorited
             FROM ranked r
@@ -1053,7 +1101,7 @@ def load_agent_candidates(days: int = 7):
          us_price_usd, jp_cost_jpy, sales_rank, review_count, monthly_sold, price_volatility_90d,
          weight_kg, weight_estimated, fee_estimated,
          price_diff_rate_gross, unit_profit_usd, margin_pct,
-         qualified, reason, data_json, created_at, times_seen,
+         qualified, tier, reason, data_json, created_at, times_seen,
          source_type, seller_id, seller_name, seed_asin, already_favorited) = row
         try:
             data = json.loads(data_json)
@@ -1081,6 +1129,7 @@ def load_agent_candidates(days: int = 7):
             'unitProfitUsd': unit_profit_usd,
             'marginPct': margin_pct,
             'qualified': bool(qualified),
+            'tier': tier or ('pass' if qualified else 'reject'),  # 安全側フォールバック(基本Noneにならない)
             'reason': reason,
             'data': data,
             'createdAt': created_at,
@@ -1552,8 +1601,17 @@ class Handler(BaseHTTPRequestHandler):
             raw = self.rfile.read(length)
             try:
                 payload = json.loads(raw.decode('utf-8')) if raw else {}
-                action = str(payload.get('action') or '').strip()
-                self._send_json(200, control_scan_loop(action))
+                action = payload.get('action')
+                mode = payload.get('mode')
+                if action is None and mode is None:
+                    raise ValueError("body must include 'action' and/or 'mode'")
+                if action is not None:
+                    control_scan_loop(str(action).strip())
+                if mode is not None:
+                    set_scan_loop_mode(str(mode).strip())
+                result = get_scan_loop_status()
+                result['ok'] = True
+                self._send_json(200, result)
             except ValueError as exc:
                 self._send_json(400, {'error': str(exc)})
             except Exception as exc:

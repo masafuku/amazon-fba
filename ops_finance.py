@@ -212,8 +212,29 @@ def init_ops_tables():
             conn.execute('ALTER TABLE agent_candidates ADD COLUMN seller_name TEXT')
         if 'seed_asin' not in agent_candidates_columns:
             conn.execute('ALTER TABLE agent_candidates ADD COLUMN seed_asin TEXT')  # このセラーを見つけたきっかけのASIN
+        if 'tier' not in agent_candidates_columns:
+            conn.execute('ALTER TABLE agent_candidates ADD COLUMN tier TEXT')
+            # 一度きりのバックフィル: 既存行はmargin_pct/us_price_usd/jp_cost_jpyから
+            # tierを再計算できる(exchange_rate=150.0はevaluate_mcp_candidates()の
+            # 呼び出し元が誰も上書きしていない、このコードベースで常に使われている
+            # デフォルト値)。ADD COLUMN直後の一度だけ実行され、以後'tier'カラムが
+            # 存在するので二度と実行されない。
+            conn.execute(
+                '''
+                UPDATE agent_candidates
+                SET tier = CASE
+                    WHEN margin_pct IS NULL THEN 'reject'
+                    WHEN margin_pct >= 0.20 THEN 'pass'
+                    WHEN margin_pct >= 0 THEN 'consider'
+                    WHEN (us_price_usd - jp_cost_jpy / 150.0) >= 0 THEN 'reference'
+                    ELSE 'reject'
+                END
+                WHERE tier IS NULL
+                '''
+            )
         conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_seller_id ON agent_candidates(seller_id)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_source_type ON agent_candidates(source_type)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_tier ON agent_candidates(tier)')
 
         agent_runs_columns = {row[1] for row in conn.execute('PRAGMA table_info(agent_runs)').fetchall()}
         if 'status' not in agent_runs_columns:
@@ -431,6 +452,35 @@ def weekly_report(year_month: str = None) -> dict:
 DEFAULT_WEIGHT_KG_FALLBACK = 0.5  # weight_kg が取れない商品向けの保守的な仮値
 MIN_MARGIN_PCT = 0.20             # これ未満は自動除外
 
+# 合格ラインの多段階化(CEO: 「合格ラインは何段階かに分けてください。たとえば、
+# US−JPがゼロ以上、つまり手数料が0円なら成立する、というのもみたいです」)。
+# qualified/rejectedという2リストのメンバーシップ自体は変えない(tier==passが
+# qualified、それ以外はすべてrejected、旧来のmargin_pct>=min_margin_pct判定と
+# 完全に等価) - 各エントリに付与するtierフィールドが新しい情報として増えるだけ。
+TIER_PASS = 'pass'            # 実質利益率 >= 20%(従来の合格ラインそのまま)
+TIER_CONSIDER = 'consider'    # 実質利益率 0%以上20%未満(手数料込みでも黒字、ただし閾値未満)
+TIER_REFERENCE = 'reference'  # 実質利益率マイナスだが、手数料を一切引かない粗差
+                               # (US価格 - JP原価)が0以上(=手数料が0円なら成立する)
+TIER_REJECT = 'reject'        # 上記のいずれでもない、または価格データ自体が無い
+
+
+def _classify_tier(
+    margin_pct: float | None,
+    us_price_usd: float | None,
+    jp_cost_usd: float | None,
+    min_margin_pct: float = MIN_MARGIN_PCT,
+) -> str:
+    """calc_unit_profit()の結果から4段階のtierを判定する。"""
+    if margin_pct is None:
+        return TIER_REJECT
+    if margin_pct >= min_margin_pct:
+        return TIER_PASS
+    if margin_pct >= 0:
+        return TIER_CONSIDER
+    if us_price_usd is not None and jp_cost_usd is not None and (us_price_usd - jp_cost_usd) >= 0:
+        return TIER_REFERENCE
+    return TIER_REJECT
+
 
 def evaluate_mcp_candidates(
     mcp_result: dict,
@@ -514,8 +564,9 @@ def evaluate_mcp_candidates(
             **profit,  # unit_profit_usd, margin_pct など (jp_cost_usd 含む)
             'jp_cost_jpy': cost['price'],
         }
+        entry['tier'] = _classify_tier(profit['margin_pct'], profit['us_price_usd'], profit['jp_cost_usd'], min_margin_pct)
 
-        if profit['margin_pct'] >= min_margin_pct:
+        if entry['tier'] == TIER_PASS:
             qualified.append(entry)
         else:
             entry['reason'] = f"実質利益率 {profit['margin_pct']:.1%} が閾値 {min_margin_pct:.0%} 未満"
@@ -558,6 +609,7 @@ def evaluate_mcp_candidates(
             'jp_cost_jpy': jp_price,
             'unit_profit_usd': None,
             'margin_pct': None,
+            'tier': TIER_REJECT,  # 価格データが無い場合の既定値(下で価格が両方揃えば上書きされる)
             'reason': f"粗選別で除外: {_translate_skip_reason(skip.get('reason', ''))}",
         }
 
@@ -591,6 +643,7 @@ def evaluate_mcp_candidates(
             entry['weight_kg'] = weight_kg
             entry['weight_estimated'] = used_fallback_weight
             entry['fee_estimated'] = used_fallback_fee
+            entry['tier'] = _classify_tier(profit['margin_pct'], profit['us_price_usd'], profit['jp_cost_usd'], min_margin_pct)
 
         rejected.append(entry)
 
@@ -692,14 +745,14 @@ def load_digest_window(since_iso: str | None):
                 SELECT *,
                     ROW_NUMBER() OVER (PARTITION BY asin ORDER BY created_at DESC) AS rn
                 FROM agent_candidates
-                WHERE qualified = 1 AND created_at > ?
+                WHERE tier IN ('pass', 'consider') AND created_at > ?
             )
             SELECT asin, title, us_url, jp_url, us_price_usd, jp_cost_jpy,
                    sales_rank, review_count, margin_pct, unit_profit_usd,
-                   weight_estimated, category, created_at
+                   weight_estimated, category, created_at, tier
             FROM ranked
             WHERE rn = 1
-            ORDER BY margin_pct DESC
+            ORDER BY CASE tier WHEN 'pass' THEN 0 ELSE 1 END, margin_pct DESC
             ''',
             (since_iso,),
         ).fetchall()
@@ -716,10 +769,10 @@ def load_digest_window(since_iso: str | None):
             'sales_rank': sales_rank, 'review_count': review_count,
             'margin_pct': margin_pct, 'unit_profit_usd': unit_profit_usd,
             'weight_estimated': bool(weight_estimated), 'category': category,
-            'created_at': created_at,
+            'created_at': created_at, 'tier': tier,
         }
         for asin, title, us_url, jp_url, us_price_usd, jp_cost_jpy, sales_rank, review_count,
-            margin_pct, unit_profit_usd, weight_estimated, category, created_at in candidate_rows
+            margin_pct, unit_profit_usd, weight_estimated, category, created_at, tier in candidate_rows
     ]
     keywords = [row[0] for row in keyword_rows]
     return candidates, keywords, since_iso
@@ -743,13 +796,16 @@ def build_daily_digest_message(
         lines.append("検索は行われませんでした。")
 
     if not candidates:
-        lines.append("実質利益率20%以上の候補はありませんでした。")
+        lines.append("合格・要検討の候補はありませんでした。")
     else:
-        lines.append(f"実質利益率20%以上の候補: {len(candidates)}件(重複除く)")
+        pass_count = sum(1 for c in candidates if c.get('tier') == 'pass')
+        consider_count = len(candidates) - pass_count
+        lines.append(f"合格(利益率20%以上): {pass_count}件 / 要検討(0〜20%): {consider_count}件(重複除く)")
         for item in candidates[:max_items]:
             weight_note = '(重量は仮値)' if item['weight_estimated'] else ''
+            tier_label = '【合格】' if item.get('tier') == 'pass' else '【要検討】'
             lines.append('---')
-            lines.append(f"ASIN: {item['asin']}")
+            lines.append(f"{tier_label} ASIN: {item['asin']}")
             lines.append(f"{item['title'] or ''}")
             profit_jpy = round((item['unit_profit_usd'] or 0) * exchange_rate)
             margin = item['margin_pct']
@@ -835,6 +891,7 @@ def persist_agent_run(
                 item.get('unit_profit_usd'),
                 item.get('margin_pct'),
                 qualified_flag,
+                item.get('tier'),
                 item.get('reason'),
                 json.dumps(item, ensure_ascii=False),
                 created_at,
@@ -853,9 +910,9 @@ def persist_agent_run(
                     us_price_usd, jp_cost_jpy, sales_rank, review_count, monthly_sold, price_volatility_90d,
                     weight_kg, weight_estimated, fee_estimated,
                     price_diff_rate_gross, unit_profit_usd, margin_pct,
-                    qualified, reason, data_json, created_at,
+                    qualified, tier, reason, data_json, created_at,
                     source_type, seller_id, seller_name, seed_asin
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''',
                 rows,
             )

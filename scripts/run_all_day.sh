@@ -45,11 +45,21 @@
 # 明示的に取得する。
 #   SELLER_MINING_NIGHT_START_JST=0 SELLER_MINING_NIGHT_END_JST=0 ./scripts/run_all_day.sh
 #     (開始・終了を同じ値にすると実質無効化 = 常にキーワード検索のみ)
+#
+# 手動モード切り替え(CEOの指示「セラーマイニングと検索モードの手動切り替えも
+# できるようにして欲しい」): ダッシュボードの「検索ループ(AWS)」パネルの
+# モードボタン(またはフラグファイル .scan_loop_mode_override への直接書き込み)
+# で、上記の時間帯自動判定を上書きできる。停止フラグと同じソフトな仕組み
+# (実行中のサイクルは中断せず、次のサイクルから反映)。ファイルの中身が
+# "seller-mining" なら常にセラーマイニング、"keyword-search" なら常に
+# キーワード検索、ファイルが無い(または不正な内容)なら "auto"
+# (=is_seller_mining_hourによる時間帯自動判定、従来通り)。
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 STOP_FLAG="$REPO_ROOT/.scan_loop_stop_requested"
+MODE_OVERRIDE_FILE="$REPO_ROOT/.scan_loop_mode_override"
 
 VENV_PYTHON="$REPO_ROOT/.venv/bin/python"
 if [ ! -x "$VENV_PYTHON" ]; then
@@ -100,6 +110,22 @@ is_seller_mining_hour() {
   fi
 }
 
+# 手動モード上書きの現在値を返す("seller-mining" / "keyword-search" / "auto")。
+# ファイルが無い、または想定外の内容の場合は安全側に倒して"auto"を返す
+# (=時間帯自動判定にフォールバック)。
+get_mode_override() {
+  local value
+  if [ -f "$MODE_OVERRIDE_FILE" ]; then
+    value=$(tr -d '[:space:]' < "$MODE_OVERRIDE_FILE" 2>/dev/null)
+  else
+    value="auto"
+  fi
+  case "$value" in
+    seller-mining|keyword-search) echo "$value" ;;
+    *) echo "auto" ;;
+  esac
+}
+
 log "[INFO] run_all_day.sh 開始 (MAX_CANDIDATES=$MAX_CANDIDATES, "\
 "SELLER_MINING_NIGHT_JST=${SELLER_MINING_NIGHT_START_JST}-${SELLER_MINING_NIGHT_END_JST}, PID=$$)"
 log "[INFO] 追加引数: $*"
@@ -113,14 +139,25 @@ while [ "$running" -eq 1 ]; do
 
   cycle=$((cycle + 1))
 
-  if is_seller_mining_hour; then
+  mode_override=$(get_mode_override)
+  if [ "$mode_override" = "seller-mining" ]; then
+    use_seller_mining=1; mode_reason="手動固定"
+  elif [ "$mode_override" = "keyword-search" ]; then
+    use_seller_mining=0; mode_reason="手動固定"
+  elif is_seller_mining_hour; then
+    use_seller_mining=1; mode_reason="自動スケジュール"
+  else
+    use_seller_mining=0; mode_reason="自動スケジュール"
+  fi
+
+  if [ "$use_seller_mining" -eq 1 ]; then
     cycle_args=(daily_scan.py --seller-mining --seller-mining-max-candidates "$SELLER_MINING_MAX_CANDIDATES")
     cycle_label="セラーマイニング"
   else
     cycle_args=(daily_scan.py --max-candidates "$MAX_CANDIDATES" "$@")
     cycle_label="キーワード検索"
   fi
-  log "[INFO] --- サイクル $cycle 開始 (${cycle_label}) ---"
+  log "[INFO] --- サイクル $cycle 開始 (${cycle_label} / ${mode_reason}) ---"
 
   if "$VENV_PYTHON" "${cycle_args[@]}" >> "$LOG_FILE" 2>&1; then
     log "[INFO] サイクル $cycle 完了 (${cycle_label})。"

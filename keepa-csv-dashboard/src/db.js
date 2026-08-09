@@ -104,6 +104,19 @@ export const controlScanLoop = async (action) => {
     return response.json();
 };
 
+export const setScanLoopMode = async (mode) => {
+    const response = await fetch(`${API_BASE}/api/agent/scan-loop`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode }),
+    });
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || `HTTP ${response.status}`);
+    }
+    return response.json();
+};
+
 export const discoverSellersForAsin = async ({ asin, maxSellers }) => {
     const response = await fetch(`${API_BASE}/api/seller-mining/discover-sellers`, {
         method: 'POST',

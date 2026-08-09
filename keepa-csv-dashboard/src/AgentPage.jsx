@@ -1,9 +1,24 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Star } from 'lucide-react';
-import { controlScanLoop, loadAgentCandidates, loadAgentRuns, loadKeepaTokenStatus, loadScanLoopStatus, saveFavorite } from './db';
+import { controlScanLoop, loadAgentCandidates, loadAgentRuns, loadKeepaTokenStatus, loadScanLoopStatus, saveFavorite, setScanLoopMode } from './db';
 import { formatDateTime } from './formatters';
 
 const EXCHANGE_RATE = 150;
+
+const SCAN_LOOP_MODE_LABELS = {
+    auto: '自動',
+    'seller-mining': 'セラーマイニング固定',
+    'keyword-search': 'キーワード検索固定',
+};
+
+// 合格ラインの多段階化(CEO: 「合格ラインは何段階かに分けてください」)。
+const TIER_STYLES = {
+    pass: { label: '合格', className: 'bg-emerald-900/60 text-emerald-200' },
+    consider: { label: '要検討', className: 'bg-amber-900/60 text-amber-200' },
+    reference: { label: '参考', className: 'bg-slate-700/60 text-slate-300' },
+    reject: { label: '不合格', className: 'bg-slate-800 text-slate-400' },
+};
+const resolveTier = (candidate) => candidate.tier ?? (candidate.qualified ? 'pass' : 'reject');
 
 const formatDuration = (seconds) => {
     if (seconds === null || seconds === undefined || Number.isNaN(seconds)) return '-';
@@ -78,6 +93,22 @@ export default function AgentPage() {
             setScanLoopStatus(result);
         } catch (scanLoopError) {
             setError(scanLoopError?.message || '検索ループの操作に失敗しました。');
+        } finally {
+            setScanLoopBusy(false);
+        }
+    };
+
+    const handleScanLoopModeChange = async (mode) => {
+        setScanLoopBusy(true);
+        setError('');
+        try {
+            const result = await setScanLoopMode(mode);
+            if (!result.ok) {
+                setError(result.error || 'モードの切り替えに失敗しました。');
+            }
+            setScanLoopStatus(result);
+        } catch (modeError) {
+            setError(modeError?.message || 'モードの切り替えに失敗しました。');
         } finally {
             setScanLoopBusy(false);
         }
@@ -239,6 +270,33 @@ export default function AgentPage() {
                         >
                             更新
                         </button>
+                    </div>
+                    <div className="mt-2 flex items-center gap-2 border-t border-slate-800 pt-2">
+                        <span className="text-xs text-slate-400">
+                            モード: {SCAN_LOOP_MODE_LABELS[scanLoopStatus?.mode] ?? SCAN_LOOP_MODE_LABELS.auto}
+                        </span>
+                        <div className="flex gap-1">
+                            {Object.entries(SCAN_LOOP_MODE_LABELS).map(([value, label]) => (
+                                <button
+                                    key={value}
+                                    type="button"
+                                    onClick={() => handleScanLoopModeChange(value)}
+                                    disabled={scanLoopBusy || (scanLoopStatus?.mode ?? 'auto') === value}
+                                    className={`rounded-lg px-2 py-1 text-xs font-semibold disabled:opacity-40 ${
+                                        (scanLoopStatus?.mode ?? 'auto') === value
+                                            ? 'bg-cyan-500 text-slate-950'
+                                            : 'border border-slate-700 text-slate-200 hover:bg-slate-800'
+                                    }`}
+                                    title={
+                                        value === 'auto'
+                                            ? '深夜1:00〜6:00(JST、既定)はセラーマイニング、それ以外はキーワード検索'
+                                            : '時間帯に関わらず次のサイクルからこのモードに固定します'
+                                    }
+                                >
+                                    {label}
+                                </button>
+                            ))}
+                        </div>
                     </div>
                 </div>
             </header>
@@ -434,18 +492,18 @@ export default function AgentPage() {
                                             )}
                                         </td>
                                         <td className="px-4 py-3">
-                                            {candidate.qualified ? (
-                                                <span className="rounded-lg bg-emerald-900/60 px-2 py-1 text-xs font-semibold text-emerald-200">
-                                                    合格
-                                                </span>
-                                            ) : (
-                                                <span
-                                                    className="rounded-lg bg-slate-800 px-2 py-1 text-xs font-semibold text-slate-400"
-                                                    title={candidate.reason || ''}
-                                                >
-                                                    不合格
-                                                </span>
-                                            )}
+                                            {(() => {
+                                                const tier = resolveTier(candidate);
+                                                const style = TIER_STYLES[tier] || TIER_STYLES.reject;
+                                                return (
+                                                    <span
+                                                        className={`rounded-lg px-2 py-1 text-xs font-semibold ${style.className}`}
+                                                        title={tier === 'pass' ? '' : candidate.reason || ''}
+                                                    >
+                                                        {style.label}
+                                                    </span>
+                                                );
+                                            })()}
                                         </td>
                                         <td className="px-4 py-3 text-slate-300">{candidate.category || '-'}</td>
                                         <td className="px-4 py-3 font-semibold text-white">{candidate.asin}</td>

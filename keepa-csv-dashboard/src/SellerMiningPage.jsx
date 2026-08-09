@@ -23,6 +23,15 @@ const EXCHANGE_RATE = 150;
 const DEFAULT_MAX_SELLERS = 5;
 const DEFAULT_MAX_CANDIDATES = 15;
 
+// 合格ラインの多段階化(CEO: 「合格ラインは何段階かに分けてください」)。
+const TIER_STYLES = {
+    pass: { label: '合格', className: 'bg-emerald-900/60 text-emerald-200' },
+    consider: { label: '要検討', className: 'bg-amber-900/60 text-amber-200' },
+    reference: { label: '参考', className: 'bg-slate-700/60 text-slate-300' },
+    reject: { label: '不合格', className: 'bg-slate-800 text-slate-400' },
+};
+const resolveTier = (candidate) => candidate.tier ?? (candidate.qualified ? 'pass' : 'reject');
+
 export default function SellerMiningPage() {
     const [candidates, setCandidates] = useState([]);
     const [runs, setRuns] = useState([]);
@@ -644,18 +653,18 @@ export default function SellerMiningPage() {
                                             )}
                                         </td>
                                         <td className="px-4 py-3">
-                                            {candidate.qualified ? (
-                                                <span className="rounded-lg bg-emerald-900/60 px-2 py-1 text-xs font-semibold text-emerald-200">
-                                                    合格
-                                                </span>
-                                            ) : (
-                                                <span
-                                                    className="rounded-lg bg-slate-800 px-2 py-1 text-xs font-semibold text-slate-400"
-                                                    title={candidate.reason || ''}
-                                                >
-                                                    不合格
-                                                </span>
-                                            )}
+                                            {(() => {
+                                                const tier = resolveTier(candidate);
+                                                const style = TIER_STYLES[tier] || TIER_STYLES.reject;
+                                                return (
+                                                    <span
+                                                        className={`rounded-lg px-2 py-1 text-xs font-semibold ${style.className}`}
+                                                        title={tier === 'pass' ? '' : candidate.reason || ''}
+                                                    >
+                                                        {style.label}
+                                                    </span>
+                                                );
+                                            })()}
                                         </td>
                                         <td className="px-4 py-3 font-semibold text-white">{candidate.asin}</td>
                                         <td className="max-w-xl px-4 py-3 text-slate-200">{candidate.title || '-'}</td>
