@@ -930,6 +930,7 @@ def init_db() -> None:
                 seller_name TEXT,
                 source TEXT NOT NULL,
                 seed_asin TEXT,
+                seed_keyword TEXT,
                 added_at TEXT NOT NULL,
                 last_mined_at TEXT,
                 times_mined INTEGER NOT NULL DEFAULT 0,
@@ -939,6 +940,10 @@ def init_db() -> None:
             '''
         )
         conn.execute('CREATE INDEX IF NOT EXISTS idx_seller_pool_status ON seller_pool(status)')
+
+        seller_pool_columns = {row[1] for row in conn.execute('PRAGMA table_info(seller_pool)').fetchall()}
+        if 'seed_keyword' not in seller_pool_columns:
+            conn.execute('ALTER TABLE seller_pool ADD COLUMN seed_keyword TEXT')
 
         # seller_poolの一度きりの自動バックフィル(ops_finance.py側と同じロジック、
         # どちらのプロセスが先に起動しても安全 - INSERT OR IGNOREのため二重実行しても実害なし)。
@@ -1249,15 +1254,51 @@ def delete_keyword_pool_entry(keyword):
 
 
 def load_seller_pool():
-    """Sellerエージェントのセラープール全体を返す
-    (daily_scan.py --list-sellers / ops_finance.list_seller_pool() と同じ並び順)。"""
+    """Sellerエージェントのセラープール全体を、全期間の実績統計付きで返す
+    (daily_scan.py --list-sellers / ops_finance.list_seller_pool() とは並び順は
+    同じだが、こちらのみproduct_count等の集計列を追加で持つ - ダッシュボード
+    「セラー別統計」専用、常に全期間集計(「このセラーを再訪すべきか」を判断する
+    恒久的な参考情報のため、直近N日ではなく全履歴を見る)。
+
+    agent_candidates は同じセラーの同じASINが複数回のマイニングで重複して
+    残ることがある(load_agent_candidates()と同じ理由)ため、(seller_id, asin)
+    単位で最新1件にデデュープしてから集計する。
+    """
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute(
             '''
-            SELECT seller_id, seller_name, source, seed_asin, added_at, last_mined_at,
-                   times_mined, total_qualified, status
-            FROM seller_pool
-            ORDER BY times_mined ASC, COALESCE(last_mined_at, '') ASC
+            WITH deduped AS (
+                SELECT
+                    ac.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY ac.seller_id, ac.asin
+                        ORDER BY ac.created_at DESC
+                    ) AS rn
+                FROM agent_candidates ac
+                WHERE ac.source_type = 'seller' AND ac.seller_id IS NOT NULL AND ac.seller_id != ''
+            ),
+            stats AS (
+                SELECT
+                    seller_id,
+                    COUNT(DISTINCT asin) AS product_count,
+                    SUM(CASE WHEN tier = 'pass' THEN 1 ELSE 0 END) AS pass_count,
+                    SUM(CASE WHEN tier = 'consider' THEN 1 ELSE 0 END) AS consider_count,
+                    SUM(CASE WHEN tier = 'reference' THEN 1 ELSE 0 END) AS reference_count,
+                    SUM(CASE WHEN tier = 'reject' OR tier IS NULL THEN 1 ELSE 0 END) AS reject_count,
+                    SUM(monthly_sold) AS total_monthly_sold,
+                    AVG(margin_pct) AS avg_margin_pct
+                FROM deduped
+                WHERE rn = 1
+                GROUP BY seller_id
+            )
+            SELECT sp.seller_id, sp.seller_name, sp.source, sp.seed_asin, sp.seed_keyword,
+                   sp.added_at, sp.last_mined_at, sp.times_mined, sp.total_qualified, sp.status,
+                   COALESCE(s.product_count, 0), COALESCE(s.pass_count, 0),
+                   COALESCE(s.consider_count, 0), COALESCE(s.reference_count, 0),
+                   COALESCE(s.reject_count, 0), s.total_monthly_sold, s.avg_margin_pct
+            FROM seller_pool sp
+            LEFT JOIN stats s ON s.seller_id = sp.seller_id
+            ORDER BY sp.times_mined ASC, COALESCE(sp.last_mined_at, '') ASC
             '''
         ).fetchall()
     return [
@@ -1266,13 +1307,23 @@ def load_seller_pool():
             'sellerName': seller_name,
             'source': source,
             'seedAsin': seed_asin,
+            'seedKeyword': seed_keyword,
             'addedAt': added_at,
             'lastMinedAt': last_mined_at,
             'timesMined': times_mined,
             'totalQualified': total_qualified,
             'status': status,
+            'productCount': product_count,
+            'passCount': pass_count,
+            'considerCount': consider_count,
+            'referenceCount': reference_count,
+            'rejectCount': reject_count,
+            'totalMonthlySold': total_monthly_sold,
+            'avgMarginPct': avg_margin_pct,
         }
-        for seller_id, seller_name, source, seed_asin, added_at, last_mined_at, times_mined, total_qualified, status in rows
+        for (seller_id, seller_name, source, seed_asin, seed_keyword, added_at, last_mined_at,
+             times_mined, total_qualified, status, product_count, pass_count, consider_count,
+             reference_count, reject_count, total_monthly_sold, avg_margin_pct) in rows
     ]
 
 

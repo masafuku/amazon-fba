@@ -201,11 +201,14 @@ def _expand_from_one_seller(
     return qualified_count
 
 
-def expand_from_top_seller(top_qualified: dict, source_label: str, wait_for_tokens: bool) -> None:
+def expand_from_top_seller(top_qualified: dict, source_label: str, keyword: str, wait_for_tokens: bool) -> None:
     """合格候補のうち実質利益率が最も高い1件について、そのASINを出品している
     セラー(buyboxの1人だけでなく、Amazonの「他のセラー」欄に相当する全員、
     最大MAX_SELLERS_PER_CANDIDATE件)それぞれについて、他の出品も同じ
     パイプラインで評価する(セラーマイニング、CEOのアイデア)。
+    keyword: このセラーを見つけるきっかけになった検索キーワード(source_labelは
+    カテゴリ付きの表示用ラベルなので別に受け取る) - seller_pool.seed_keywordに
+    記録し、ダッシュボードの「セラー別統計」でキーワード列として表示する。
     """
     asin = top_qualified["asin"]
     print(f"[INFO] セラーマイニング: 合格候補 {asin} の出品セラーを調べています...")
@@ -223,7 +226,7 @@ def expand_from_top_seller(top_qualified: dict, source_label: str, wait_for_toke
     print(f"[INFO] セラー{len(seller_ids)}件を特定: {seller_ids}")
     # 定期セラーマイニング(Sellerエージェント)がこのセラーたちも巡回できるよう、
     # 実際にこの場でマイニングするかに関わらず全員をプールに登録しておく。
-    add_sellers(seller_ids, source="keyword_expansion", seed_asin=asin)
+    add_sellers(seller_ids, source="keyword_expansion", seed_asin=asin, seed_keyword=keyword)
     for seller_id in seller_ids:
         _expand_from_one_seller(seller_id, source_label, wait_for_tokens, seed_asin=asin)
 
@@ -355,7 +358,7 @@ def run_daily_scan(
     # 出品セラー(最大MAX_SELLERS_PER_CANDIDATE件)を特定して、それぞれの
     # 出品の残りも同じパイプラインで評価する。
     if evaluation["qualified"]:
-        expand_from_top_seller(evaluation["qualified"][0], label, wait_for_tokens)
+        expand_from_top_seller(evaluation["qualified"][0], label, keyword, wait_for_tokens)
 
 
 def cmd_seed_from_favorites() -> None:

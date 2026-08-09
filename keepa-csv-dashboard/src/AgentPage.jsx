@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Star } from 'lucide-react';
 import { controlScanLoop, loadAgentCandidates, loadAgentRuns, loadKeepaTokenStatus, loadScanLoopStatus, saveFavorite, setScanLoopMode } from './db';
-import { formatDateTime } from './formatters';
+import { formatDateTime, formatDuration, formatElapsedSince } from './formatters';
 
 const EXCHANGE_RATE = 150;
 
@@ -19,20 +19,6 @@ const TIER_STYLES = {
     reject: { label: '不合格', className: 'bg-slate-800 text-slate-400' },
 };
 const resolveTier = (candidate) => candidate.tier ?? (candidate.qualified ? 'pass' : 'reject');
-
-const formatDuration = (seconds) => {
-    if (seconds === null || seconds === undefined || Number.isNaN(seconds)) return '-';
-    if (seconds < 60) return `${seconds.toFixed(0)}秒`;
-    return `${Math.floor(seconds / 60)}分${Math.round(seconds % 60)}秒`;
-};
-
-// 実行中の検索は経過時間を秒精度で表示したいので、durationSecondsではなく
-// startedAtから現在時刻までを都度計算する。
-const formatElapsedSince = (startedAt) => {
-    const startedMs = Date.parse(startedAt);
-    if (Number.isNaN(startedMs)) return '-';
-    return formatDuration((Date.now() - startedMs) / 1000);
-};
 
 export default function AgentPage() {
     const [candidates, setCandidates] = useState([]);
@@ -457,6 +443,7 @@ export default function AgentPage() {
                                     <th className="px-4 py-3 font-medium text-slate-400">画像</th>
                                     {renderSortHeader('判定', 'qualified')}
                                     {renderSortHeader('カテゴリ', 'category')}
+                                    {renderSortHeader('セラー', 'sellerName')}
                                     {renderSortHeader('ASIN', 'asin')}
                                     {renderSortHeader('商品名', 'title')}
                                     {renderSortHeader('US価格($)', 'usPriceUsd')}
@@ -506,6 +493,7 @@ export default function AgentPage() {
                                             })()}
                                         </td>
                                         <td className="px-4 py-3 text-slate-300">{candidate.category || '-'}</td>
+                                        <td className="px-4 py-3 text-slate-300">{candidate.sellerName || candidate.sellerId || '-'}</td>
                                         <td className="px-4 py-3 font-semibold text-white">{candidate.asin}</td>
                                         <td className="max-w-xl px-4 py-3 text-slate-200">{candidate.title || '-'}</td>
                                         <td className="px-4 py-3 text-slate-200">

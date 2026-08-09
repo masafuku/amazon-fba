@@ -173,6 +173,7 @@ def init_ops_tables():
                 seller_name TEXT,
                 source TEXT NOT NULL,        -- keyword_expansion/manual_expand/manual
                 seed_asin TEXT,               -- このセラーを見つけたきっかけのASIN
+                seed_keyword TEXT,            -- keyword_expansion経由の場合、発見元のキーワード検索語
                 added_at TEXT NOT NULL,
                 last_mined_at TEXT,
                 times_mined INTEGER NOT NULL DEFAULT 0,
@@ -250,6 +251,10 @@ def init_ops_tables():
             conn.execute('ALTER TABLE agent_runs ADD COLUMN seller_name TEXT')
         if 'seed_asin' not in agent_runs_columns:
             conn.execute('ALTER TABLE agent_runs ADD COLUMN seed_asin TEXT')
+
+        seller_pool_columns = {row[1] for row in conn.execute('PRAGMA table_info(seller_pool)').fetchall()}
+        if 'seed_keyword' not in seller_pool_columns:
+            conn.execute('ALTER TABLE seller_pool ADD COLUMN seed_keyword TEXT')
 
         # seller_poolの一度きりの自動バックフィル: 既にsource_type='seller'の
         # 実績がagent_candidatesにある(過去のセラーマイニング結果)場合、
@@ -1204,8 +1209,13 @@ def list_keyword_pool() -> list:
 # 8. Sellerエージェント: セラープール管理(keyword_poolと同じLRUパターン)
 # ---------------------------------------------------------------------------
 
-def add_sellers(seller_ids, source: str, seed_asin: str = None) -> int:
-    """セラーIDをプールに追加する(既存のものはスキップ)。追加できた件数を返す。"""
+def add_sellers(seller_ids, source: str, seed_asin: str = None, seed_keyword: str = None) -> int:
+    """セラーIDをプールに追加する(既存のものはスキップ)。追加できた件数を返す。
+    seed_keyword: source='keyword_expansion'の場合、このセラーを見つけるきっかけに
+    なったキーワード検索語(ダッシュボードの「セラー別統計」でキーワード列として表示する)。
+    定期セラーマイニング・ダッシュボードからの手動発見経路には「元になった検索キーワード」
+    という概念が無いためNoneのまま(表示側で「-」扱い)。
+    """
     init_ops_tables()
     seller_ids = [str(s).strip() for s in seller_ids if str(s or '').strip()]
     if not seller_ids:
@@ -1215,10 +1225,10 @@ def add_sellers(seller_ids, source: str, seed_asin: str = None) -> int:
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.executemany(
             '''
-            INSERT OR IGNORE INTO seller_pool (seller_id, source, seed_asin, added_at, times_mined, total_qualified, status)
-            VALUES (?, ?, ?, ?, 0, 0, 'active')
+            INSERT OR IGNORE INTO seller_pool (seller_id, source, seed_asin, seed_keyword, added_at, times_mined, total_qualified, status)
+            VALUES (?, ?, ?, ?, ?, 0, 0, 'active')
             ''',
-            [(seller_id, source, seed_asin, now) for seller_id in seller_ids],
+            [(seller_id, source, seed_asin, seed_keyword, now) for seller_id in seller_ids],
         )
         return cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
 
