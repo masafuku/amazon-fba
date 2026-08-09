@@ -157,7 +157,21 @@ export default function AgentPage() {
     };
 
     const visibleCandidates = useMemo(() => {
-        const base = showRejected ? candidates : candidates.filter((item) => item.qualified);
+        const filtered = showRejected ? candidates : candidates.filter((item) => item.qualified);
+        // 表面利益/表面利益率/手数料/輸送費はAPIの生フィールドではなくcandidate.dataから算出する値。
+        // 既存の汎用ソート比較関数(candidate[sortKey]を直接参照する)にそのまま乗せられるよう、
+        // ソート前に候補オブジェクトへ事前計算して付与する(SellerMiningPage.jsxのpassRateと同じパターン)。
+        const base = filtered.map((item) => {
+            const us = item.data?.us_price_usd;
+            const jp = item.data?.jp_cost_usd;
+            const amazonFee = item.data?.amazon_fee_usd;
+            const fbaFee = item.data?.fba_fee_usd;
+            const grossProfitUsd = us != null && jp != null ? us - jp : null;
+            const grossMarginPct = grossProfitUsd != null && us ? grossProfitUsd / us : null;
+            const feesUsd = amazonFee != null && fbaFee != null ? amazonFee + fbaFee : null;
+            const shippingCostUsd = item.data?.shipping_cost_usd ?? null;
+            return { ...item, grossProfitUsd, grossMarginPct, feesUsd, shippingCostUsd };
+        });
         return [...base].sort((left, right) => {
             const leftValue = sortKey === 'createdAt' ? Date.parse(left.createdAt) || 0 : left[sortKey];
             const rightValue = sortKey === 'createdAt' ? Date.parse(right.createdAt) || 0 : right[sortKey];
@@ -448,8 +462,12 @@ export default function AgentPage() {
                                     {renderSortHeader('商品名', 'title')}
                                     {renderSortHeader('US価格($)', 'usPriceUsd')}
                                     {renderSortHeader('JP価格(円)', 'jpCostJpy')}
+                                    {renderSortHeader('表面利益(US-JP)', 'grossProfitUsd')}
+                                    {renderSortHeader('表面利益率', 'grossMarginPct')}
+                                    {renderSortHeader('手数料(Amazon+FBA)', 'feesUsd')}
+                                    {renderSortHeader('輸送費', 'shippingCostUsd')}
+                                    {renderSortHeader('実質利益', 'unitProfitUsd')}
                                     {renderSortHeader('実質利益率', 'marginPct')}
-                                    {renderSortHeader('1個あたり利益(円)', 'unitProfitUsd')}
                                     {renderSortHeader('価格変動(90日)', 'priceVolatility90d')}
                                     {renderSortHeader('ランキング', 'salesRank')}
                                     {renderSortHeader('レビュー数', 'reviewCount')}
@@ -502,31 +520,21 @@ export default function AgentPage() {
                                         <td className="px-4 py-3 text-slate-200">
                                             {candidate.jpCostJpy == null ? '-' : `¥${Number(candidate.jpCostJpy).toFixed(0)}`}
                                         </td>
-                                        <td className={`px-4 py-3 font-semibold ${candidate.marginPct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                                            {candidate.marginPct == null ? '-' : `${(candidate.marginPct * 100).toFixed(1)}%`}
-                                            {candidate.feeEstimated ? (
-                                                <span className="ml-1 text-xs text-slate-500" title="手数料データなし、仮値で計算">
-                                                    *
-                                                </span>
-                                            ) : null}
+                                        <td className={`px-4 py-3 font-semibold ${candidate.grossProfitUsd >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                            {candidate.grossProfitUsd == null ? '-' : `¥${Math.round(Number(candidate.grossProfitUsd) * EXCHANGE_RATE).toLocaleString()}`}
                                         </td>
-                                        <td className={`px-4 py-3 font-semibold ${candidate.unitProfitUsd >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                                            {candidate.unitProfitUsd == null ? (
+                                        <td className={`px-4 py-3 font-semibold ${candidate.grossMarginPct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                            {candidate.grossMarginPct == null ? '-' : `${(candidate.grossMarginPct * 100).toFixed(1)}%`}
+                                        </td>
+                                        <td className="px-4 py-3 text-slate-200">
+                                            {candidate.feesUsd == null ? (
                                                 '-'
                                             ) : (
                                                 <details className="group">
                                                     <summary className="cursor-pointer list-none">
-                                                        ¥{Math.round(Number(candidate.unitProfitUsd) * EXCHANGE_RATE).toLocaleString()}
+                                                        ¥{Math.round(Number(candidate.feesUsd) * EXCHANGE_RATE).toLocaleString()}
                                                     </summary>
                                                     <div className="mt-2 space-y-1 text-xs font-normal text-slate-400">
-                                                        <p>
-                                                            US価格: {candidate.data?.us_price_usd != null ? `$${Number(candidate.data.us_price_usd).toFixed(2)}` : '-'}
-                                                        </p>
-                                                        <p>
-                                                            JP原価: {candidate.data?.jp_cost_usd != null
-                                                                ? `$${Number(candidate.data.jp_cost_usd).toFixed(2)} (¥${Math.round(Number(candidate.data.jp_cost_usd) * EXCHANGE_RATE).toLocaleString()})`
-                                                                : '-'}
-                                                        </p>
                                                         <p>
                                                             Amazon手数料: {candidate.data?.amazon_fee_usd != null
                                                                 ? `$${Number(candidate.data.amazon_fee_usd).toFixed(2)} (¥${Math.round(Number(candidate.data.amazon_fee_usd) * EXCHANGE_RATE).toLocaleString()})`
@@ -537,14 +545,23 @@ export default function AgentPage() {
                                                                 ? `$${Number(candidate.data.fba_fee_usd).toFixed(2)} (¥${Math.round(Number(candidate.data.fba_fee_usd) * EXCHANGE_RATE).toLocaleString()})`
                                                                 : '-'}
                                                         </p>
-                                                        <p>
-                                                            国際送料: {candidate.data?.shipping_cost_usd != null
-                                                                ? `$${Number(candidate.data.shipping_cost_usd).toFixed(2)} (¥${Math.round(Number(candidate.data.shipping_cost_usd) * EXCHANGE_RATE).toLocaleString()})`
-                                                                : '-'}
-                                                        </p>
                                                     </div>
                                                 </details>
                                             )}
+                                        </td>
+                                        <td className="px-4 py-3 text-slate-200">
+                                            {candidate.shippingCostUsd == null ? '-' : `¥${Math.round(Number(candidate.shippingCostUsd) * EXCHANGE_RATE).toLocaleString()}`}
+                                        </td>
+                                        <td className={`px-4 py-3 font-semibold ${candidate.unitProfitUsd >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                            {candidate.unitProfitUsd == null ? '-' : `¥${Math.round(Number(candidate.unitProfitUsd) * EXCHANGE_RATE).toLocaleString()}`}
+                                        </td>
+                                        <td className={`px-4 py-3 font-semibold ${candidate.marginPct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                            {candidate.marginPct == null ? '-' : `${(candidate.marginPct * 100).toFixed(1)}%`}
+                                            {candidate.feeEstimated ? (
+                                                <span className="ml-1 text-xs text-slate-500" title="手数料データなし、仮値で計算">
+                                                    *
+                                                </span>
+                                            ) : null}
                                         </td>
                                         <td className="px-4 py-3 text-slate-200">
                                             {candidate.priceVolatility90d == null ? '-' : `±${(candidate.priceVolatility90d * 100).toFixed(0)}%`}
