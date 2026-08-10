@@ -3,6 +3,7 @@ import json
 import gzip
 import mimetypes
 import os
+import re
 import sqlite3
 import subprocess
 import zlib
@@ -1227,11 +1228,47 @@ def load_keyword_pool():
     ]
 
 
+# 食品・飲料・サプリなど、FBA輸出(日本→米国の小口国際発送)に向かない
+# カテゴリのキーワードを除外する(CEO: 「食品などfba輸出に向かない物は検索
+# から除外してください」)。定義元はops_finance.py側(_FOOD_AND_UNSUITABLE_KEYWORDS
+# / _is_food_or_unsuitable_keyword)、この2ファイルの並行スキーマ管理という
+# 既存の規約に従い、ダッシュボードからの手動追加パスにも同じフィルタを
+# ミラーしておく。
+_FOOD_AND_UNSUITABLE_KEYWORDS = (
+    'food', 'snack', 'snacks', 'candy', 'candies', 'chocolate', 'chocolates',
+    'cookie', 'cookies', 'cracker', 'crackers', 'gum', 'gums',
+    # 'tea'/'coffee'は単独だと"tea kettle"/"coffee maker"のような器具まで
+    # 誤って除外してしまう(実際にお気に入り由来の"Tea Kettles"で誤検知が
+    # 確認された)ため、消費物そのものを指すフレーズに絞る。
+    'green tea', 'black tea', 'oolong tea', 'tea bag', 'tea bags', 'tea leaves', 'loose tea',
+    'matcha', 'cocoa',
+    'coffee bean', 'coffee beans', 'coffee grounds', 'ground coffee', 'instant coffee',
+    'rice', 'noodle', 'noodles', 'ramen', 'udon', 'soba',
+    'miso', 'soy sauce', 'sauce', 'sauces', 'seasoning', 'seasonings',
+    'spice', 'spices', 'koji',
+    'sake', 'wine', 'wines', 'beer', 'beers', 'whisky', 'whiskey', 'gin',
+    'alcohol', 'liquor',
+    'wagyu', 'meat', 'meats', 'seafood', 'fish',
+    'onigiri', 'bento', 'sushi', 'gourmet food', 'grocery', 'groceries',
+    'supplement', 'supplements', 'vitamin', 'vitamins',
+)
+
+
+def _is_food_or_unsuitable_keyword(candidate):
+    lowered = candidate.strip().lower()
+    return any(
+        re.search(r'\b' + re.escape(term) + r'\b', lowered)
+        for term in _FOOD_AND_UNSUITABLE_KEYWORDS
+    )
+
+
 def add_keyword_pool_entry(payload):
     """ダッシュボードからのマニュアル追加。既存キーワードは無視(重複追加しない)。"""
     keyword = str(payload.get('keyword') or '').strip()
     if not keyword:
         raise ValueError('keyword is required')
+    if _is_food_or_unsuitable_keyword(keyword):
+        raise ValueError(f'「{keyword}」は食品などFBA輸出に向かないカテゴリのため追加できません。')
 
     now = datetime.now(timezone.utc).isoformat()
     with sqlite3.connect(DB_PATH) as conn:

@@ -20,6 +20,7 @@ DBパスは sqlite_api_server.py と同じ場所を参照する。
 """
 
 import json
+import re
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -1028,9 +1029,15 @@ def log_agent_run(
 # ---------------------------------------------------------------------------
 
 def add_keywords(keywords, source: str, seed_keyword: str = None) -> int:
-    """キーワードをプールに追加する(既存のものはスキップ)。追加できた件数を返す。"""
+    """キーワードをプールに追加する(既存のものはスキップ)。追加できた件数を返す。
+    _is_searchable_keyword()(Amazon大分類名・日本語表記・食品など不向きな
+    カテゴリを除外)をここで一元的に適用する - --expand経由のKeepaカテゴリ
+    ツリー由来のキーワードもこれを通るので、呼び出し元ごとに個別にフィルタを
+    書く必要はない。
+    """
     init_ops_tables()
     keywords = [str(k).strip() for k in keywords if str(k or '').strip()]
+    keywords = [k for k in keywords if _is_searchable_keyword(k)]
     if not keywords:
         return 0
 
@@ -1088,14 +1095,57 @@ def _contains_japanese(text: str) -> bool:
     return False
 
 
+# 食品・飲料・サプリなど、消費期限・国際輸送での液体/成分規制・税関手続きの
+# 煩雑さでFBA輸出(日本→米国の小口国際発送)に向かないカテゴリのキーワード
+# (CEO: 「食品などfba輸出に向かない物は検索から除外してください」)。
+# 部分一致(小文字化して判定)なので、「Japan snacks」「matcha powder」の
+# ようにこれらの語を含むキーワード全般を拾う。完璧な分類ではない
+# (誤検知/見逃しはあり得る)が、既存のAmazon大分類名フィルタと同じ、
+# 実用重視のヒューリスティックとして運用する。
+_FOOD_AND_UNSUITABLE_KEYWORDS = (
+    'food', 'snack', 'snacks', 'candy', 'candies', 'chocolate', 'chocolates',
+    'cookie', 'cookies', 'cracker', 'crackers', 'gum', 'gums',
+    # 'tea'/'coffee'は単独だと"tea kettle"/"coffee maker"のような器具まで
+    # 誤って除外してしまう(実際にお気に入り由来の"Tea Kettles"で誤検知が
+    # 確認された)ため、消費物そのものを指すフレーズに絞る。
+    'green tea', 'black tea', 'oolong tea', 'tea bag', 'tea bags', 'tea leaves', 'loose tea',
+    'matcha', 'cocoa',
+    'coffee bean', 'coffee beans', 'coffee grounds', 'ground coffee', 'instant coffee',
+    'rice', 'noodle', 'noodles', 'ramen', 'udon', 'soba',
+    'miso', 'soy sauce', 'sauce', 'sauces', 'seasoning', 'seasonings',
+    'spice', 'spices', 'koji',
+    'sake', 'wine', 'wines', 'beer', 'beers', 'whisky', 'whiskey', 'gin',
+    'alcohol', 'liquor',
+    'wagyu', 'meat', 'meats', 'seafood', 'fish',
+    'onigiri', 'bento', 'sushi', 'gourmet food', 'grocery', 'groceries',
+    'supplement', 'supplements', 'vitamin', 'vitamins',
+)
+
+
+def _is_food_or_unsuitable_keyword(candidate: str) -> bool:
+    """食品・飲料・サプリなど、FBA輸出に向かないカテゴリのキーワードかどうか。
+    単純な部分文字列一致だと"tea"が"teak"に誤マッチするような事故が起きるため、
+    単語境界(\\b)で区切って判定する(フレーズも"soy sauce"のようにそのまま
+    使える)。
+    """
+    lowered = candidate.strip().lower()
+    return any(
+        re.search(r'\b' + re.escape(term) + r'\b', lowered)
+        for term in _FOOD_AND_UNSUITABLE_KEYWORDS
+    )
+
+
 def _is_searchable_keyword(candidate: str) -> bool:
     """お気に入りから拾った文字列が、Keepaのtitleキーワード検索(常にUS側の
     タイトルに対して行われる)として使えそうかを判定する: Amazonの大分類名
-    そのものではないか、日本語表記ではないか。"""
+    そのものではないか、日本語表記ではないか、食品などFBA輸出に向かない
+    カテゴリではないか。"""
     stripped = candidate.strip()
     if stripped.lower() in _AMAZON_TOP_LEVEL_CATEGORIES:
         return False
     if _contains_japanese(stripped):
+        return False
+    if _is_food_or_unsuitable_keyword(stripped):
         return False
     return True
 

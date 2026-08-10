@@ -1,6 +1,6 @@
 import unittest
 
-from ops_finance import _classify_tier, calc_unit_profit
+from ops_finance import _classify_tier, _is_searchable_keyword, calc_unit_profit
 
 
 class TestCalcUnitProfitShipping(unittest.TestCase):
@@ -68,6 +68,48 @@ class TestClassifyTier(unittest.TestCase):
     def test_custom_min_margin_pct(self):
         self.assertEqual(_classify_tier(0.10, 100, 50, min_margin_pct=0.10), 'pass')
         self.assertEqual(_classify_tier(0.09, 100, 50, min_margin_pct=0.10), 'consider')
+
+
+class TestIsSearchableKeyword(unittest.TestCase):
+    """食品などFBA輸出に向かないキーワードの除外(CEO: 「食品などfba輸出に
+    向かない物は検索から除外してください」)。
+    """
+
+    def test_ordinary_brand_keyword_is_searchable(self):
+        self.assertTrue(_is_searchable_keyword('HARIO V60'))
+        self.assertTrue(_is_searchable_keyword('S.H.Figuarts'))
+
+    def test_food_keywords_are_excluded(self):
+        for keyword in ('matcha powder', 'miso paste', 'shio koji', 'Japan snacks', 'onigiri mold'):
+            self.assertFalse(_is_searchable_keyword(keyword), keyword)
+
+    def test_partial_match_is_case_insensitive(self):
+        self.assertFalse(_is_searchable_keyword('Premium MATCHA Set'))
+
+    def test_amazon_top_level_category_still_excluded(self):
+        self.assertFalse(_is_searchable_keyword('Grocery & Gourmet Food'))
+
+    def test_japanese_script_still_excluded(self):
+        self.assertFalse(_is_searchable_keyword('ジーショック'))
+
+    def test_word_boundary_avoids_false_positive_substrings(self):
+        # 単語境界で判定するため、"tea"を含むが無関係な単語("teak")は
+        # 誤って除外されない(単純な部分文字列一致だと事故る典型例)。
+        self.assertTrue(_is_searchable_keyword('teak wood furniture'))
+
+    def test_multi_word_phrase_still_matches(self):
+        self.assertFalse(_is_searchable_keyword('Kikkoman Soy Sauce'))
+
+    def test_kitchenware_with_food_related_words_is_not_excluded(self):
+        # 実際にお気に入り由来のキーワードプールで確認された誤検知:
+        # "tea"/"coffee"を単独の語として除外すると、消費物(茶葉・コーヒー豆)
+        # ではなく器具(ケトル・メーカー)まで巻き込んでしまう。
+        self.assertTrue(_is_searchable_keyword('Tea Kettles'))
+        self.assertTrue(_is_searchable_keyword('Pour Over Coffee Makers'))
+
+    def test_actual_tea_and_coffee_consumables_are_excluded(self):
+        for keyword in ('Green Tea', 'Loose Tea Leaves', 'Coffee Beans', 'Instant Coffee'):
+            self.assertFalse(_is_searchable_keyword(keyword), keyword)
 
 
 if __name__ == '__main__':
