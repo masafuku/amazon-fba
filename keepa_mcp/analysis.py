@@ -137,6 +137,38 @@ def price_volatility_ratio(product: Dict[str, Any], domain: str) -> Optional[flo
     return None
 
 
+# Keepa timestamps in `csv`/`history` arrays are "Keepa minutes": minutes
+# since 2011-01-01 00:00 UTC. Convert to real Unix milliseconds with this
+# fixed offset (see https://keepa.com/#!discuss/t/time-values/13 and
+# Keepa's own client libraries - this constant is the same in all of them).
+KEEPA_MINUTES_EPOCH_OFFSET = 21564000
+
+
+def csv_time_series(
+    product: Dict[str, Any], type_index: int, divisor: float = 1.0
+) -> List[Dict[str, Any]]:
+    """Parse one `product['csv'][type_index]` flat array (only present when
+    get_products(..., history=True) was used) into `[{time, value}, ...]`,
+    `time` as Unix milliseconds and `value` converted to the marketplace's
+    major currency unit (pass CURRENCY_DIVISOR[domain] for price series,
+    1.0 for the unitless sales-rank series). Drops Keepa's "no data"
+    sentinel entries. Returns [] if there's no csv data for this type
+    (e.g. this product/domain has no price history in the window Keepa has
+    on file)."""
+    csv = product.get("csv")
+    if not csv or type_index >= len(csv) or not csv[type_index]:
+        return []
+    raw = csv[type_index]
+    series = []
+    for i in range(0, len(raw) - 1, 2):
+        keepa_minutes, value = raw[i], raw[i + 1]
+        if keepa_minutes is None or value is None or value in NO_DATA_SENTINELS:
+            continue
+        unix_ms = (keepa_minutes + KEEPA_MINUTES_EPOCH_OFFSET) * 60_000
+        series.append({"time": unix_ms, "value": round(value / divisor, 2) if divisor != 1.0 else value})
+    return series
+
+
 def package_weight_kg(product: Dict[str, Any]) -> Optional[float]:
     """Package weight in kg, used for international-shipping cost estimates.
     Keepa returns `packageWeight` in grams; falls back to `itemWeight` if the

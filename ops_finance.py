@@ -580,6 +580,14 @@ def evaluate_mcp_candidates(
             'weight_kg': weight_kg,
             'weight_estimated': used_fallback_weight,
             'fee_estimated': used_fallback_fee,
+            # 既に取得済み(追加のKeepaトークン消費なし)だが、これまで
+            # entryにコピーされていなかったフィールド。詳細ページ用。
+            'brand': sell.get('brand'),
+            'jp_brand': cost.get('brand'),
+            'rating': sell.get('rating'),
+            'jp_rating': cost.get('rating'),
+            'upc': sell.get('upc'),
+            'ean': sell.get('ean'),
             **profit,  # unit_profit_usd, margin_pct など (jp_cost_usd 含む)
             'jp_cost_jpy': cost['price'],
         }
@@ -624,6 +632,12 @@ def evaluate_mcp_candidates(
             'weight_kg': skip.get('weight_kg'),
             'weight_estimated': False,
             'fee_estimated': False,
+            'brand': skip.get('brand'),
+            'jp_brand': None,
+            'rating': skip.get('rating'),
+            'jp_rating': None,
+            'upc': skip.get('upc'),
+            'ean': skip.get('ean'),
             'us_price_usd': us_price,
             'jp_cost_jpy': jp_price,
             'unit_profit_usd': None,

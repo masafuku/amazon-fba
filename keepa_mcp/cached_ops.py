@@ -251,6 +251,34 @@ def cached_get_product_with_offers(
     return product, _miss_info()
 
 
+def cached_get_product_with_history(
+    api_key: str, asin: str, domain: str, force_refresh: bool = False
+) -> Tuple[Optional[Dict[str, Any]], CacheInfo]:
+    """Single-ASIN fetch with history=1 (full CSV time-series, not just the
+    current/min/max `stats` summary the rest of the pipeline uses). Cached
+    separately (kind='product_history') from the plain product cache - the
+    plain cache's key would otherwise collide and could return a cached
+    product with no `csv` field for a caller that actually needs history.
+    Used only by server.py's get_product_history() (CandidateDetailPage's
+    on-demand chart fetch - CEO explicitly wants this button-triggered, not
+    automatic, so this is never called from the main scan pipeline)."""
+    key = f"{domain.upper()}:{asin}"
+    ttl = _ttl(settings.cache_ttl_product_hours)
+    if settings.cache_enabled and not force_refresh:
+        hit = cache.get("product_history", key, ttl)
+        if hit is not None:
+            value, age = hit
+            return value, _hit_info(age)
+
+    products = get_products(api_key, domain=domain, asins=[asin], stats_days=90, history=True)
+    if not products:
+        return None, _miss_info()
+    product = products[0]
+    if settings.cache_enabled:
+        cache.set("product_history", key, product)
+    return product, _miss_info()
+
+
 def is_product_cached(asin: str, domain: str) -> bool:
     """Peek whether a single-ASIN product lookup is currently a fresh cache
     hit, without triggering a live call. Mirrors is_code_lookup_cached()

@@ -281,3 +281,32 @@ export const loadKeepaFinderRun = async (runId) => {
     }
     return response.json();
 };
+
+export const loadAgentCandidateDetail = async (asin) => {
+    const params = new URLSearchParams({ asin });
+    const response = await fetch(`${API_BASE}/api/agent/candidate?${params.toString()}`);
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    const json = await response.json();
+    return json.candidate || null;
+};
+
+// DBに保存済みの履歴データを読むだけ(Keepaへは問い合わせない・トークン消費なし)。
+// ページを開くたびに呼んでよい。
+export const loadCandidateHistory = async (asin) => {
+    const params = new URLSearchParams({ asin });
+    const response = await fetch(`${API_BASE}/api/agent/candidate-history?${params.toString()}`);
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    const json = await response.json();
+    return json.history || null;
+};
+
+// 「取得」/「再取得」ボタンからのみ呼ぶこと - 実際にKeepaへ問い合わせてDBに保存する。
+export const fetchCandidateHistory = async (asin) => {
+    const response = await fetch(`${API_BASE}/api/agent/candidate-history`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ asin }),
+    });
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    return response.json();
+};

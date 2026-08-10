@@ -26,6 +26,7 @@ from .cached_ops import (
     cached_find_products,
     cached_get_categories,
     cached_get_product_with_buybox,
+    cached_get_product_with_history,
     cached_get_product_with_offers,
     cached_get_products,
     cached_get_sellers,
@@ -35,6 +36,8 @@ from .cached_ops import (
 )
 from .config import settings
 from .keepa_client import (
+    CsvType,
+    CURRENCY_DIVISOR,
     KeepaError,
     estimate_finder_cost,
     estimate_offers_product_request_cost,
@@ -689,6 +692,46 @@ def find_other_sellers_for_candidate(
     return {
         "asin": asin, "found": True, "seller_ids": seller_ids,
         "domain": domain.upper(), "_cache": cache_info,
+    }
+
+
+@mcp.tool()
+def get_product_history(asin: str, domain: str = "US", force_refresh: bool = False) -> Dict[str, Any]:
+    """Price and sales-rank time series for one ASIN, for
+    CandidateDetailPage's on-demand history chart (CEO explicitly wants this
+    button-triggered, never fetched automatically - see
+    keepa-csv-dashboard/scripts/product_history_cli.py, which is the only
+    caller). Uses get_products(..., history=True) via
+    cached_get_product_with_history() - cached separately from the plain
+    product cache since it carries the full CSV arrays.
+
+    Keepa exposes price history (new/Amazon/buy-box-with-shipping) but not a
+    literal "units sold" time series - sales rank (lower = selling better)
+    is the standard proxy used instead, returned here as `rank_history`.
+
+    Cost: per the existing token-cost notes in keepa_client.py, `history`
+    is not believed to add cost beyond the base 1 token/product (unlike
+    buybox=1's confirmed 5x) - not independently re-confirmed for `history`
+    specifically, but this tool is only ever called on a single already-
+    qualified/interesting ASIN by explicit user action, not in bulk.
+    """
+    api_key = _require_api_key()
+    product, cache_info = cached_get_product_with_history(api_key, asin, domain=domain, force_refresh=force_refresh)
+    if product is None:
+        return {"asin": asin, "found": False, "error": f"No product found for ASIN {asin} in domain {domain}."}
+
+    price_divisor = CURRENCY_DIVISOR.get(domain.upper(), 100)
+    return {
+        "asin": asin,
+        "found": True,
+        "domain": domain.upper(),
+        "price_history": {
+            "new": analysis.csv_time_series(product, CsvType.NEW, price_divisor),
+            "amazon": analysis.csv_time_series(product, CsvType.AMAZON, price_divisor),
+            "buy_box_shipping": analysis.csv_time_series(product, CsvType.BUY_BOX_SHIPPING, price_divisor),
+        },
+        "rank_history": analysis.csv_time_series(product, CsvType.SALES, 1.0),
+        "_cache": cache_info,
     }
 
 

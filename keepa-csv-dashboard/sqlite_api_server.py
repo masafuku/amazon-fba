@@ -430,6 +430,106 @@ def expand_from_seller_action(payload):
     return _run_seller_mine_cli(args)
 
 
+# CandidateDetailPageの「詳細データ取得」ボタン専用。seller_mine_cli.pyと
+# 同じサブプロセス橋渡しパターン(このAPIサーバーはstdlib-onlyでkeepa_mcpを
+# 直接importできないため)。GET /api/agent/candidate-history はこのCLIを
+# 一切呼ばず、product_historyテーブルを読むだけ(CEOの明示的な指示:
+# 「一度データ取得したものは...明示的にボタンを押さない限り、再取得しない」)。
+PRODUCT_HISTORY_CLI = Path(__file__).resolve().parent.parent / 'scripts' / 'product_history_cli.py'
+PRODUCT_HISTORY_TIMEOUT_SECONDS = 60  # 単一ASINの1回きりのfetchなのでseller_mineより短くてよい
+
+
+def load_product_history(asin: str):
+    """DBに保存済みの履歴データを返すだけ(Keepaへは一切問い合わせない)。
+    未取得なら {'asin': asin, 'history': None} を返す。"""
+    asin = (asin or '').strip().upper()
+    if not asin:
+        return {'asin': asin, 'history': None}
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            'SELECT domain, price_history_json, rank_history_json, fetched_at FROM product_history WHERE asin = ?',
+            (asin,),
+        ).fetchone()
+    if row is None:
+        return {'asin': asin, 'history': None}
+    domain, price_history_json, rank_history_json, fetched_at = row
+    return {
+        'asin': asin,
+        'history': {
+            'domain': domain,
+            'priceHistory': json.loads(price_history_json) if price_history_json else None,
+            'rankHistory': json.loads(rank_history_json) if rank_history_json else None,
+            'fetchedAt': fetched_at,
+        },
+    }
+
+
+def fetch_and_save_product_history(asin: str):
+    """「取得」/「再取得」ボタンから呼ばれる、唯一Keepaへ実際に問い合わせる
+    経路。product_history_cli.py をサブプロセス実行し、成功したらDBに
+    INSERT OR REPLACEで保存する(既存行があれば上書き = 明示的な再取得)。"""
+    asin = (asin or '').strip().upper()
+    if not asin:
+        raise ValueError('asin is required')
+    if not VENV_PYTHON.exists():
+        return {'ok': False, 'error': f'{VENV_PYTHON} が見つかりません(.venvのセットアップが必要です)'}
+
+    try:
+        result = subprocess.run(
+            [str(VENV_PYTHON), str(PRODUCT_HISTORY_CLI), 'fetch-history', '--asin', asin],
+            capture_output=True, text=True, timeout=PRODUCT_HISTORY_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return {'ok': False, 'error': f'履歴データの取得がタイムアウトしました({PRODUCT_HISTORY_TIMEOUT_SECONDS}秒)'}
+
+    stdout = (result.stdout or '').strip()
+    output = None
+    if stdout:
+        last_line = stdout.splitlines()[-1]
+        try:
+            output = json.loads(last_line)
+        except ValueError:
+            pass
+    if output is None:
+        detail = (result.stderr or stdout or '').strip()
+        return {'ok': False, 'error': detail or f'product_history_cli.py が異常終了しました(exit {result.returncode})'}
+    if not output.get('ok'):
+        return output
+    if not output.get('found'):
+        return {'ok': True, 'asin': asin, 'found': False, 'error': output.get('error')}
+
+    fetched_at = datetime.now(timezone.utc).isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            '''
+            INSERT INTO product_history (asin, domain, price_history_json, rank_history_json, fetched_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(asin) DO UPDATE SET
+                domain = excluded.domain,
+                price_history_json = excluded.price_history_json,
+                rank_history_json = excluded.rank_history_json,
+                fetched_at = excluded.fetched_at
+            ''',
+            (
+                asin, output.get('domain') or 'US',
+                json.dumps(output.get('priceHistory')), json.dumps(output.get('rankHistory')),
+                fetched_at,
+            ),
+        )
+
+    return {
+        'ok': True,
+        'asin': asin,
+        'found': True,
+        'history': {
+            'domain': output.get('domain') or 'US',
+            'priceHistory': output.get('priceHistory'),
+            'rankHistory': output.get('rankHistory'),
+            'fetchedAt': fetched_at,
+        },
+    }
+
+
 def keepa_product_request(payload):
     api_key = os.getenv('KEEPA_API_KEY', '').strip()
     if not api_key:
@@ -973,6 +1073,22 @@ def init_db() -> None:
                 backfill_rows,
             )
 
+        # CandidateDetailPageの「詳細データ取得」ボタン専用のオンデマンド
+        # キャッシュ。daily_scan.py/ops_finance.pyの自動パイプラインからは
+        # 一切触らないため(keyword_pool/seller_poolと違い)ops_finance.py
+        # 側にはミラーしない——このサーバーだけで完結する。
+        conn.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS product_history (
+                asin TEXT PRIMARY KEY,
+                domain TEXT NOT NULL,
+                price_history_json TEXT,
+                rank_history_json TEXT,
+                fetched_at TEXT NOT NULL
+            )
+            '''
+        )
+
 
 def insert_rows(rows, metadata):
     imported_at = metadata.get('importedAt') or datetime.now(timezone.utc).isoformat()
@@ -1147,6 +1263,90 @@ def load_agent_candidates(days: int = 7):
             'alreadyFavorited': bool(already_favorited),
         })
     return candidates
+
+
+def load_agent_candidate_detail(asin: str):
+    """CandidateDetailPage用: 1つのASINについて、直近のスキャンで見つかった
+    最新の評価結果を1件返す(見つからなければNone)。load_agent_candidates()
+    と同じCTE構造だが、daysの期間制限は付けない(過去に見つかった合格商品を
+    後からいつでも参照できるようにするため)。
+    """
+    asin = (asin or '').strip().upper()
+    if not asin:
+        return None
+
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            '''
+            WITH ranked AS (
+                SELECT
+                    ac.*,
+                    ROW_NUMBER() OVER (PARTITION BY ac.asin ORDER BY ac.created_at DESC) AS rn,
+                    COUNT(*) OVER (PARTITION BY ac.asin) AS times_seen
+                FROM agent_candidates ac
+                WHERE ac.asin = ?
+            )
+            SELECT
+                r.run_id, r.category, r.asin, r.title, r.image_url, r.us_url, r.jp_asin, r.jp_url,
+                r.us_price_usd, r.jp_cost_jpy, r.sales_rank, r.review_count, r.monthly_sold, r.price_volatility_90d,
+                r.weight_kg, r.weight_estimated, r.fee_estimated,
+                r.price_diff_rate_gross, r.unit_profit_usd, r.margin_pct,
+                r.qualified, r.tier, r.reason, r.data_json, r.created_at, r.times_seen,
+                r.source_type, r.seller_id, r.seller_name, r.seed_asin,
+                CASE WHEN f.asin IS NULL THEN 0 ELSE 1 END AS already_favorited
+            FROM ranked r
+            LEFT JOIN favorites f ON f.asin = r.asin
+            WHERE r.rn = 1
+            ''',
+            (asin,),
+        ).fetchone()
+
+    if row is None:
+        return None
+
+    (run_id, category, asin, title, image_url, us_url, jp_asin, jp_url,
+     us_price_usd, jp_cost_jpy, sales_rank, review_count, monthly_sold, price_volatility_90d,
+     weight_kg, weight_estimated, fee_estimated,
+     price_diff_rate_gross, unit_profit_usd, margin_pct,
+     qualified, tier, reason, data_json, created_at, times_seen,
+     source_type, seller_id, seller_name, seed_asin, already_favorited) = row
+    try:
+        data = json.loads(data_json)
+    except Exception:
+        data = {}
+    return {
+        'runId': run_id,
+        'category': category,
+        'asin': asin,
+        'title': title,
+        'imageUrl': image_url,
+        'usUrl': us_url,
+        'jpAsin': jp_asin,
+        'jpUrl': jp_url,
+        'usPriceUsd': us_price_usd,
+        'jpCostJpy': jp_cost_jpy,
+        'salesRank': sales_rank,
+        'reviewCount': review_count,
+        'monthlySold': monthly_sold,
+        'priceVolatility90d': price_volatility_90d,
+        'weightKg': weight_kg,
+        'weightEstimated': bool(weight_estimated),
+        'feeEstimated': bool(fee_estimated),
+        'priceDiffRateGross': price_diff_rate_gross,
+        'unitProfitUsd': unit_profit_usd,
+        'marginPct': margin_pct,
+        'qualified': bool(qualified),
+        'tier': tier or ('pass' if qualified else 'reject'),
+        'reason': reason,
+        'data': data,
+        'createdAt': created_at,
+        'timesSeen': times_seen,
+        'sourceType': source_type or 'keyword',
+        'sellerId': seller_id,
+        'sellerName': seller_name,
+        'seedAsin': seed_asin,
+        'alreadyFavorited': bool(already_favorited),
+    }
 
 
 def load_agent_runs(days: int = 30):
@@ -1576,6 +1776,20 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, {'ok': True, 'runs': load_agent_runs(days=days)})
             return
 
+        if parsed.path == '/api/agent/candidate':
+            asin = (params.get('asin') or [''])[0]
+            candidate = load_agent_candidate_detail(asin) if asin else None
+            self._send_json(200, {'ok': True, 'candidate': candidate})
+            return
+
+        if parsed.path == '/api/agent/candidate-history':
+            asin = (params.get('asin') or [''])[0]
+            if not asin:
+                self._send_json(400, {'error': 'asin is required'})
+                return
+            self._send_json(200, {'ok': True, **load_product_history(asin)})
+            return
+
         if parsed.path == '/api/keepa/token':
             try:
                 self._send_json(200, {'ok': True, **request_keepa_token_status()})
@@ -1724,6 +1938,21 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 payload = json.loads(raw.decode('utf-8')) if raw else {}
                 self._send_json(200, expand_from_seller_action(payload))
+            except ValueError as exc:
+                self._send_json(400, {'error': str(exc)})
+            except Exception as exc:
+                self._send_json(500, {'error': str(exc)})
+            return
+
+        if self.path == '/api/agent/candidate-history':
+            length = int(self.headers.get('Content-Length', '0'))
+            raw = self.rfile.read(length)
+            try:
+                payload = json.loads(raw.decode('utf-8')) if raw else {}
+                asin = str(payload.get('asin') or '').strip().upper()
+                if not asin:
+                    raise ValueError('asin is required')
+                self._send_json(200, fetch_and_save_product_history(asin))
             except ValueError as exc:
                 self._send_json(400, {'error': str(exc)})
             except Exception as exc:

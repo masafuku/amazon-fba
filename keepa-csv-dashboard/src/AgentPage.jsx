@@ -512,7 +512,14 @@ export default function AgentPage() {
                                         </td>
                                         <td className="px-4 py-3 text-slate-300">{candidate.category || '-'}</td>
                                         <td className="px-4 py-3 text-slate-300">{candidate.sellerName || candidate.sellerId || '-'}</td>
-                                        <td className="px-4 py-3 font-semibold text-white">{candidate.asin}</td>
+                                        <td className="px-4 py-3 font-semibold">
+                                            <a
+                                                href={`#candidate/${encodeURIComponent(candidate.asin)}`}
+                                                className="text-cyan-300 underline decoration-cyan-700 underline-offset-2 hover:text-cyan-200"
+                                            >
+                                                {candidate.asin}
+                                            </a>
+                                        </td>
                                         <td className="max-w-xl px-4 py-3 text-slate-200">{candidate.title || '-'}</td>
                                         <td className="px-4 py-3 text-slate-200">
                                             {candidate.usPriceUsd == null ? '-' : `$${Number(candidate.usPriceUsd).toFixed(2)}`}

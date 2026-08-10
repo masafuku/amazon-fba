@@ -6,6 +6,7 @@ import FavoritesPage from './FavoritesPage.jsx';
 import AgentPage from './AgentPage.jsx';
 import KeywordPoolPage from './KeywordPoolPage.jsx';
 import SellerMiningPage from './SellerMiningPage.jsx';
+import CandidateDetailPage from './CandidateDetailPage.jsx';
 import './index.css';
 
 function Root() {
@@ -22,7 +23,10 @@ function Root() {
     const isAgent = hash === '#agent';
     const isKeywords = hash === '#keywords';
     const isSellerMining = hash === '#seller-mining';
-    const isDashboard = !isFinder && !isFavorites && !isAgent && !isKeywords && !isSellerMining;
+    // #candidate/<ASIN>: このコードベース初のパラメータ付きハッシュルート。
+    // ナビゲーションバーには追加しない(AgentPage一覧からのクリック遷移のみが導線)。
+    const candidateAsin = hash.startsWith('#candidate/') ? decodeURIComponent(hash.slice('#candidate/'.length)) : null;
+    const isDashboard = !isFinder && !isFavorites && !isAgent && !isKeywords && !isSellerMining && !candidateAsin;
 
     return (
         <div className="min-h-screen bg-slate-950 text-slate-100">
@@ -65,7 +69,21 @@ function Root() {
                         お気に入り
                     </a>
                 </nav>
-                {isFinder ? <KeepaFinderPage /> : isFavorites ? <FavoritesPage /> : isAgent ? <AgentPage /> : isKeywords ? <KeywordPoolPage /> : isSellerMining ? <SellerMiningPage /> : <App />}
+                {candidateAsin ? (
+                    <CandidateDetailPage asin={candidateAsin} onBack={() => { window.location.hash = '#agent'; }} />
+                ) : isFinder ? (
+                    <KeepaFinderPage />
+                ) : isFavorites ? (
+                    <FavoritesPage />
+                ) : isAgent ? (
+                    <AgentPage />
+                ) : isKeywords ? (
+                    <KeywordPoolPage />
+                ) : isSellerMining ? (
+                    <SellerMiningPage />
+                ) : (
+                    <App />
+                )}
             </div>
         </div>
     );
