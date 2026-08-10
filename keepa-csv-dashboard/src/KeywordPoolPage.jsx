@@ -7,12 +7,16 @@ const SOURCE_LABEL = {
     manual: '手動追加',
     favorite: 'お気に入り',
     expanded: '関連キーワード拡張',
+    brainstormed: 'AIブレインストーミング',
+    trend: '北米トレンド',
 };
 
 const SOURCE_BADGE_CLASS = {
     manual: 'bg-cyan-900/40 text-cyan-200',
     favorite: 'bg-amber-900/40 text-amber-200',
     expanded: 'bg-violet-900/40 text-violet-200',
+    brainstormed: 'bg-emerald-900/40 text-emerald-200',
+    trend: 'bg-rose-900/40 text-rose-200',
 };
 
 export default function KeywordPoolPage() {
@@ -171,6 +175,8 @@ export default function KeywordPoolPage() {
                                 <option value="manual">手動追加</option>
                                 <option value="favorite">お気に入り</option>
                                 <option value="expanded">関連キーワード拡張</option>
+                                <option value="brainstormed">AIブレインストーミング</option>
+                                <option value="trend">北米トレンド</option>
                             </select>
                         </label>
                         <button
