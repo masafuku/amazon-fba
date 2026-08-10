@@ -314,7 +314,14 @@ export default function FavoritesPage() {
                                                 <span className="text-slate-500">-</span>
                                             )}
                                         </td>
-                                        <td className="px-4 py-3 font-semibold text-white">{favorite.asin}</td>
+                                        <td className="px-4 py-3 font-semibold">
+                                            <a
+                                                href={`#candidate/${encodeURIComponent(favorite.asin)}`}
+                                                className="text-cyan-300 underline decoration-cyan-700 underline-offset-2 hover:text-cyan-200"
+                                            >
+                                                {favorite.asin}
+                                            </a>
+                                        </td>
                                         <td className="max-w-xl px-4 py-3 text-slate-200">{calculated.title}</td>
                                         <td className="px-4 py-3 text-slate-300">{calculated.category}</td>
                                         <td className="px-4 py-3 text-slate-200">{calculated.usPrice === null ? '-' : `$${toNumber(calculated.usPrice).toFixed(2)}`}</td>

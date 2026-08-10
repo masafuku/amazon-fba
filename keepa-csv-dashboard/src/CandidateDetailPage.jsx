@@ -9,7 +9,7 @@ import {
     XAxis,
     YAxis,
 } from 'recharts';
-import { fetchCandidateHistory, loadAgentCandidateDetail, loadCandidateHistory, saveFavorite } from './db';
+import { fetchCandidateHistory, loadAgentCandidateDetail, loadCandidateHistory, lookupAsin, saveFavorite } from './db';
 import { formatDateTime } from './formatters';
 
 const EXCHANGE_RATE = 150;
@@ -80,6 +80,8 @@ export default function CandidateDetailPage({ asin, onBack }) {
     const [historyFetching, setHistoryFetching] = useState(false);
     const [historyError, setHistoryError] = useState('');
     const [copyStatus, setCopyStatus] = useState('');
+    const [investigating, setInvestigating] = useState(false);
+    const [investigateError, setInvestigateError] = useState('');
 
     useEffect(() => {
         let cancelled = false;
@@ -162,6 +164,27 @@ export default function CandidateDetailPage({ asin, onBack }) {
         }
     };
 
+    // CEO: 「お気に入りページからもASINによる詳細ページに飛びたいです」— お気に入りは
+    // agent_candidates に無いASIN(Finder/CSV分析経由)も多いため、未調査なら
+    // その場で調査できるようにする(AgentPage.jsxの「ASIN指定調査」入力と同じアクション)。
+    const handleInvestigate = async () => {
+        setInvestigating(true);
+        setInvestigateError('');
+        try {
+            const result = await lookupAsin(asin);
+            if (!result.ok) {
+                setInvestigateError(result.error || 'ASINの調査に失敗しました。');
+                return;
+            }
+            const detail = await loadAgentCandidateDetail(asin);
+            setCandidate(detail);
+        } catch (investigateErr) {
+            setInvestigateError(investigateErr?.message || 'ASINの調査に失敗しました。');
+        } finally {
+            setInvestigating(false);
+        }
+    };
+
     const handleCopyLink = async () => {
         try {
             await navigator.clipboard.writeText(window.location.href);
@@ -189,9 +212,24 @@ export default function CandidateDetailPage({ asin, onBack }) {
                 <button type="button" onClick={onBack} className="text-sm text-cyan-300 hover:underline">
                     ← エージェント一覧に戻る
                 </button>
-                <p className="rounded-2xl border border-rose-800 bg-rose-950/40 p-4 text-sm text-rose-200">
-                    {error || `ASIN ${asin} の候補データが見つかりませんでした。`}
-                </p>
+                {error ? (
+                    <p className="rounded-2xl border border-rose-800 bg-rose-950/40 p-4 text-sm text-rose-200">{error}</p>
+                ) : (
+                    <div className="space-y-3 rounded-2xl border border-slate-800 bg-slate-900/80 p-6 text-center">
+                        <p className="text-slate-300">
+                            ASIN <span className="font-semibold text-white">{asin}</span> はまだ調査されていません。
+                        </p>
+                        {investigateError ? <p className="text-sm text-rose-300">{investigateError}</p> : null}
+                        <button
+                            type="button"
+                            onClick={handleInvestigate}
+                            disabled={investigating}
+                            className="rounded-2xl bg-cyan-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-cyan-400 disabled:opacity-50"
+                        >
+                            {investigating ? '調査中...' : 'このASINを調査する'}
+                        </button>
+                    </div>
+                )}
             </main>
         );
     }

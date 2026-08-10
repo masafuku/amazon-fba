@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Star } from 'lucide-react';
-import { controlScanLoop, loadAgentCandidates, loadAgentRuns, loadKeepaTokenStatus, loadScanLoopStatus, saveFavorite, setScanLoopMode } from './db';
+import { controlScanLoop, loadAgentCandidates, loadAgentRuns, loadKeepaTokenStatus, loadScanLoopStatus, lookupAsin, saveFavorite, setScanLoopMode } from './db';
 import { formatDateTime, formatDuration, formatElapsedSince } from './formatters';
 
 const EXCHANGE_RATE = 150;
@@ -34,6 +34,9 @@ export default function AgentPage() {
     const [sortOrder, setSortOrder] = useState('desc');
     const [scanLoopStatus, setScanLoopStatus] = useState(null);
     const [scanLoopBusy, setScanLoopBusy] = useState(false);
+    const [lookupAsinInput, setLookupAsinInput] = useState('');
+    const [lookupBusy, setLookupBusy] = useState(false);
+    const [lookupError, setLookupError] = useState('');
 
     const refresh = async (period) => {
         setLoading(true);
@@ -97,6 +100,27 @@ export default function AgentPage() {
             setError(modeError?.message || 'モードの切り替えに失敗しました。');
         } finally {
             setScanLoopBusy(false);
+        }
+    };
+
+    // CEO: 「ASIN指定で調査する入力UIを追加できますか？」。成功したら詳細ページに遷移する
+    // (そちらで結果を表示すればよく、この一覧をここで更新する必要はない)。
+    const handleAsinLookup = async () => {
+        const asin = lookupAsinInput.trim().toUpperCase();
+        if (!asin) return;
+        setLookupBusy(true);
+        setLookupError('');
+        try {
+            const result = await lookupAsin(asin);
+            if (!result.ok) {
+                setLookupError(result.error || 'ASINの調査に失敗しました。');
+                return;
+            }
+            window.location.hash = `#candidate/${asin}`;
+        } catch (lookupErr) {
+            setLookupError(lookupErr?.message || 'ASINの調査に失敗しました。');
+        } finally {
+            setLookupBusy(false);
         }
     };
 
@@ -298,6 +322,29 @@ export default function AgentPage() {
                             ))}
                         </div>
                     </div>
+                </div>
+                <div className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-sm">
+                    <p className="text-slate-400">ASIN指定調査</p>
+                    <div className="mt-2 flex gap-2">
+                        <input
+                            type="text"
+                            value={lookupAsinInput}
+                            onChange={(event) => setLookupAsinInput(event.target.value)}
+                            onKeyDown={(event) => { if (event.key === 'Enter') handleAsinLookup(); }}
+                            placeholder="B0XXXXXXXX"
+                            className="w-32 rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-white outline-none focus:border-cyan-400"
+                        />
+                        <button
+                            type="button"
+                            onClick={handleAsinLookup}
+                            disabled={lookupBusy || !lookupAsinInput.trim()}
+                            className="rounded-lg bg-cyan-500 px-3 py-1 text-xs font-semibold text-slate-950 hover:bg-cyan-400 disabled:opacity-50"
+                        >
+                            {lookupBusy ? '調査中...' : '調査する'}
+                        </button>
+                    </div>
+                    <p className="mt-1 text-xs text-slate-500">US/JPの実データで実質利益を計算し、詳細ページに遷移します</p>
+                    {lookupError ? <p className="mt-1 text-xs text-rose-300">{lookupError}</p> : null}
                 </div>
             </header>
 

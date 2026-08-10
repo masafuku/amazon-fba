@@ -840,6 +840,65 @@ def expand_from_seller(
     }
 
 
+# _evaluate_sell_products()'s price_diff_rate lower bound: sell_jpy >= 0 and
+# cost_jpy > 0 means (sell_jpy - cost_jpy) / cost_jpy can never go below -1.
+# Passing well under that guarantees investigate_asin() never drops its one
+# ASIN into `skipped` for a "diff rate too low" reason - a manual lookup
+# should always get a real profit calc, even (especially) a negative one.
+_ALWAYS_PASS_PRICE_DIFF_MIN = -10.0
+
+
+@mcp.tool()
+def investigate_asin(asin: str, sell_domain: str = "US", usd_to_jpy: Optional[float] = None,
+                      force_refresh: bool = False, wait_for_tokens: bool = False) -> Dict[str, Any]:
+    """Manually investigate one specific ASIN the user is curious about -
+    CEO: "ASIN指定で調査する入力UIを追加できますか？". Same US-price -> JP
+    cross-check pipeline as find_arbitrage_candidates()/expand_from_seller(),
+    just skipping both the Finder keyword search and the seller-storefront
+    step entirely - there's exactly one ASIN to evaluate, given directly.
+
+    Unlike find_arbitrage_candidates()/expand_from_seller(), the price-gap
+    filter is effectively disabled (see _ALWAYS_PASS_PRICE_DIFF_MIN) so this
+    always returns a real profit calculation for the ASIN, whatever it is -
+    "this isn't profitable" is itself a useful answer to a manual lookup,
+    not something to filter away. price_volatility_max stays disabled too
+    (matches every other tool here - CEO's standing decision).
+
+    Cost: up to 2 tokens (1 US + 1 JP product fetch, less on a cache hit).
+
+    Args: see find_arbitrage_candidates() for sell_domain/usd_to_jpy/
+    force_refresh/wait_for_tokens - identical semantics.
+    """
+    api_key = _require_api_key()
+    rate = usd_to_jpy if usd_to_jpy is not None else settings.usd_to_jpy
+    budget = get_token_status(api_key)["tokens_left"] or 0
+
+    if wait_for_tokens:
+        budget = _wait_for_budget(api_key, estimate_product_request_cost(1), 0)
+
+    try:
+        sell_products, sell_cache_meta, budget = _fetch_sell_products(
+            api_key, [asin], sell_domain, wait_for_tokens, force_refresh, budget
+        )
+    except KeepaError as exc:
+        return {"asin": asin, "found": False, "error": f"Product detail fetch failed: {exc}"}
+
+    if not sell_products:
+        return {"asin": asin, "found": False, "error": f"No product found for ASIN {asin} in domain {sell_domain}."}
+
+    results, skipped, stopped_early, budget = _evaluate_sell_products(
+        api_key, sell_products, sell_cache_meta, sell_domain,
+        _ALWAYS_PASS_PRICE_DIFF_MIN, None, rate, wait_for_tokens, force_refresh, budget,
+    )
+    return {
+        "candidates": results,
+        "evaluated": len(sell_products),
+        "matched": len(results),
+        "skipped": skipped,
+        "stopped_early_for_tokens": stopped_early,
+    }
+
+
 def main() -> None:
     mcp.run()
 

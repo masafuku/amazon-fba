@@ -430,6 +430,41 @@ def expand_from_seller_action(payload):
     return _run_seller_mine_cli(args)
 
 
+# ASIN指定調査(CEO: 「ASIN指定で調査する入力UIを追加できますか？」)。
+# AgentPage.jsxの入力欄・CandidateDetailPage.jsxの「未調査」フォールバック
+# ボタンの両方から呼ばれる。seller_mine_cli.pyと同じサブプロセス橋渡し。
+ASIN_LOOKUP_CLI = Path(__file__).resolve().parent.parent / 'scripts' / 'asin_lookup_cli.py'
+ASIN_LOOKUP_TIMEOUT_SECONDS = 60  # 単一ASINの評価(最大US+JP2回のKeepa往復)なのでseller_mineより短くてよい
+
+
+def _run_asin_lookup_cli(args):
+    if not VENV_PYTHON.exists():
+        return {'ok': False, 'error': f'{VENV_PYTHON} が見つかりません(.venvのセットアップが必要です)'}
+    try:
+        result = subprocess.run(
+            [str(VENV_PYTHON), str(ASIN_LOOKUP_CLI), *args],
+            capture_output=True, text=True, timeout=ASIN_LOOKUP_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return {'ok': False, 'error': f'ASIN調査処理がタイムアウトしました({ASIN_LOOKUP_TIMEOUT_SECONDS}秒)'}
+    stdout = (result.stdout or '').strip()
+    if stdout:
+        last_line = stdout.splitlines()[-1]
+        try:
+            return json.loads(last_line)
+        except ValueError:
+            pass
+    detail = (result.stderr or stdout or '').strip()
+    return {'ok': False, 'error': detail or f'asin_lookup_cli.py が異常終了しました(exit {result.returncode})'}
+
+
+def lookup_asin_action(payload):
+    asin = str(payload.get('asin') or '').strip().upper()
+    if not asin:
+        raise ValueError('asin is required')
+    return _run_asin_lookup_cli(['lookup', '--asin', asin])
+
+
 # CandidateDetailPageの「詳細データ取得」ボタン専用。seller_mine_cli.pyと
 # 同じサブプロセス橋渡しパターン(このAPIサーバーはstdlib-onlyでkeepa_mcpを
 # 直接importできないため)。GET /api/agent/candidate-history はこのCLIを
@@ -1953,6 +1988,18 @@ class Handler(BaseHTTPRequestHandler):
                 if not asin:
                     raise ValueError('asin is required')
                 self._send_json(200, fetch_and_save_product_history(asin))
+            except ValueError as exc:
+                self._send_json(400, {'error': str(exc)})
+            except Exception as exc:
+                self._send_json(500, {'error': str(exc)})
+            return
+
+        if self.path == '/api/agent/asin-lookup':
+            length = int(self.headers.get('Content-Length', '0'))
+            raw = self.rfile.read(length)
+            try:
+                payload = json.loads(raw.decode('utf-8')) if raw else {}
+                self._send_json(200, lookup_asin_action(payload))
             except ValueError as exc:
                 self._send_json(400, {'error': str(exc)})
             except Exception as exc:
