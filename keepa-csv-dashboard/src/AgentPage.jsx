@@ -29,7 +29,7 @@ export default function AgentPage() {
     const [savingAsin, setSavingAsin] = useState('');
     const [days, setDays] = useState(7);
     const [showRejected, setShowRejected] = useState(false);
-    const [showRunHistory, setShowRunHistory] = useState(true);
+    const [showRunHistory, setShowRunHistory] = useState(false);
     const [sortKey, setSortKey] = useState('marginPct');
     const [sortOrder, setSortOrder] = useState('desc');
     const [scanLoopStatus, setScanLoopStatus] = useState(null);
@@ -367,95 +367,6 @@ export default function AgentPage() {
             ) : null}
 
             <section className="rounded-3xl border border-slate-800 bg-slate-900/80 p-6 shadow-xl shadow-slate-950/10">
-                <div className="mb-4 flex items-center justify-between gap-3">
-                    <h2 className="text-lg font-semibold text-white">実行履歴</h2>
-                    <button
-                        type="button"
-                        onClick={() => setShowRunHistory((current) => !current)}
-                        className="rounded-2xl bg-slate-800 px-4 py-2 text-sm font-semibold text-slate-200"
-                    >
-                        {showRunHistory ? '隠す' : '表示'}
-                    </button>
-                </div>
-                {showRunHistory ? (
-                    loading ? (
-                        <p className="py-6 text-center text-slate-500">読み込み中...</p>
-                    ) : runs.length === 0 ? (
-                        <p className="py-6 text-center text-slate-500">daily_scan.py はまだ実行されていません。</p>
-                    ) : (
-                        <div className="overflow-x-auto">
-                            <table className="min-w-full border-collapse text-left text-sm">
-                                <thead className="bg-slate-950/90">
-                                    <tr>
-                                        <th className="px-4 py-3 font-medium text-slate-400">実行日時</th>
-                                        <th className="px-4 py-3 font-medium text-slate-400">キーワード / カテゴリ</th>
-                                        <th className="px-4 py-3 font-medium text-slate-400">所要時間</th>
-                                        <th className="px-4 py-3 font-medium text-slate-400">評価件数</th>
-                                        <th className="px-4 py-3 font-medium text-slate-400">合格/却下</th>
-                                        <th className="px-4 py-3 font-medium text-slate-400">状態</th>
-                                        <th className="px-4 py-3 font-medium text-slate-400">通知</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {runs.map((run) => (
-                                        <tr key={run.runId} className="border-t border-slate-800 bg-slate-950/80">
-                                            <td className="px-4 py-3 text-slate-200">{formatDateTime(run.startedAt)}</td>
-                                            <td className="px-4 py-3 text-slate-300">
-                                                {run.keyword || '-'}
-                                                {run.category ? ` / ${run.category}` : ''}
-                                            </td>
-                                            <td className="px-4 py-3 text-slate-400">
-                                                {run.status === 'running' ? formatElapsedSince(run.startedAt) : formatDuration(run.durationSeconds)}
-                                            </td>
-                                            <td className="px-4 py-3 text-slate-200">
-                                                {run.status === 'running' ? '-' : `${run.evaluated ?? '-'}件中 粗選別${run.mcpMatched ?? '-'}件`}
-                                            </td>
-                                            <td className="px-4 py-3 text-slate-200">
-                                                <span className="text-emerald-300">{run.qualifiedCount ?? '-'}</span>
-                                                {' / '}
-                                                <span className="text-slate-400">{run.rejectedCount ?? '-'}</span>
-                                            </td>
-                                            <td className="px-4 py-3">
-                                                {run.status === 'running' ? (
-                                                    <span className="inline-flex items-center gap-1 rounded-lg bg-cyan-900/50 px-2 py-1 text-xs font-semibold text-cyan-200">
-                                                        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-cyan-300" aria-hidden="true" />
-                                                        実行中
-                                                    </span>
-                                                ) : run.error ? (
-                                                    <span className="rounded-lg bg-rose-900/60 px-2 py-1 text-xs font-semibold text-rose-200" title={run.error}>
-                                                        エラー
-                                                    </span>
-                                                ) : run.stoppedEarlyForTokens ? (
-                                                    <span className="rounded-lg bg-amber-900/40 px-2 py-1 text-xs font-semibold text-amber-200">
-                                                        途中で打ち切り
-                                                    </span>
-                                                ) : (
-                                                    <span className="rounded-lg bg-emerald-900/60 px-2 py-1 text-xs font-semibold text-emerald-200">
-                                                        完了
-                                                    </span>
-                                                )}
-                                            </td>
-                                            <td className="px-4 py-3">
-                                                {run.notifyStatus === 'sent' ? (
-                                                    <span className="text-emerald-300">送信済み</span>
-                                                ) : run.notifyStatus === 'failed' ? (
-                                                    <span className="text-rose-300" title={run.notifyError || ''}>失敗</span>
-                                                ) : run.notifyStatus === 'skipped' ? (
-                                                    <span className="text-slate-500">未設定でスキップ</span>
-                                                ) : (
-                                                    <span className="text-slate-600">-</span>
-                                                )}
-                                            </td>
-                                        </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                        </div>
-                    )
-                ) : null}
-            </section>
-
-            <section className="rounded-3xl border border-slate-800 bg-slate-900/80 p-6 shadow-xl shadow-slate-950/10">
                 <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                     <div className="text-slate-300">
                         合格候補 <span className="font-semibold text-emerald-300">{qualifiedCount}</span>件 / 表示中 {visibleCandidates.length}件
@@ -681,6 +592,95 @@ export default function AgentPage() {
                         </table>
                     </div>
                 )}
+            </section>
+
+            <section className="rounded-3xl border border-slate-800 bg-slate-900/80 p-6 shadow-xl shadow-slate-950/10">
+                <div className="mb-4 flex items-center justify-between gap-3">
+                    <h2 className="text-lg font-semibold text-white">実行履歴</h2>
+                    <button
+                        type="button"
+                        onClick={() => setShowRunHistory((current) => !current)}
+                        className="rounded-2xl bg-slate-800 px-4 py-2 text-sm font-semibold text-slate-200"
+                    >
+                        {showRunHistory ? '隠す' : '表示'}
+                    </button>
+                </div>
+                {showRunHistory ? (
+                    loading ? (
+                        <p className="py-6 text-center text-slate-500">読み込み中...</p>
+                    ) : runs.length === 0 ? (
+                        <p className="py-6 text-center text-slate-500">daily_scan.py はまだ実行されていません。</p>
+                    ) : (
+                        <div className="overflow-x-auto">
+                            <table className="min-w-full border-collapse text-left text-sm">
+                                <thead className="bg-slate-950/90">
+                                    <tr>
+                                        <th className="px-4 py-3 font-medium text-slate-400">実行日時</th>
+                                        <th className="px-4 py-3 font-medium text-slate-400">キーワード / カテゴリ</th>
+                                        <th className="px-4 py-3 font-medium text-slate-400">所要時間</th>
+                                        <th className="px-4 py-3 font-medium text-slate-400">評価件数</th>
+                                        <th className="px-4 py-3 font-medium text-slate-400">合格/却下</th>
+                                        <th className="px-4 py-3 font-medium text-slate-400">状態</th>
+                                        <th className="px-4 py-3 font-medium text-slate-400">通知</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {runs.map((run) => (
+                                        <tr key={run.runId} className="border-t border-slate-800 bg-slate-950/80">
+                                            <td className="px-4 py-3 text-slate-200">{formatDateTime(run.startedAt)}</td>
+                                            <td className="px-4 py-3 text-slate-300">
+                                                {run.keyword || '-'}
+                                                {run.category ? ` / ${run.category}` : ''}
+                                            </td>
+                                            <td className="px-4 py-3 text-slate-400">
+                                                {run.status === 'running' ? formatElapsedSince(run.startedAt) : formatDuration(run.durationSeconds)}
+                                            </td>
+                                            <td className="px-4 py-3 text-slate-200">
+                                                {run.status === 'running' ? '-' : `${run.evaluated ?? '-'}件中 粗選別${run.mcpMatched ?? '-'}件`}
+                                            </td>
+                                            <td className="px-4 py-3 text-slate-200">
+                                                <span className="text-emerald-300">{run.qualifiedCount ?? '-'}</span>
+                                                {' / '}
+                                                <span className="text-slate-400">{run.rejectedCount ?? '-'}</span>
+                                            </td>
+                                            <td className="px-4 py-3">
+                                                {run.status === 'running' ? (
+                                                    <span className="inline-flex items-center gap-1 rounded-lg bg-cyan-900/50 px-2 py-1 text-xs font-semibold text-cyan-200">
+                                                        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-cyan-300" aria-hidden="true" />
+                                                        実行中
+                                                    </span>
+                                                ) : run.error ? (
+                                                    <span className="rounded-lg bg-rose-900/60 px-2 py-1 text-xs font-semibold text-rose-200" title={run.error}>
+                                                        エラー
+                                                    </span>
+                                                ) : run.stoppedEarlyForTokens ? (
+                                                    <span className="rounded-lg bg-amber-900/40 px-2 py-1 text-xs font-semibold text-amber-200">
+                                                        途中で打ち切り
+                                                    </span>
+                                                ) : (
+                                                    <span className="rounded-lg bg-emerald-900/60 px-2 py-1 text-xs font-semibold text-emerald-200">
+                                                        完了
+                                                    </span>
+                                                )}
+                                            </td>
+                                            <td className="px-4 py-3">
+                                                {run.notifyStatus === 'sent' ? (
+                                                    <span className="text-emerald-300">送信済み</span>
+                                                ) : run.notifyStatus === 'failed' ? (
+                                                    <span className="text-rose-300" title={run.notifyError || ''}>失敗</span>
+                                                ) : run.notifyStatus === 'skipped' ? (
+                                                    <span className="text-slate-500">未設定でスキップ</span>
+                                                ) : (
+                                                    <span className="text-slate-600">-</span>
+                                                )}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    )
+                ) : null}
             </section>
         </main>
     );

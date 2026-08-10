@@ -186,11 +186,36 @@ export default function CandidateDetailPage({ asin, onBack }) {
     };
 
     const handleCopyLink = async () => {
+        const url = window.location.href;
         try {
-            await navigator.clipboard.writeText(window.location.href);
+            if (!navigator.clipboard?.writeText) {
+                // navigator.clipboard は https/localhost 限定(セキュアコンテキスト)。
+                // このダッシュボードはAWS上でプレーンHTTP配信のため本番では使えず、
+                // ここに来ると必ず失敗していた(CEO報告: 「コピーに失敗しました」)。
+                throw new Error('clipboard API unavailable');
+            }
+            await navigator.clipboard.writeText(url);
             setCopyStatus('コピーしました');
         } catch {
-            setCopyStatus('コピーに失敗しました');
+            // document.execCommand('copy') は非推奨だが非セキュアコンテキストでも
+            // 動作する唯一の実用的なフォールバック。
+            const textarea = document.createElement('textarea');
+            textarea.value = url;
+            textarea.style.position = 'fixed';
+            textarea.style.opacity = '0';
+            document.body.appendChild(textarea);
+            textarea.focus();
+            textarea.select();
+            try {
+                // execCommand は例外を投げずにfalseを返すだけで失敗することがある
+                // (実際に確認済み)ため、戻り値も見て正確に成否を判定する。
+                const succeeded = document.execCommand('copy');
+                setCopyStatus(succeeded ? 'コピーしました' : 'コピーに失敗しました');
+            } catch {
+                setCopyStatus('コピーに失敗しました');
+            } finally {
+                document.body.removeChild(textarea);
+            }
         } finally {
             setTimeout(() => setCopyStatus(''), 2000);
         }

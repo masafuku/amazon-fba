@@ -39,7 +39,7 @@ export default function SellerMiningPage() {
     // 実行履歴セクションの絞り込み期間(セラー別統計は常に全期間集計、
     // こちらは直近の動きを見るためのウィンドウ)。
     const [days, setDays] = useState(7);
-    const [showRunHistory, setShowRunHistory] = useState(true);
+    const [showRunHistory, setShowRunHistory] = useState(false);
 
     // 起点A: ASINからセラーを発見
     const [discoverAsin, setDiscoverAsin] = useState('');
