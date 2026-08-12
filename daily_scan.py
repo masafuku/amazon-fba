@@ -101,6 +101,7 @@ from ops_finance import (
     record_keyword_used,
     record_seller_mined,
     seed_keyword_pool_from_favorites,
+    set_seller_status,
 )
 
 # ---------------------------------------------------------------------------
@@ -147,6 +148,17 @@ SELLER_EXPANSION_MAX_CANDIDATES = 10
 # 1件の合格候補から芋づる式に調べるセラー数の上限(「Other sellers on
 # Amazon」全員を追うとコストが膨らむため)。
 MAX_SELLERS_PER_CANDIDATE = 3
+
+
+# 同じセラーをこの回数以上マイニング済みなら「深掘り」する(通常の
+# SELLER_EXPANSION_MAX_CANDIDATESではなくSELLER_DEEP_REMINE_MAX_CANDIDATESを
+# 使う)。Keepaのセラー出品リスト(asinList)は「新しい順」で短期間ではほぼ
+# 変化しないため、同じセラーを浅く繰り返し再訪問しても新しい商品はほぼ
+# 見つからない(実測: AWS本番で328回のセラーマイニングから59件のユニーク
+# 商品しか発見できなかった)。閾値回数を超えたら評価件数を広げ、11件目
+# 以降(未評価の新しい範囲)まで踏み込む。
+SELLER_DEEP_REMINE_THRESHOLD = 3
+SELLER_DEEP_REMINE_MAX_CANDIDATES = 30
 
 
 def discover_and_register_sellers(
@@ -199,10 +211,22 @@ def _expand_from_one_seller(
         )
     except KeepaError as exc:
         print(f"[WARN] セラー出品の評価に失敗しました: {exc}")
+        # times_mined を記録しないと pick_next_seller() のLRU順序でこのセラーが
+        # 永久に最優先で選ばれ続け、他のセラーが一切マイニングされなくなる
+        # (実際にAWS本番で発生した無限ループ - 壊れたセラーID1件が深夜枠を
+        # 丸ごと占有し続けていた)。一時的な失敗(トークン枯渇など)なので
+        # pausedにはせず、試行の記録だけ残す。
+        record_seller_mined(seller_id, qualified_count=0)
         return None
 
     if seller_result.get("error"):
         print(f"[WARN] セラー出品の評価に失敗しました: {seller_result['error']}")
+        record_seller_mined(seller_id, qualified_count=0)
+        if seller_result["error"].startswith("No seller found for id"):
+            # Keepa側にこのセラーIDが存在しないことが確定しているケース。
+            # リトライしても直らないため、次回以降のLRU巡回から完全に除外する。
+            print(f"[WARN] セラー {seller_id} はKeepa側に存在しないため、プールから除外(paused)します。")
+            set_seller_status(seller_id, "paused")
         return None
 
     seller_name = seller_result.get("seller_name") or seller_id
@@ -231,20 +255,57 @@ def _expand_from_one_seller(
     return seller_evaluation
 
 
-def expand_from_top_seller(top_qualified: dict, source_label: str, keyword: str, wait_for_tokens: bool) -> None:
-    """合格候補のうち実質利益率が最も高い1件について、そのASINを出品している
-    セラー(buyboxの1人だけでなく、Amazonの「他のセラー」欄に相当する全員、
-    最大MAX_SELLERS_PER_CANDIDATE件)それぞれについて、他の出品も同じ
-    パイプラインで評価する(セラーマイニング、CEOのアイデア)。
+def _best_discovery_candidates(evaluation: dict, limit: int = 1) -> list[dict]:
+    """セラー発見の起点候補を選ぶ。合格(pass、既にmargin_pct降順ソート済み)を
+    優先し、足りなければ要検討(consider、黒字だが実質利益率20%未満)を
+    margin_pct降順で補う。CEO: 「要検討候補もセラー発見の対象に含めてほしい」
+    - 合格限定だとセラープールの成長機会(keywordソースだけでも要検討36件)を
+    捨てていたため。evaluate_mcp_candidates()の戻り値をそのまま渡せる
+    ({"qualified": [...], "rejected": [...]}、tierはrejected内の各要素が
+    個別に持つ)。
+    """
+    qualified = evaluation.get("qualified") or []
+    picks = list(qualified[:limit])
+    if len(picks) < limit:
+        considering = sorted(
+            (e for e in evaluation.get("rejected") or [] if e.get("tier") == "consider"),
+            key=lambda e: e.get("margin_pct") or 0, reverse=True,
+        )
+        picks.extend(considering[: limit - len(picks)])
+    return picks
+
+
+def expand_from_top_seller(evaluation: dict, source_label: str, keyword: str, wait_for_tokens: bool) -> None:
+    """実質利益率が最も高い候補(合格優先、無ければ要検討で代替)について、
+    そのASINを出品しているセラー(buyboxの1人だけでなく、Amazonの「他の
+    セラー」欄に相当する全員、最大MAX_SELLERS_PER_CANDIDATE件)それぞれに
+    ついて、他の出品も同じパイプラインで評価する(セラーマイニング、
+    CEOのアイデア)。
+    追加でもう1件、次点の要検討候補があれば、そちらはセラーの発見・登録のみ
+    行う(即時マイニングはしない - 広さ優先、次回以降のLRUサイクルに委ねる。
+    CEO: 「要検討候補もセラー発見の対象に」)。
     keyword: このセラーを見つけるきっかけになった検索キーワード(source_labelは
     カテゴリ付きの表示用ラベルなので別に受け取る) - seller_pool.seed_keywordに
     記録し、ダッシュボードの「セラー別統計」でキーワード列として表示する。
     """
-    asin = top_qualified["asin"]
-    print(f"[INFO] セラーマイニング: 合格候補 {asin} の出品セラーを調べています...")
-    seller_ids = discover_and_register_sellers(asin, source="keyword_expansion", seed_keyword=keyword)
-    for seller_id in seller_ids:
-        _expand_from_one_seller(seller_id, source_label, wait_for_tokens, seed_asin=asin)
+    top_picks = _best_discovery_candidates(evaluation, limit=1)
+    if top_picks:
+        top = top_picks[0]
+        asin = top["asin"]
+        print(f"[INFO] セラーマイニング: 候補 {asin}(tier={top.get('tier')})の出品セラーを調べています...")
+        seller_ids = discover_and_register_sellers(asin, source="keyword_expansion", seed_keyword=keyword)
+        for seller_id in seller_ids:
+            _expand_from_one_seller(seller_id, source_label, wait_for_tokens, seed_asin=asin)
+
+    considering = sorted(
+        (e for e in evaluation.get("rejected") or [] if e.get("tier") == "consider"),
+        key=lambda e: e.get("margin_pct") or 0, reverse=True,
+    )
+    extra = [c for c in considering if not top_picks or c["asin"] != top_picks[0]["asin"]][:1]
+    for candidate in extra:
+        asin = candidate["asin"]
+        print(f"[INFO] セラー発見(要検討候補 {asin}, 実質利益率{candidate.get('margin_pct', 0):.1%})を登録のみ行います...")
+        discover_and_register_sellers(asin, source="keyword_expansion", seed_keyword=keyword)
 
 
 def run_seller_mining_cycle(max_candidates: int, wait_for_tokens: bool) -> bool:
@@ -253,25 +314,35 @@ def run_seller_mining_cycle(max_candidates: int, wait_for_tokens: bool) -> bool:
     呼ばれる想定。プールが空なら何もせずFalseを返す(トークン消費なし)。
     """
     init_ops_tables()
-    seller_id = pick_next_seller()
+    seller_id, times_mined = pick_next_seller()
     if not seller_id:
         print("[INFO] セラープールが空のため、定期セラーマイニングをスキップしました。")
         return False
 
-    print(f"[INFO] セラープールから選択: {seller_id}")
+    if times_mined >= SELLER_DEEP_REMINE_THRESHOLD:
+        # 既にこのセラーを何度も浅く再訪問済み(KeepaのasinListは新しい順で
+        # 短期間ではほぼ変化しないため、毎回同じ上位N件を再評価するだけに
+        # なっていた)。評価件数を広げて未評価の範囲まで踏み込む。
+        depth = SELLER_DEEP_REMINE_MAX_CANDIDATES
+        print(f"[INFO] セラープールから選択: {seller_id}(調査済み{times_mined}回 - "
+              f"深掘りのため評価件数を{depth}件に拡大)")
+    else:
+        depth = max_candidates
+        print(f"[INFO] セラープールから選択: {seller_id}")
+
     seller_evaluation = _expand_from_one_seller(
         seller_id, "定期セラーマイニング", wait_for_tokens,
-        seed_asin=None, max_candidates=max_candidates,
+        seed_asin=None, max_candidates=depth,
     )
 
-    if seller_evaluation and seller_evaluation["qualified"]:
+    if seller_evaluation:
         # 広さ優先(CEO: 「多くのものを輸出してる優秀なセラー候補を探したいので
-        # 広さ優先の方が良い」)。このセラーの合格候補が見つかったら、その商品を
-        # 売っている他のセラーも新たに発見してプールに登録する(即座にはマイニング
-        # しない - トークンを抑えつつプールを広げ、次回以降のLRUサイクルで自然に
-        # 巡回されるようにする)。
-        top = seller_evaluation["qualified"][0]
-        discover_and_register_sellers(top["asin"], source="seller_mining_chain")
+        # 広さ優先の方が良い」)。このセラーの合格候補(無ければ要検討候補)が
+        # 見つかったら、その商品を売っている他のセラーも新たに発見してプールに
+        # 登録する(即座にはマイニングしない - トークンを抑えつつプールを広げ、
+        # 次回以降のLRUサイクルで自然に巡回されるようにする)。
+        for top in _best_discovery_candidates(seller_evaluation, limit=1):
+            discover_and_register_sellers(top["asin"], source="seller_mining_chain")
 
     return seller_evaluation is not None
 
@@ -379,12 +450,12 @@ def run_daily_scan(
 
     # Keyword/Categoryエージェント: セラーマイニング。CEOのアイデア -
     # 「よく売れている日本のものを売っているセラーは、他にも同じような
-    # ものを売っていることが多い」。合格候補が出た回だけ(トークンを
-    # 抑えるため、実質利益率が最も高い1件の候補のみ対象)、そのASINの
-    # 出品セラー(最大MAX_SELLERS_PER_CANDIDATE件)を特定して、それぞれの
-    # 出品の残りも同じパイプラインで評価する。
-    if evaluation["qualified"]:
-        expand_from_top_seller(evaluation["qualified"][0], label, keyword, wait_for_tokens)
+    # ものを売っていることが多い」。合格候補があればそれを、無ければ
+    # 要検討候補で代替する(_best_discovery_candidates)。そのASINの出品
+    # セラー(最大MAX_SELLERS_PER_CANDIDATE件)を特定して、それぞれの
+    # 出品の残りも同じパイプラインで評価する。関数内部で「合格も要検討も
+    # 無ければ何もしない」を自然にハンドルするため、呼び出し条件は不要。
+    expand_from_top_seller(evaluation, label, keyword, wait_for_tokens)
 
 
 def cmd_seed_from_favorites() -> None:

@@ -1310,22 +1310,24 @@ def add_sellers(seller_ids, source: str, seed_asin: str = None, seed_keyword: st
         return cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
 
 
-def pick_next_seller() -> str:
+def pick_next_seller() -> tuple[str, int] | tuple[None, None]:
     """次にマイニングするセラーを選ぶ。一度も調べていないものを優先し、
     次に最後に調べてから時間が経っているものを優先する。
-    プールが空の場合は None を返す(呼び出し側でスキップする)。
+    戻り値: (seller_id, times_mined)。プールが空の場合は (None, None)
+    (呼び出し側でスキップする)。times_mined は呼び出し側が「同じセラーを
+    何度も調べ済みなら深く掘る」判断(deep re-mine)に使う。
     """
     init_ops_tables()
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
             '''
-            SELECT seller_id FROM seller_pool
+            SELECT seller_id, times_mined FROM seller_pool
             WHERE status = 'active'
             ORDER BY times_mined ASC, COALESCE(last_mined_at, '') ASC
             LIMIT 1
             '''
         ).fetchone()
-    return row[0] if row else None
+    return (row[0], row[1]) if row else (None, None)
 
 
 def record_seller_mined(seller_id: str, qualified_count: int = 0, seller_name: str = None) -> None:
