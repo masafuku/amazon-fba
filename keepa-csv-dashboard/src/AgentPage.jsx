@@ -194,7 +194,8 @@ export default function AgentPage() {
             const grossMarginPct = grossProfitUsd != null && us ? grossProfitUsd / us : null;
             const feesUsd = amazonFee != null && fbaFee != null ? amazonFee + fbaFee : null;
             const shippingCostUsd = item.data?.shipping_cost_usd ?? null;
-            return { ...item, grossProfitUsd, grossMarginPct, feesUsd, shippingCostUsd };
+            const importDutyUsd = item.data?.import_duty_usd ?? null;
+            return { ...item, grossProfitUsd, grossMarginPct, feesUsd, shippingCostUsd, importDutyUsd };
         });
         return [...base].sort((left, right) => {
             const leftValue = sortKey === 'createdAt' ? Date.parse(left.createdAt) || 0 : left[sortKey];
@@ -424,6 +425,7 @@ export default function AgentPage() {
                                     {renderSortHeader('表面利益率', 'grossMarginPct')}
                                     {renderSortHeader('手数料(Amazon+FBA)', 'feesUsd')}
                                     {renderSortHeader('輸送費', 'shippingCostUsd')}
+                                    {renderSortHeader('関税(概算)', 'importDutyUsd')}
                                     {renderSortHeader('実質利益', 'unitProfitUsd')}
                                     {renderSortHeader('実質利益率', 'marginPct')}
                                     {renderSortHeader('価格変動(90日)', 'priceVolatility90d')}
@@ -516,6 +518,9 @@ export default function AgentPage() {
                                         </td>
                                         <td className="px-4 py-3 text-slate-200">
                                             {candidate.shippingCostUsd == null ? '-' : `¥${Math.round(Number(candidate.shippingCostUsd) * EXCHANGE_RATE).toLocaleString()}`}
+                                        </td>
+                                        <td className="px-4 py-3 text-slate-200" title="米国関税の概算(JP原価×12.5%、商品カテゴリにより実際の税率は変動)">
+                                            {candidate.importDutyUsd == null ? '-' : `¥${Math.round(Number(candidate.importDutyUsd) * EXCHANGE_RATE).toLocaleString()}`}
                                         </td>
                                         <td className={`px-4 py-3 font-semibold ${candidate.unitProfitUsd >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                                             {candidate.unitProfitUsd == null ? '-' : `¥${Math.round(Number(candidate.unitProfitUsd) * EXCHANGE_RATE).toLocaleString()}`}

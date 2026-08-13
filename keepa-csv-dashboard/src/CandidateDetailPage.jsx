@@ -324,6 +324,7 @@ export default function CandidateDetailPage({ asin, onBack }) {
                     <StatCard label="Amazon手数料" value={data.amazon_fee_usd != null ? `${usd(data.amazon_fee_usd)} (${usdAsJpy(data.amazon_fee_usd)})` : '-'} />
                     <StatCard label="FBA手数料" value={data.fba_fee_usd != null ? `${usd(data.fba_fee_usd)} (${usdAsJpy(data.fba_fee_usd)})` : '-'} />
                     <StatCard label="輸送費" value={usdAsJpy(data.shipping_cost_usd)} />
+                    <StatCard label="関税(概算)" value={usdAsJpy(data.import_duty_usd)} />
                     <StatCard
                         label="実質利益"
                         value={usdAsJpy(candidate.unitProfitUsd)}

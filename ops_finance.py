@@ -291,6 +291,67 @@ def init_ops_tables():
 # 1. 損益分岐点 / 利益率計算
 # ---------------------------------------------------------------------------
 
+# 国際送料モデル: 日本郵便EMS公式料金表(米国向け・第4地帯)を「重量に対して
+# コストがどう増えるか」の形として使い、実際にフォワーダーから受け取った見積もり
+# (グローバルブランド社、2026-08-04、容積重量7.20kgでFedEx International
+# Economy実費 運賃¥8,615+燃油サーチャージ¥3,919+発送代行手数料¥1,500=
+# 合計¥13,034)に合わせてスケールし直したもの。実際に使う予定のフォワーダー
+# 経由のFedExの方がEMSより同じ重量帯で安いため(EMSの7〜8kg帯は¥19,900〜
+# 22,300)、EMS表の重量別カーブの「形」だけ借りて金額は実見積もりに合わせて
+# 割り引く。CEO宛見積もりメールより、米国側の関税も別途概算12.5%と判明した
+# ため、DEFAULT_IMPORT_DUTY_RATEとして新規に計上する。
+#
+# 出典: 日本郵便 EMS料金表(第4地帯・米国)
+#   https://www.post.japanpost.jp/int/charge/list/ems_all.html
+#
+# (weight_kgの上限, EMS運賃 円) のタプル一覧。「Xkgまで」の生データ
+# (スケール前、_SHIPPING_COST_SCALE_FACTORで割り引く)。
+_EMS_US_RATE_TABLE_JPY: list[tuple[float, float]] = [
+    (0.5, 3900), (0.6, 4180), (0.7, 4460), (0.8, 4740), (0.9, 5020),
+    (1.0, 5300), (1.25, 5990), (1.5, 6600), (1.75, 7290), (2.0, 7900),
+    (2.5, 9100), (3.0, 10300), (3.5, 11500), (4.0, 12700), (4.5, 13900),
+    (5.0, 15100), (5.5, 16300), (6.0, 17500), (7.0, 19900), (8.0, 22300),
+    (9.0, 24700), (10.0, 27100), (11.0, 29500), (12.0, 31900), (13.0, 34300),
+    (14.0, 36700), (15.0, 39100), (16.0, 41500), (17.0, 43900), (18.0, 46300),
+    (19.0, 48700), (20.0, 51100), (21.0, 53500), (22.0, 55900), (23.0, 58300),
+    (24.0, 60700), (25.0, 63100), (26.0, 65500), (27.0, 67900), (28.0, 70300),
+    (29.0, 72700), (30.0, 75100),
+]
+
+# 実見積もり(容積重量7.20kg -> ¥13,034)によるキャリブレーション。
+# EMS表を7.20kgで線形補間すると¥20,380相当になるため、その比率で全体をスケールする。
+_FORWARDER_QUOTE_WEIGHT_KG = 7.20
+_FORWARDER_QUOTE_COST_JPY = 13_034.0
+_EMS_RATE_AT_QUOTE_WEIGHT_JPY = 19_900 + (_FORWARDER_QUOTE_WEIGHT_KG - 7.0) / (8.0 - 7.0) * (22_300 - 19_900)
+_SHIPPING_COST_SCALE_FACTOR = _FORWARDER_QUOTE_COST_JPY / _EMS_RATE_AT_QUOTE_WEIGHT_JPY
+
+# 米国の一般的な関税率(グローバルブランド社見積もりメールより:「基本的には
+# 通常関税（12.5％）が定義」)。商品のHSコード次第で実際の税率は変わりうるため
+# あくまで概算値。
+DEFAULT_IMPORT_DUTY_RATE = 0.125
+
+
+def _shipping_cost_jpy_for_weight(total_weight_kg: float) -> float:
+    """1回の発送の合計重量(kg)から、フォワーダー実勢に合わせてスケールした
+    国際送料(円)を返す。EMS公式表の重量別カーブを使い、表の点と点の間は
+    線形補間する。表の範囲外(30kg超)は最後の区間の傾きで延長する。"""
+    table = _EMS_US_RATE_TABLE_JPY
+    if total_weight_kg <= table[0][0]:
+        raw_jpy = table[0][1]
+    elif total_weight_kg >= table[-1][0]:
+        (w1, c1), (w2, c2) = table[-2], table[-1]
+        slope = (c2 - c1) / (w2 - w1)
+        raw_jpy = c2 + slope * (total_weight_kg - w2)
+    else:
+        raw_jpy = table[-1][1]  # ループが必ず上書きするが、型チェッカー向けの初期値
+        for (w1, c1), (w2, c2) in zip(table, table[1:]):
+            if w1 <= total_weight_kg <= w2:
+                ratio = (total_weight_kg - w1) / (w2 - w1)
+                raw_jpy = c1 + ratio * (c2 - c1)
+                break
+    return raw_jpy * _SHIPPING_COST_SCALE_FACTOR
+
+
 def calc_unit_profit(
     us_price_usd: float,
     jp_cost_jpy: float,
@@ -298,31 +359,38 @@ def calc_unit_profit(
     exchange_rate: float = 150.0,      # 円/ドル
     amazon_fee_rate: float = 0.15,     # Amazon販売手数料(カテゴリにより8〜15%)
     fba_fee_usd: float = 3.5,          # FBAピック&パック手数料(サイズ依存、要調整)
-    shipment_fixed_cost_jpy: float = 10_000.0,  # 1回の国際発送にかかる想定固定費用
     shipment_budget_jpy: float = 50_000.0,      # 1回にまとめて仕入れる想定総額
+    import_duty_rate: float = DEFAULT_IMPORT_DUTY_RATE,  # 米国関税(概算、商品カテゴリにより変動)
 ) -> dict:
     """1個あたりの利益・利益率を計算する。
 
     候補が出た瞬間にこの関数を通し、利益率が閾値未満なら自動除外できる。
 
     国際送料の想定(CEO: 「国際便なので一万円くらいはしそうです。ただし何個纏めて
-    仕入れるかで損益分岐点が変わらそうです」): 重量ベースの単価ではなく、「1回の発送に
-    かかる固定費用(shipment_fixed_cost_jpy、既定¥10,000)を、まとめて仕入れる個数で
-    割る」方式。個数そのものを直接指定するのではなく、「総額が概ねshipment_budget_jpy
-    (既定¥50,000)程度になる」ように、その商品のJP原価から逆算する——安い商品ほど多く
-    まとめ買いできる(=送料の按分先が増えて1個あたりの送料は下がる)、高い商品は逆に
-    按分先が減って1個あたりの送料が上がる、という関係になる。JP原価が予算を超える場合は
-    最低1個として扱う(その1個で発送費用を丸ごと負担する形)。
-    weight_kgはこの計算では使わないが、記録用(agent_candidates.weight_kg列)として
-    引数・戻り値には残している。
+    仕入れるかで損益分岐点が変わらそうです」→ 実際のフォワーダー見積もりを受けて
+    重量連動モデルに改訂): 「1回にまとめて仕入れる個数」はこれまで通りJP原価から
+    逆算する(総額が概ねshipment_budget_jpy(既定¥50,000)になるように、安い商品
+    ほど多くまとめ買いできる)。そのうえで、1回の発送の合計重量(=商品1個の重量×
+    まとめ買い個数)を_shipping_cost_jpy_for_weight()に渡し、実際のフォワーダー
+    見積もりに合わせてスケールした金額を使う。JP原価が予算を超える場合は最低1個
+    として扱う(その1個の重量分の送料を丸ごと負担する形)。
+
+    関税(CEO宛フォワーダー見積もりメール: 「基本的には通常関税（12.5％）が
+    定義」)も新たに費用として計上する。JP原価(輸入申告額の代理指標)に対して
+    import_duty_rate(既定12.5%)を掛けた額を差し引く——実際の税率は商品の
+    HSコード次第で変わりうるため、あくまで概算。
     """
     jp_cost_usd = jp_cost_jpy / exchange_rate
     amazon_fee_usd = us_price_usd * amazon_fee_rate
     units_per_shipment = max(1, int(shipment_budget_jpy // jp_cost_jpy)) if jp_cost_jpy > 0 else 1
-    shipping_cost_usd = (shipment_fixed_cost_jpy / units_per_shipment) / exchange_rate
+    total_shipment_weight_kg = weight_kg * units_per_shipment
+    shipping_cost_usd = (
+        _shipping_cost_jpy_for_weight(total_shipment_weight_kg) / units_per_shipment
+    ) / exchange_rate
+    import_duty_usd = jp_cost_usd * import_duty_rate
 
     unit_profit_usd = (
-        us_price_usd - amazon_fee_usd - fba_fee_usd - shipping_cost_usd - jp_cost_usd
+        us_price_usd - amazon_fee_usd - fba_fee_usd - shipping_cost_usd - import_duty_usd - jp_cost_usd
     )
     margin_pct = unit_profit_usd / us_price_usd if us_price_usd else 0.0
 
@@ -332,6 +400,7 @@ def calc_unit_profit(
         'amazon_fee_usd': round(amazon_fee_usd, 2),
         'fba_fee_usd': round(fba_fee_usd, 2),
         'shipping_cost_usd': round(shipping_cost_usd, 2),
+        'import_duty_usd': round(import_duty_usd, 2),
         'unit_profit_usd': round(unit_profit_usd, 2),
         'margin_pct': round(margin_pct, 4),
     }
