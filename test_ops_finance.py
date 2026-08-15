@@ -85,6 +85,32 @@ class TestCalcUnitProfitImportDuty(unittest.TestCase):
         self.assertLess(with_duty['unit_profit_usd'], without_duty['unit_profit_usd'])
 
 
+class TestCalcUnitProfitRoi(unittest.TestCase):
+    """ROI(投下資本利益率、CEO: 「今回のケースは、投下資本に対して利益の割合も
+    重要ですよね」)- US価格に対する実質利益率(margin_pct)とは分母が異なる、
+    JP原価(投下資本)に対する実質利益率。
+    """
+
+    def test_roi_pct_uses_jp_cost_as_denominator(self):
+        result = calc_unit_profit(us_price_usd=100.0, jp_cost_jpy=3000.0, weight_kg=0.2)
+        jp_cost_usd = 3000.0 / 150.0
+        # result['unit_profit_usd']は既に丸め済みのため、比較は小数点以下3桁までとする
+        # (calc_unit_profit内部ではroi_pctを丸め前のunit_profit_usdから計算しているため)
+        self.assertAlmostEqual(
+            result['roi_pct'], round(result['unit_profit_usd'] / jp_cost_usd, 4), places=3,
+        )
+
+    def test_roi_diverges_from_margin_for_high_price_low_cost_item(self):
+        # US価格に対しJP原価が相対的に低い商品(五条悟フィギュアの実例パターン)は
+        # margin_pct(対US価格)よりroi_pct(対JP原価)の方がずっと大きくなる
+        result = calc_unit_profit(us_price_usd=306.3, jp_cost_jpy=8373.0, weight_kg=0.15)
+        self.assertGreater(result['roi_pct'], result['margin_pct'])
+
+    def test_roi_pct_zero_when_jp_cost_is_zero(self):
+        result = calc_unit_profit(us_price_usd=50.0, jp_cost_jpy=0.0, weight_kg=0.1)
+        self.assertEqual(result['roi_pct'], 0.0)
+
+
 class TestClassifyTier(unittest.TestCase):
     """合格ラインの多段階化(CEO: 「合格ラインは何段階かに分けてください」)。
     _classify_tier() の境界値を確認する。

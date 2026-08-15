@@ -336,6 +336,12 @@ export default function CandidateDetailPage({ asin, onBack }) {
                         tone={candidate.marginPct == null ? undefined : candidate.marginPct >= 0 ? 'positive' : 'negative'}
                     />
                     <StatCard
+                        label="ROI(投下資本利益率)"
+                        value={pct(data.roi_pct)}
+                        tone={data.roi_pct == null ? undefined : data.roi_pct >= 0 ? 'positive' : 'negative'}
+                    />
+                    <StatCard label="先月の販売個数" value={candidate.monthlySold != null ? `${candidate.monthlySold.toLocaleString()}個` : '-'} />
+                    <StatCard
                         label="重量"
                         value={candidate.weightKg != null ? `${candidate.weightKg}kg${candidate.weightEstimated ? '(仮値)' : ''}` : '-'}
                     />
@@ -361,7 +367,6 @@ export default function CandidateDetailPage({ asin, onBack }) {
                                 : '-'
                         }
                     />
-                    <StatCard label="先月の販売個数" value={candidate.monthlySold != null ? `${candidate.monthlySold.toLocaleString()}個` : '-'} />
                     <StatCard label="価格変動(90日)" value={candidate.priceVolatility90d != null ? `±${(candidate.priceVolatility90d * 100).toFixed(0)}%` : '-'} />
                     <StatCard label="UPC" value={data.upc || '-'} />
                     <StatCard label="EAN" value={data.ean || '-'} />

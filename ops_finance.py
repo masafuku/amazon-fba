@@ -393,6 +393,12 @@ def calc_unit_profit(
         us_price_usd - amazon_fee_usd - fba_fee_usd - shipping_cost_usd - import_duty_usd - jp_cost_usd
     )
     margin_pct = unit_profit_usd / us_price_usd if us_price_usd else 0.0
+    # ROI(投下資本利益率) = 実質利益 ÷ JP原価(投下資本)。CEO: 「今回のケースは、
+    # 投下資本に対して利益の割合も重要ですよね」— 1回の仕入れに使える資金
+    # (shipment_budget_jpy)が実質的な制約であるこのビジネスモデルでは、US価格に
+    # 対する粗利率(margin_pct)よりもJP原価に対するROIの方が資金効率の指標として
+    # 本質的、という判断。高単価・低JP原価の商品ほどmargin_pctとの乖離が大きくなる。
+    roi_pct = unit_profit_usd / jp_cost_usd if jp_cost_usd else 0.0
 
     return {
         'us_price_usd': round(us_price_usd, 2),
@@ -403,6 +409,7 @@ def calc_unit_profit(
         'import_duty_usd': round(import_duty_usd, 2),
         'unit_profit_usd': round(unit_profit_usd, 2),
         'margin_pct': round(margin_pct, 4),
+        'roi_pct': round(roi_pct, 4),
     }
 
 
@@ -412,6 +419,41 @@ def break_even_units(fixed_cost_jpy: float, unit_profit_usd: float, exchange_rat
         return float('inf')
     fixed_cost_usd = fixed_cost_jpy / exchange_rate
     return fixed_cost_usd / unit_profit_usd
+
+
+def backfill_roi_pct() -> int:
+    """CEO: 「過去のデータを全て更新してください」— roi_pct追加(calc_unit_profit()の
+    出力にroi_pctを追加した際の変更)がagent_candidatesの既存行には反映されないため、
+    一度きりのバックフィルで追加する。unit_profit_usd/jp_cost_usdは元々data_jsonに
+    保存済みなので、Keepaへの再問い合わせなしに算術だけで計算できる(shipping_cost_usd/
+    import_duty_usdのようにKeepa再取得が要る値とは違う)。ローカルDB・AWS本番DBは
+    それぞれ独立している(*.sqlite3はgitignore対象)ため、両方で個別に一度実行する。
+    戻り値は更新した行数。
+    """
+    init_ops_tables()
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            '''
+            SELECT id, data_json FROM agent_candidates
+            WHERE json_extract(data_json, '$.unit_profit_usd') IS NOT NULL
+              AND json_extract(data_json, '$.jp_cost_usd') IS NOT NULL
+              AND json_extract(data_json, '$.roi_pct') IS NULL
+            '''
+        ).fetchall()
+        updated = 0
+        for row_id, data_json in rows:
+            data = json.loads(data_json)
+            jp_cost_usd = data.get('jp_cost_usd')
+            unit_profit_usd = data.get('unit_profit_usd')
+            if not jp_cost_usd:
+                continue
+            data['roi_pct'] = round(unit_profit_usd / jp_cost_usd, 4)
+            conn.execute(
+                'UPDATE agent_candidates SET data_json = ? WHERE id = ?',
+                (json.dumps(data, ensure_ascii=False), row_id),
+            )
+            updated += 1
+    return updated
 
 
 # ---------------------------------------------------------------------------

@@ -195,7 +195,8 @@ export default function AgentPage() {
             const feesUsd = amazonFee != null && fbaFee != null ? amazonFee + fbaFee : null;
             const shippingCostUsd = item.data?.shipping_cost_usd ?? null;
             const importDutyUsd = item.data?.import_duty_usd ?? null;
-            return { ...item, grossProfitUsd, grossMarginPct, feesUsd, shippingCostUsd, importDutyUsd };
+            const roiPct = item.data?.roi_pct ?? null;
+            return { ...item, grossProfitUsd, grossMarginPct, feesUsd, shippingCostUsd, importDutyUsd, roiPct };
         });
         return [...base].sort((left, right) => {
             const leftValue = sortKey === 'createdAt' ? Date.parse(left.createdAt) || 0 : left[sortKey];
@@ -419,6 +420,8 @@ export default function AgentPage() {
                                     {renderSortHeader('セラー', 'sellerName')}
                                     {renderSortHeader('ASIN', 'asin')}
                                     {renderSortHeader('商品名', 'title')}
+                                    {renderSortHeader('ROI(投下資本利益率)', 'roiPct')}
+                                    {renderSortHeader('先月の販売個数', 'monthlySold')}
                                     {renderSortHeader('US価格($)', 'usPriceUsd')}
                                     {renderSortHeader('JP価格(円)', 'jpCostJpy')}
                                     {renderSortHeader('表面利益(US-JP)', 'grossProfitUsd')}
@@ -431,7 +434,6 @@ export default function AgentPage() {
                                     {renderSortHeader('価格変動(90日)', 'priceVolatility90d')}
                                     {renderSortHeader('ランキング', 'salesRank')}
                                     {renderSortHeader('レビュー数', 'reviewCount')}
-                                    {renderSortHeader('先月の販売個数', 'monthlySold')}
                                     {renderSortHeader('調査日時', 'createdAt')}
                                     {renderSortHeader('発見回数', 'timesSeen')}
                                     <th className="px-4 py-3 font-medium text-slate-400">リンク</th>
@@ -481,6 +483,12 @@ export default function AgentPage() {
                                             </a>
                                         </td>
                                         <td className="max-w-xl px-4 py-3 text-slate-200">{candidate.title || '-'}</td>
+                                        <td className={`px-4 py-3 font-semibold ${candidate.roiPct == null ? '' : candidate.roiPct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`} title="実質利益 ÷ JP原価(投下資本)。US価格に対する実質利益率とは分母が異なる">
+                                            {candidate.roiPct == null ? '-' : `${(candidate.roiPct * 100).toFixed(1)}%`}
+                                        </td>
+                                        <td className="px-4 py-3 font-semibold text-sky-300">
+                                            {candidate.monthlySold != null ? `${candidate.monthlySold.toLocaleString()}個` : '-'}
+                                        </td>
                                         <td className="px-4 py-3 text-slate-200">
                                             {candidate.usPriceUsd == null ? '-' : `$${Number(candidate.usPriceUsd).toFixed(2)}`}
                                         </td>
@@ -538,9 +546,6 @@ export default function AgentPage() {
                                         </td>
                                         <td className="px-4 py-3 text-slate-200">{candidate.salesRank ?? '-'}</td>
                                         <td className="px-4 py-3 text-slate-200">{candidate.reviewCount ?? '-'}</td>
-                                        <td className="px-4 py-3 text-slate-200">
-                                            {candidate.monthlySold != null ? `${candidate.monthlySold.toLocaleString()}個` : '-'}
-                                        </td>
                                         <td className="px-4 py-3 text-slate-400">{formatDateTime(candidate.createdAt)}</td>
                                         <td className="px-4 py-3 text-slate-200">
                                             {candidate.timesSeen > 1 ? (
