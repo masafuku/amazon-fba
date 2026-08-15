@@ -71,6 +71,25 @@ def monthly_sold(product: Dict[str, Any]) -> Optional[int]:
     return int(val) if isinstance(val, (int, float)) and val >= 0 else None
 
 
+def sales_rank_drops_30(product: Dict[str, Any]) -> Optional[int]:
+    """Count of sales-rank improvements ("drops", i.e. rank number going
+    down) in the past 30 days that Keepa considers sale-indicating. CEO:
+    「先月の販売個数が取得できていないアイテムがたくさんあります。最終判断前には
+    知りたいです」— monthly_sold is null for most ASINs because Amazon only
+    shows its "bought in past month" badge above a ~50-units/month threshold
+    (confirmed via Keepa's own Product.java docs: "Most ASINs do not have
+    this value set"); re-fetching cannot fill it in for lower-velocity items,
+    since the source data genuinely doesn't exist. salesRankDrops30 has no
+    such floor, so it's used as a free fallback demand signal when
+    monthly_sold is unavailable. Already present on the standard `stats`
+    object we fetch (stats_days=90 in keepa_client.get_products()) - no
+    extra token cost. Keepa's sentinel for "no value" is -1, normalized to
+    None like monthly_sold()."""
+    stats = product.get("stats") or {}
+    val = stats.get("salesRankDrops30")
+    return int(val) if isinstance(val, (int, float)) and val >= 0 else None
+
+
 # Keepa uses these sentinel seller ids in buyBoxSellerIdHistory to mean
 # "no seller qualified for the buy box" (-1) / "a brand-new, unknown seller"
 # (-2) - neither is a real, queryable seller id.

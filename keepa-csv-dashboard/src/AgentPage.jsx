@@ -486,8 +486,19 @@ export default function AgentPage() {
                                         <td className={`px-4 py-3 font-semibold ${candidate.roiPct == null ? '' : candidate.roiPct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`} title="実質利益 ÷ JP原価(投下資本)。US価格に対する実質利益率とは分母が異なる">
                                             {candidate.roiPct == null ? '-' : `${(candidate.roiPct * 100).toFixed(1)}%`}
                                         </td>
-                                        <td className="px-4 py-3 font-semibold text-sky-300">
-                                            {candidate.monthlySold != null ? `${candidate.monthlySold.toLocaleString()}個` : '-'}
+                                        <td
+                                            className="px-4 py-3 font-semibold text-sky-300"
+                                            title={
+                                                candidate.monthlySold == null && candidate.data?.sales_rank_drops_30 != null
+                                                    ? '先月の販売個数は非公開(Amazonの月50個以上バッジ基準未満)のため、ランキング変動回数(売れたと推定されるイベント数)で代替表示'
+                                                    : undefined
+                                            }
+                                        >
+                                            {candidate.monthlySold != null
+                                                ? `${candidate.monthlySold.toLocaleString()}個`
+                                                : candidate.data?.sales_rank_drops_30 != null
+                                                  ? `ランク変動30日 ${candidate.data.sales_rank_drops_30}回`
+                                                  : '-'}
                                         </td>
                                         <td className="px-4 py-3 text-slate-200">
                                             {candidate.usPriceUsd == null ? '-' : `$${Number(candidate.usPriceUsd).toFixed(2)}`}

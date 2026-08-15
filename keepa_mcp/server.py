@@ -122,6 +122,7 @@ def _summarize_product(product: Dict[str, Any], domain: str, cache_info: Optiona
         "review_count": analysis.review_count(product),
         "rating": analysis.rating(product),
         "monthly_sold": analysis.monthly_sold(product),
+        "sales_rank_drops_30": analysis.sales_rank_drops_30(product),
         "price_volatility_90d": analysis.price_volatility_ratio(product, domain),
         "image_url": analysis.product_image_url(product),
         "weight_kg": analysis.package_weight_kg(product),

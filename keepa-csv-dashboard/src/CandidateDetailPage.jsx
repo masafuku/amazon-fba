@@ -340,7 +340,16 @@ export default function CandidateDetailPage({ asin, onBack }) {
                         value={pct(data.roi_pct)}
                         tone={data.roi_pct == null ? undefined : data.roi_pct >= 0 ? 'positive' : 'negative'}
                     />
-                    <StatCard label="先月の販売個数" value={candidate.monthlySold != null ? `${candidate.monthlySold.toLocaleString()}個` : '-'} />
+                    <StatCard
+                        label="先月の販売個数"
+                        value={
+                            candidate.monthlySold != null
+                                ? `${candidate.monthlySold.toLocaleString()}個`
+                                : data.sales_rank_drops_30 != null
+                                  ? `ランク変動30日 ${data.sales_rank_drops_30}回(推定)`
+                                  : '-'
+                        }
+                    />
                     <StatCard
                         label="重量"
                         value={candidate.weightKg != null ? `${candidate.weightKg}kg${candidate.weightEstimated ? '(仮値)' : ''}` : '-'}
