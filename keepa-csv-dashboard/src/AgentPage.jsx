@@ -20,6 +20,22 @@ const TIER_STYLES = {
 };
 const resolveTier = (candidate) => candidate.tier ?? (candidate.qualified ? 'pass' : 'reject');
 
+// CEO: 「候補が増えてきてソートだけでは見にくくなってきました」— フィルター/ソート条件を
+// localStorageに記憶し、リロード後も直前の絞り込み状態を復元する。プライベートブラウジング
+// 等でlocalStorageが例外を投げるケースはtry/catchで握りつぶし、素の初期値にフォールバックする。
+const AGENT_FILTERS_STORAGE_KEY = 'agentPageFilters';
+
+function loadStoredAgentFilters() {
+    try {
+        const raw = localStorage.getItem(AGENT_FILTERS_STORAGE_KEY);
+        return raw ? JSON.parse(raw) : {};
+    } catch {
+        return {};
+    }
+}
+
+const storedAgentFilters = loadStoredAgentFilters();
+
 export default function AgentPage() {
     const [candidates, setCandidates] = useState([]);
     const [runs, setRuns] = useState([]);
@@ -30,8 +46,13 @@ export default function AgentPage() {
     const [days, setDays] = useState(7);
     const [showRejected, setShowRejected] = useState(false);
     const [showRunHistory, setShowRunHistory] = useState(false);
-    const [sortKey, setSortKey] = useState('marginPct');
-    const [sortOrder, setSortOrder] = useState('desc');
+    const [sortKey, setSortKey] = useState(storedAgentFilters.sortKey ?? 'marginPct');
+    const [sortOrder, setSortOrder] = useState(storedAgentFilters.sortOrder ?? 'desc');
+    const [searchText, setSearchText] = useState(storedAgentFilters.searchText ?? '');
+    const [categoryFilter, setCategoryFilter] = useState(storedAgentFilters.categoryFilter ?? 'all');
+    const [hideNoSalesSignal, setHideNoSalesSignal] = useState(storedAgentFilters.hideNoSalesSignal ?? false);
+    const [hideNegativeRoi, setHideNegativeRoi] = useState(storedAgentFilters.hideNegativeRoi ?? false);
+    const [visibleCount, setVisibleCount] = useState(50);
     const [scanLoopStatus, setScanLoopStatus] = useState(null);
     const [scanLoopBusy, setScanLoopBusy] = useState(false);
     const [lookupAsinInput, setLookupAsinInput] = useState('');
@@ -131,6 +152,22 @@ export default function AgentPage() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [days]);
 
+    useEffect(() => {
+        try {
+            localStorage.setItem(
+                AGENT_FILTERS_STORAGE_KEY,
+                JSON.stringify({ searchText, categoryFilter, hideNoSalesSignal, hideNegativeRoi, sortKey, sortOrder })
+            );
+        } catch {
+            // プライベートブラウジング等でlocalStorageが使えない場合は無視(記憶できないだけ)
+        }
+    }, [searchText, categoryFilter, hideNoSalesSignal, hideNegativeRoi, sortKey, sortOrder]);
+
+    // フィルター条件が変わったら表示件数(もっと見る)をリセットする
+    useEffect(() => {
+        setVisibleCount(50);
+    }, [searchText, categoryFilter, hideNoSalesSignal, hideNegativeRoi, showRejected, days]);
+
     // 実行中の検索があれば状態表示に使う(バナー・実行履歴の「実行中」
     // バッジ)。自動ポーリングはしない(CEOの希望) - 最新状況を見たい
     // ときは「再読み込み」ボタンを押す。
@@ -180,6 +217,18 @@ export default function AgentPage() {
         }
     };
 
+    // フィルターパネルのカテゴリ選択肢(CEO: 「候補が増えてきてソートだけでは見にくく
+    // なってきました」)。全候補(フィルター適用前)から動的に集める - 絞り込み中に
+    // 選択肢自体が減っていく(選びにくくなる)のを避けるため、showRejected等の影響を受けない
+    // candidates全体から作る。
+    const categoryOptions = useMemo(() => {
+        const set = new Set();
+        candidates.forEach((item) => {
+            if (item.category) set.add(item.category);
+        });
+        return Array.from(set).sort((a, b) => a.localeCompare(b, 'ja'));
+    }, [candidates]);
+
     const visibleCandidates = useMemo(() => {
         const filtered = showRejected ? candidates : candidates.filter((item) => item.qualified);
         // 表面利益/表面利益率/手数料/輸送費はAPIの生フィールドではなくcandidate.dataから算出する値。
@@ -196,9 +245,36 @@ export default function AgentPage() {
             const shippingCostUsd = item.data?.shipping_cost_usd ?? null;
             const importDutyUsd = item.data?.import_duty_usd ?? null;
             const roiPct = item.data?.roi_pct ?? null;
-            return { ...item, grossProfitUsd, grossMarginPct, feesUsd, shippingCostUsd, importDutyUsd, roiPct };
+            const salesRankDrops30 = item.data?.sales_rank_drops_30 ?? null;
+            return { ...item, grossProfitUsd, grossMarginPct, feesUsd, shippingCostUsd, importDutyUsd, roiPct, salesRankDrops30 };
         });
-        return [...base].sort((left, right) => {
+
+        const query = searchText.trim().toLowerCase();
+        const searched = query
+            ? base.filter((item) => {
+                  const asin = (item.asin || '').toLowerCase();
+                  const title = (item.title || '').toLowerCase();
+                  const brand = (item.data?.brand || '').toLowerCase();
+                  return asin.includes(query) || title.includes(query) || brand.includes(query);
+              })
+            : base;
+
+        const categorized = categoryFilter === 'all' ? searched : searched.filter((item) => item.category === categoryFilter);
+
+        // 「販売数字ゼロを隠す」: 先月の販売個数(monthlySold)が無く、代替のランク変動
+        // (sales_rank_drops_30)も無い/0回の候補 - 実需の裏付けがない候補を除外する
+        // (CEO: 「販売数字ゼロや、roiマイナスはフィルターしたくなる」)
+        const withSalesSignal = hideNoSalesSignal
+            ? categorized.filter((item) => item.monthlySold != null || (item.salesRankDrops30 != null && item.salesRankDrops30 > 0))
+            : categorized;
+
+        // 「ROIマイナスを隠す」: roi_pct未計算(null)のものは「不明」として残し、
+        // マイナス確定のものだけ除外する
+        const withPositiveRoi = hideNegativeRoi
+            ? withSalesSignal.filter((item) => item.roiPct == null || item.roiPct >= 0)
+            : withSalesSignal;
+
+        return [...withPositiveRoi].sort((left, right) => {
             const leftValue = sortKey === 'createdAt' ? Date.parse(left.createdAt) || 0 : left[sortKey];
             const rightValue = sortKey === 'createdAt' ? Date.parse(right.createdAt) || 0 : right[sortKey];
             const leftMissing = leftValue === null || leftValue === undefined || leftValue === '';
@@ -210,9 +286,30 @@ export default function AgentPage() {
             const comparison = typeof leftValue === 'string'
                 ? leftValue.localeCompare(String(rightValue), 'ja')
                 : Number(leftValue) - Number(rightValue);
-            return sortOrder === 'desc' ? -comparison : comparison;
+            if (comparison !== 0) {
+                return sortOrder === 'desc' ? -comparison : comparison;
+            }
+            // 同点タイブレーク: ROI降順(CEO: 「普段は、先月の販売数でソートして上から
+            // 見ていってます。おそらくその状態で更にroiでソートかけれれば良い」)。
+            // Keepaのmonthly_soldはbucketed値(50, 100, 200...)で同点が頻発するため、
+            // ここでROIによる副次ソートが実質的な2段階ソートとして機能する。
+            if (sortKey === 'roiPct') return 0;
+            const leftRoi = left.roiPct;
+            const rightRoi = right.roiPct;
+            const leftRoiMissing = leftRoi === null || leftRoi === undefined;
+            const rightRoiMissing = rightRoi === null || rightRoi === undefined;
+            if (leftRoiMissing || rightRoiMissing) {
+                if (leftRoiMissing && rightRoiMissing) return 0;
+                return leftRoiMissing ? 1 : -1;
+            }
+            return rightRoi - leftRoi;
         });
-    }, [candidates, showRejected, sortKey, sortOrder]);
+    }, [candidates, showRejected, sortKey, sortOrder, searchText, categoryFilter, hideNoSalesSignal, hideNegativeRoi]);
+
+    const pagedCandidates = useMemo(
+        () => visibleCandidates.slice(0, visibleCount),
+        [visibleCandidates, visibleCount]
+    );
 
     const qualifiedCount = useMemo(() => candidates.filter((item) => item.qualified).length, [candidates]);
 
@@ -371,7 +468,7 @@ export default function AgentPage() {
             <section className="rounded-3xl border border-slate-800 bg-slate-900/80 p-6 shadow-xl shadow-slate-950/10">
                 <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                     <div className="text-slate-300">
-                        合格候補 <span className="font-semibold text-emerald-300">{qualifiedCount}</span>件 / 表示中 {visibleCandidates.length}件
+                        合格候補 <span className="font-semibold text-emerald-300">{qualifiedCount}</span>件 / 絞り込み後 {visibleCandidates.length}件 / 表示中 {pagedCandidates.length}件
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
                         <label className="text-sm text-slate-400">
@@ -403,11 +500,67 @@ export default function AgentPage() {
                     </div>
                 </div>
 
+                {/* CEO: 「候補が増えてきてソートだけでは見にくくなってきました。フィルターを
+                    実装するのはどう？」 */}
+                <div className="mb-4 flex flex-wrap items-center gap-2 border-t border-slate-800 pt-4">
+                    <input
+                        type="text"
+                        value={searchText}
+                        onChange={(event) => setSearchText(event.target.value)}
+                        placeholder="ASIN・商品名・ブランドで検索"
+                        className="w-56 rounded-xl border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm text-white outline-none focus:border-cyan-400"
+                    />
+                    <select
+                        value={categoryFilter}
+                        onChange={(event) => setCategoryFilter(event.target.value)}
+                        className="rounded-xl border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm text-white outline-none focus:border-cyan-400"
+                    >
+                        <option value="all">カテゴリ: すべて</option>
+                        {categoryOptions.map((category) => (
+                            <option key={category} value={category}>
+                                {category}
+                            </option>
+                        ))}
+                    </select>
+                    <button
+                        type="button"
+                        onClick={() => setHideNoSalesSignal((current) => !current)}
+                        className={`rounded-2xl px-4 py-1.5 text-sm font-semibold ${hideNoSalesSignal ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-300'}`}
+                        title="先月の販売個数・ランク変動30日ともに実績が無い候補を隠す"
+                    >
+                        販売数字ゼロを隠す
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => setHideNegativeRoi((current) => !current)}
+                        className={`rounded-2xl px-4 py-1.5 text-sm font-semibold ${hideNegativeRoi ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-300'}`}
+                        title="ROI(投下資本利益率)がマイナスの候補を隠す"
+                    >
+                        ROIマイナスを隠す
+                    </button>
+                    {searchText || categoryFilter !== 'all' || hideNoSalesSignal || hideNegativeRoi ? (
+                        <button
+                            type="button"
+                            onClick={() => {
+                                setSearchText('');
+                                setCategoryFilter('all');
+                                setHideNoSalesSignal(false);
+                                setHideNegativeRoi(false);
+                            }}
+                            className="rounded-2xl px-4 py-1.5 text-sm font-semibold text-slate-400 hover:text-slate-200"
+                        >
+                            条件クリア
+                        </button>
+                    ) : null}
+                </div>
+
                 {loading ? (
                     <p className="py-12 text-center text-slate-500">読み込み中...</p>
                 ) : visibleCandidates.length === 0 ? (
                     <p className="py-12 text-center text-slate-500">
-                        この期間の候補はまだありません。daily_scan.py を実行してください。
+                        {candidates.length === 0
+                            ? 'この期間の候補はまだありません。daily_scan.py を実行してください。'
+                            : '絞り込み条件に一致する候補がありません。'}
                     </p>
                 ) : (
                     <div className="overflow-x-auto">
@@ -441,7 +594,7 @@ export default function AgentPage() {
                                 </tr>
                             </thead>
                             <tbody>
-                                {visibleCandidates.map((candidate) => (
+                                {pagedCandidates.map((candidate) => (
                                     <tr
                                         key={`${candidate.runId}-${candidate.asin}`}
                                         className="border-t border-slate-800 bg-slate-950/80"
@@ -611,6 +764,17 @@ export default function AgentPage() {
                                 ))}
                             </tbody>
                         </table>
+                        {visibleCandidates.length > pagedCandidates.length ? (
+                            <div className="mt-4 flex justify-center">
+                                <button
+                                    type="button"
+                                    onClick={() => setVisibleCount((current) => current + 50)}
+                                    className="rounded-2xl bg-slate-800 px-6 py-2 text-sm font-semibold text-slate-200 hover:bg-slate-700"
+                                >
+                                    もっと見る(残り{visibleCandidates.length - pagedCandidates.length}件)
+                                </button>
+                            </div>
+                        ) : null}
                     </div>
                 )}
             </section>
