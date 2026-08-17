@@ -4,6 +4,10 @@ import { controlScanLoop, loadAgentCandidates, loadAgentRuns, loadKeepaTokenStat
 import { formatDateTime, formatDuration, formatElapsedSince } from './formatters';
 
 const EXCHANGE_RATE = 150;
+// CEO: 「期間による絞り込みに関しては、無期限をデフォルトにしてください」— loadAgentCandidates()は
+// daysをそのままバックエンドのtimedelta(days=days)に渡すだけなので、十分大きな日数(100年)を
+// 「無期限」として扱えば専用の分岐をバックエンド側に追加する必要がない。
+const UNLIMITED_DAYS = 36500;
 
 const SCAN_LOOP_MODE_LABELS = {
     auto: '自動',
@@ -43,7 +47,7 @@ export default function AgentPage() {
     const [error, setError] = useState('');
     const [loading, setLoading] = useState(true);
     const [savingAsin, setSavingAsin] = useState('');
-    const [days, setDays] = useState(7);
+    const [days, setDays] = useState(UNLIMITED_DAYS);
     const [showRejected, setShowRejected] = useState(false);
     const [showRunHistory, setShowRunHistory] = useState(false);
     const [sortKey, setSortKey] = useState(storedAgentFilters.sortKey ?? 'marginPct');
@@ -470,6 +474,7 @@ export default function AgentPage() {
                                 <option value={1}>直近1日</option>
                                 <option value={7}>直近7日</option>
                                 <option value={30}>直近30日</option>
+                                <option value={UNLIMITED_DAYS}>無期限</option>
                             </select>
                         </label>
                         <button
