@@ -52,7 +52,6 @@ export default function AgentPage() {
     const [categoryFilter, setCategoryFilter] = useState(storedAgentFilters.categoryFilter ?? 'all');
     const [hideNoSalesSignal, setHideNoSalesSignal] = useState(storedAgentFilters.hideNoSalesSignal ?? false);
     const [hideNegativeRoi, setHideNegativeRoi] = useState(storedAgentFilters.hideNegativeRoi ?? false);
-    const [visibleCount, setVisibleCount] = useState(50);
     const [scanLoopStatus, setScanLoopStatus] = useState(null);
     const [scanLoopBusy, setScanLoopBusy] = useState(false);
     const [lookupAsinInput, setLookupAsinInput] = useState('');
@@ -162,11 +161,6 @@ export default function AgentPage() {
             // プライベートブラウジング等でlocalStorageが使えない場合は無視(記憶できないだけ)
         }
     }, [searchText, categoryFilter, hideNoSalesSignal, hideNegativeRoi, sortKey, sortOrder]);
-
-    // フィルター条件が変わったら表示件数(もっと見る)をリセットする
-    useEffect(() => {
-        setVisibleCount(50);
-    }, [searchText, categoryFilter, hideNoSalesSignal, hideNegativeRoi, showRejected, days]);
 
     // 実行中の検索があれば状態表示に使う(バナー・実行履歴の「実行中」
     // バッジ)。自動ポーリングはしない(CEOの希望) - 最新状況を見たい
@@ -305,11 +299,6 @@ export default function AgentPage() {
             return rightRoi - leftRoi;
         });
     }, [candidates, showRejected, sortKey, sortOrder, searchText, categoryFilter, hideNoSalesSignal, hideNegativeRoi]);
-
-    const pagedCandidates = useMemo(
-        () => visibleCandidates.slice(0, visibleCount),
-        [visibleCandidates, visibleCount]
-    );
 
     const qualifiedCount = useMemo(() => candidates.filter((item) => item.qualified).length, [candidates]);
 
@@ -468,7 +457,7 @@ export default function AgentPage() {
             <section className="rounded-3xl border border-slate-800 bg-slate-900/80 p-6 shadow-xl shadow-slate-950/10">
                 <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                     <div className="text-slate-300">
-                        合格候補 <span className="font-semibold text-emerald-300">{qualifiedCount}</span>件 / 絞り込み後 {visibleCandidates.length}件 / 表示中 {pagedCandidates.length}件
+                        合格候補 <span className="font-semibold text-emerald-300">{qualifiedCount}</span>件 / 表示中 {visibleCandidates.length}件
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
                         <label className="text-sm text-slate-400">
@@ -594,7 +583,7 @@ export default function AgentPage() {
                                 </tr>
                             </thead>
                             <tbody>
-                                {pagedCandidates.map((candidate) => (
+                                {visibleCandidates.map((candidate) => (
                                     <tr
                                         key={`${candidate.runId}-${candidate.asin}`}
                                         className="border-t border-slate-800 bg-slate-950/80"
@@ -764,17 +753,6 @@ export default function AgentPage() {
                                 ))}
                             </tbody>
                         </table>
-                        {visibleCandidates.length > pagedCandidates.length ? (
-                            <div className="mt-4 flex justify-center">
-                                <button
-                                    type="button"
-                                    onClick={() => setVisibleCount((current) => current + 50)}
-                                    className="rounded-2xl bg-slate-800 px-6 py-2 text-sm font-semibold text-slate-200 hover:bg-slate-700"
-                                >
-                                    もっと見る(残り{visibleCandidates.length - pagedCandidates.length}件)
-                                </button>
-                            </div>
-                        ) : null}
                     </div>
                 )}
             </section>
