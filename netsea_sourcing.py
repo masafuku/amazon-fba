@@ -163,6 +163,7 @@ def find_jan_matched_candidates(
                         "jp_cost_jpy": price_jpy,
                         "netsea_product_name": item.get("product_name"),
                         "netsea_shop_name": item.get("shop_name"),
+                        "netsea_supplier_id": item.get("supplier_id"),
                         "netsea_product_url": item.get("product_url"),
                         "category_label": label,
                     }
@@ -299,18 +300,29 @@ def run_netsea_sourcing_cycle(
         wait_for_tokens=wait_for_tokens,
     )
 
-    # persist_agent_run()は候補ごとの'category'を見ないため(引数のcategoryを
-    # 全件に一律適用する)、カテゴリーごとに分けて保存する。
-    by_category: Dict[str, Dict[str, list]] = {}
+    # persist_agent_run()はcategory/seller_name/seller_idを候補ごとではなく
+    # 呼び出し単位で一律適用するため、(カテゴリー, 仕入れ先)の組ごとに分けて
+    # 保存する - これによりダッシュボードの既存「セラー」列にNETSEAの
+    # 卸売り業者名(shop_name)がそのまま表示される(CEO: 「仕入れ先はどこに
+    # 表示される?」への対応 - 新しい列を追加せず、既存のセラー列を
+    # NETSEA由来の候補にも流用する)。
+    by_group: Dict[tuple, Dict[str, list]] = {}
     for qualified_flag, key in ((1, "qualified"), (0, "rejected")):
         for item in result[key]:
             cat = item.get("category", label)
-            by_category.setdefault(cat, {"qualified": [], "rejected": []})
-            by_category[cat]["qualified" if qualified_flag else "rejected"].append(item)
+            shop = item.get("netsea_shop_name") or "不明な仕入れ先"
+            supplier_id = item.get("netsea_supplier_id")
+            group_key = (cat, shop, supplier_id)
+            by_group.setdefault(group_key, {"qualified": [], "rejected": []})
+            by_group[group_key]["qualified" if qualified_flag else "rejected"].append(item)
 
-    for cat, evaluation in by_category.items():
+    for (cat, shop, supplier_id), evaluation in by_group.items():
         if evaluation["qualified"] or evaluation["rejected"]:
-            persist_agent_run(cat, evaluation, run_id=run_id, source_type="netsea")
+            persist_agent_run(
+                cat, evaluation, run_id=run_id, source_type="netsea",
+                seller_id=str(supplier_id) if supplier_id is not None else None,
+                seller_name=shop,
+            )
 
     log_agent_run(
         run_id, started_at, 0,
