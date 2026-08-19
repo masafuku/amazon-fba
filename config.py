@@ -37,6 +37,7 @@ class Settings:
     line_notify_token: str
     line_channel_access_token: str
     line_user_id: str
+    netsea_access_token: str
     search_keyword: str
     search_category: str
     us_max_results: int
@@ -57,6 +58,7 @@ class Settings:
             line_notify_token=os.getenv("LINE_NOTIFY_TOKEN", ""),
             line_channel_access_token=os.getenv("LINE_CHANNEL_ACCESS_TOKEN", ""),
             line_user_id=os.getenv("LINE_USER_ID", ""),
+            netsea_access_token=os.getenv("NETSEA_ACCESS_TOKEN", ""),
             search_keyword=os.getenv("SEARCH_KEYWORD", "import japan"),
             search_category=os.getenv("SEARCH_CATEGORY", "All"),
             us_max_results=int(os.getenv("US_MAX_RESULTS", "20")),
