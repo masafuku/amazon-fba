@@ -299,6 +299,24 @@ export default function CandidateDetailPage({ asin, onBack }) {
                         {candidate.sellerName || candidate.sellerId ? (
                             <> &middot; セラー: {candidate.sellerName || candidate.sellerId}</>
                         ) : null}
+                        {data.netsea_shop_name ? (
+                            <>
+                                {' '}
+                                &middot; 仕入れ先:{' '}
+                                {data.netsea_product_url ? (
+                                    <a
+                                        href={data.netsea_product_url}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="text-cyan-300 underline decoration-cyan-700 underline-offset-2 hover:text-cyan-200"
+                                    >
+                                        {data.netsea_shop_name}
+                                    </a>
+                                ) : (
+                                    data.netsea_shop_name
+                                )}
+                            </>
+                        ) : null}
                     </p>
                     {tier !== 'pass' && candidate.reason ? (
                         <p className="mt-1 text-xs text-amber-300">理由: {candidate.reason}</p>

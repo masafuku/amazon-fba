@@ -300,29 +300,25 @@ def run_netsea_sourcing_cycle(
         wait_for_tokens=wait_for_tokens,
     )
 
-    # persist_agent_run()はcategory/seller_name/seller_idを候補ごとではなく
-    # 呼び出し単位で一律適用するため、(カテゴリー, 仕入れ先)の組ごとに分けて
-    # 保存する - これによりダッシュボードの既存「セラー」列にNETSEAの
-    # 卸売り業者名(shop_name)がそのまま表示される(CEO: 「仕入れ先はどこに
-    # 表示される?」への対応 - 新しい列を追加せず、既存のセラー列を
-    # NETSEA由来の候補にも流用する)。
-    by_group: Dict[tuple, Dict[str, list]] = {}
+    # CEO: 「仕入れ先とセラーは別にして欲しい」— seller_name/seller_idは
+    # Amazon側の競合出品者(セラーマイニング由来)を指す既存の意味のまま残し、
+    # NETSEAの卸売り業者名は混同させない(誤ってseller_nameに仕入れ先名を
+    # 入れていた版から差し戻し)。仕入れ先の表示はentry内の
+    # netsea_shop_name/netsea_product_url(data_json経由)をフロントエンド側で
+    # 専用の「仕入れ先」欄として別に表示する形にする。
+    #
+    # persist_agent_run()はcategoryを候補ごとではなく呼び出し単位で一律適用
+    # するため、カテゴリーごとに分けて保存する。
+    by_category: Dict[str, Dict[str, list]] = {}
     for qualified_flag, key in ((1, "qualified"), (0, "rejected")):
         for item in result[key]:
             cat = item.get("category", label)
-            shop = item.get("netsea_shop_name") or "不明な仕入れ先"
-            supplier_id = item.get("netsea_supplier_id")
-            group_key = (cat, shop, supplier_id)
-            by_group.setdefault(group_key, {"qualified": [], "rejected": []})
-            by_group[group_key]["qualified" if qualified_flag else "rejected"].append(item)
+            by_category.setdefault(cat, {"qualified": [], "rejected": []})
+            by_category[cat]["qualified" if qualified_flag else "rejected"].append(item)
 
-    for (cat, shop, supplier_id), evaluation in by_group.items():
+    for cat, evaluation in by_category.items():
         if evaluation["qualified"] or evaluation["rejected"]:
-            persist_agent_run(
-                cat, evaluation, run_id=run_id, source_type="netsea",
-                seller_id=str(supplier_id) if supplier_id is not None else None,
-                seller_name=shop,
-            )
+            persist_agent_run(cat, evaluation, run_id=run_id, source_type="netsea")
 
     log_agent_run(
         run_id, started_at, 0,

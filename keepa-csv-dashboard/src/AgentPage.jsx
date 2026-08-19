@@ -244,7 +244,15 @@ export default function AgentPage() {
             const importDutyUsd = item.data?.import_duty_usd ?? null;
             const roiPct = item.data?.roi_pct ?? null;
             const salesRankDrops30 = item.data?.sales_rank_drops_30 ?? null;
-            return { ...item, grossProfitUsd, grossMarginPct, feesUsd, shippingCostUsd, importDutyUsd, roiPct, salesRankDrops30 };
+            // 仕入れ先(NETSEA等の卸売り業者)は「セラー」(Amazon側の競合出品者、
+            // セラーマイニング由来)とは別概念(CEO: 「仕入れ先とセラーは別に
+            // して欲しい」)。
+            const sourcingSupplierName = item.data?.netsea_shop_name ?? null;
+            const sourcingSupplierUrl = item.data?.netsea_product_url ?? null;
+            return {
+                ...item, grossProfitUsd, grossMarginPct, feesUsd, shippingCostUsd, importDutyUsd, roiPct,
+                salesRankDrops30, sourcingSupplierName, sourcingSupplierUrl,
+            };
         });
 
         const query = searchText.trim().toLowerCase();
@@ -565,6 +573,7 @@ export default function AgentPage() {
                                     {renderSortHeader('判定', 'qualified')}
                                     {renderSortHeader('カテゴリ', 'category')}
                                     {renderSortHeader('セラー', 'sellerName')}
+                                    {renderSortHeader('仕入れ先', 'sourcingSupplierName')}
                                     {renderSortHeader('ASIN', 'asin')}
                                     {renderSortHeader('商品名', 'title')}
                                     {renderSortHeader('ROI(投下資本利益率)', 'roiPct')}
@@ -621,6 +630,24 @@ export default function AgentPage() {
                                         </td>
                                         <td className="px-4 py-3 text-slate-300">{candidate.category || '-'}</td>
                                         <td className="px-4 py-3 text-slate-300">{candidate.sellerName || candidate.sellerId || '-'}</td>
+                                        <td className="px-4 py-3 text-slate-300">
+                                            {candidate.sourcingSupplierName ? (
+                                                candidate.sourcingSupplierUrl ? (
+                                                    <a
+                                                        href={candidate.sourcingSupplierUrl}
+                                                        target="_blank"
+                                                        rel="noreferrer"
+                                                        className="text-cyan-300 underline decoration-cyan-700 underline-offset-2 hover:text-cyan-200"
+                                                    >
+                                                        {candidate.sourcingSupplierName}
+                                                    </a>
+                                                ) : (
+                                                    candidate.sourcingSupplierName
+                                                )
+                                            ) : (
+                                                '-'
+                                            )}
+                                        </td>
                                         <td className="px-4 py-3 font-semibold">
                                             <a
                                                 href={`#candidate/${encodeURIComponent(candidate.asin)}`}
