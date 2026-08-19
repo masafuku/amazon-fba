@@ -56,6 +56,7 @@ def cmd_run(args: argparse.Namespace) -> dict:
             category_labels=category_labels,
             price_range_from=args.price_min,
             price_range_to=args.price_max,
+            wait_for_tokens=args.wait_for_tokens,
         )
     except NetseaError as exc:
         return {"ok": False, "error": str(exc)}
@@ -74,7 +75,11 @@ def main() -> None:
     )
     run.add_argument("--price-min", type=int, default=None, help="卸価格(税抜、円)の下限")
     run.add_argument("--price-max", type=int, default=None, help="卸価格(税抜、円)の上限")
-    run.set_defaults(func=cmd_run)
+    run.add_argument(
+        "--no-wait", dest="wait_for_tokens", action="store_false",
+        help="Keepaトークン不足時に待たずスキップする(既定は待つ - daily_scan.pyと同じ)",
+    )
+    run.set_defaults(func=cmd_run, wait_for_tokens=True)
 
     args = parser.parse_args()
     try:

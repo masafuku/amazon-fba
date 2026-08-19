@@ -14,13 +14,14 @@ CEO: 「Amazon以外にネット系の卸売り業者からの仕入れも考え
 """
 from __future__ import annotations
 
+import math
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from keepa_mcp import analysis
 from keepa_mcp.cached_ops import cached_get_products, cached_lookup_by_code
-from keepa_mcp.keepa_client import KeepaError
+from keepa_mcp.keepa_client import KeepaError, get_token_status
 from netsea_client import BATCH_SIZE, NetseaError, get_items, get_suppliers
 from ops_finance import (
     DEFAULT_WEIGHT_KG_FALLBACK,
@@ -61,6 +62,21 @@ def _extract_jan_codes(item: Dict[str, Any]) -> List[str]:
         if jan:
             codes.add(str(jan))
     return list(codes)
+
+
+def _wait_for_one_token(api_key: str) -> None:
+    """keepa_mcp/server.py の _wait_for_budget() と同じ考え方(残高0コストの
+    /tokenをポーリングして待つ)を、JANコード1件=1トークンのこのパイプライン用に
+    単純化したもの。wait_for_tokens=Trueのときだけ呼ばれる - トークン不足時に
+    KeepaError(429)でスキップされてしまうと、実際にはマッチしていたはずの候補が
+    「見つからなかった」ことになってしまうため、それを避ける。"""
+    while True:
+        status = get_token_status(api_key)
+        if (status.get("tokens_left") or 0) >= 1:
+            return
+        refill_rate = status.get("refill_rate_per_minute") or 1
+        wait_seconds = min(60, max(5, math.ceil(60 / refill_rate)))
+        time.sleep(wait_seconds)
 
 
 def _min_active_price_jpy(item: Dict[str, Any]) -> Optional[float]:
@@ -156,12 +172,21 @@ def find_jan_matched_candidates(
     matched = 0
 
     for jan, meta in jan_map.items():
+        if wait_for_tokens:
+            _wait_for_one_token(api_key)
         try:
             products, _cache_info = cached_lookup_by_code(
                 api_key, jan, domain="US",
             )
         except KeepaError:
-            continue
+            if wait_for_tokens:
+                _wait_for_one_token(api_key)
+                try:
+                    products, _cache_info = cached_lookup_by_code(api_key, jan, domain="US")
+                except KeepaError:
+                    continue
+            else:
+                continue
         if not products:
             continue
         product = products[0]  # 完全一致(バーコード)のため通常1件のみ
@@ -257,8 +282,12 @@ def run_netsea_sourcing_cycle(
     category_labels: Optional[Dict[str, str]] = None,
     price_range_from: Optional[int] = None,
     price_range_to: Optional[int] = None,
+    wait_for_tokens: bool = True,
 ) -> Dict[str, Any]:
-    """1サイクル実行 -> 保存 -> 結果サマリーを返す(scripts/netsea_sourcing_cli.py用)。"""
+    """1サイクル実行 -> 保存 -> 結果サマリーを返す(scripts/netsea_sourcing_cli.py用)。
+    wait_for_tokens既定True: daily_scan.pyと同じく、CLIからのバッチ実行は
+    ブロックしてでも正確な結果を得る方を優先する(ダッシュボードからの
+    即時応答が要るseller_mine_cli.pyとは事情が異なる)。"""
     init_ops_tables()
     started_at = datetime.now(timezone.utc).isoformat()
     run_id = new_agent_run_id()
@@ -267,6 +296,7 @@ def run_netsea_sourcing_cycle(
     result = find_jan_matched_candidates(
         api_key, netsea_token, category_ids, category_labels,
         price_range_from=price_range_from, price_range_to=price_range_to,
+        wait_for_tokens=wait_for_tokens,
     )
 
     # persist_agent_run()は候補ごとの'category'を見ないため(引数のcategoryを
