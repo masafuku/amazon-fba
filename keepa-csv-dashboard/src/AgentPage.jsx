@@ -244,6 +244,13 @@ export default function AgentPage() {
             const importDutyUsd = item.data?.import_duty_usd ?? null;
             const roiPct = item.data?.roi_pct ?? null;
             const salesRankDrops30 = item.data?.sales_rank_drops_30 ?? null;
+            // 「先月の販売個数」列は monthlySold が無ければ salesRankDrops30 を
+            // 代わりに表示する(セルの表示ロジックと同じフォールバック)。CEO:
+            // 「ランク変動30日間◯回、がソートされていません」— 表示上は
+            // フォールバックしているのに、ソートキーはmonthlySoldの生値しか
+            // 見ていなかったため、フォールバック表示中の行が実質ソートされて
+            // いなかった。表示と同じ値でソートできるよう専用の合成フィールドを作る。
+            const monthlySoldOrDrops = item.monthlySold ?? salesRankDrops30 ?? null;
             // 仕入れ先(NETSEA等の卸売り業者)は「セラー」(Amazon側の競合出品者、
             // セラーマイニング由来)とは別概念(CEO: 「仕入れ先とセラーは別に
             // して欲しい」)。
@@ -251,7 +258,7 @@ export default function AgentPage() {
             const sourcingSupplierUrl = item.data?.netsea_product_url ?? null;
             return {
                 ...item, grossProfitUsd, grossMarginPct, feesUsd, shippingCostUsd, importDutyUsd, roiPct,
-                salesRankDrops30, sourcingSupplierName, sourcingSupplierUrl,
+                salesRankDrops30, monthlySoldOrDrops, sourcingSupplierName, sourcingSupplierUrl,
             };
         });
 
@@ -577,7 +584,7 @@ export default function AgentPage() {
                                     {renderSortHeader('ASIN', 'asin')}
                                     {renderSortHeader('商品名', 'title')}
                                     {renderSortHeader('ROI(投下資本利益率)', 'roiPct')}
-                                    {renderSortHeader('先月の販売個数', 'monthlySold')}
+                                    {renderSortHeader('先月の販売個数', 'monthlySoldOrDrops')}
                                     {renderSortHeader('US価格($)', 'usPriceUsd')}
                                     {renderSortHeader('JP価格(円)', 'jpCostJpy')}
                                     {renderSortHeader('表面利益(US-JP)', 'grossProfitUsd')}
