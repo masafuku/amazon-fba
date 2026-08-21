@@ -256,9 +256,18 @@ export default function AgentPage() {
             // して欲しい」)。
             const sourcingSupplierName = item.data?.netsea_shop_name ?? null;
             const sourcingSupplierUrl = item.data?.netsea_product_url ?? null;
+            // CEO: 「卸売りの仕入れ価格がわかったら、Amazonとは別の列に価格を
+            // 追加してください。利益等は安い方で計算してください。」— jpCostJpy
+            // (実質利益計算に使った原価)は既に安い方だが、内訳としてAmazon JP価格と
+            // 卸価格を別々に見せる。どちらか一方しか無い候補が大半(卸経路は
+            // Amazon JP価格を必ずしも取得しない)だが、両方揃った候補では安い方が
+            // jpCostJpyと一致するので、どちらが採用されたか列を見比べればわかる。
+            const jpAmazonCostJpy = item.data?.jp_amazon_cost_jpy ?? null;
+            const wholesaleCostJpy = item.data?.wholesale_cost_jpy ?? null;
             return {
                 ...item, grossProfitUsd, grossMarginPct, feesUsd, shippingCostUsd, importDutyUsd, roiPct,
                 salesRankDrops30, monthlySoldOrDrops, sourcingSupplierName, sourcingSupplierUrl,
+                jpAmazonCostJpy, wholesaleCostJpy,
             };
         });
 
@@ -586,7 +595,9 @@ export default function AgentPage() {
                                     {renderSortHeader('ROI(投下資本利益率)', 'roiPct')}
                                     {renderSortHeader('先月の販売個数', 'monthlySoldOrDrops')}
                                     {renderSortHeader('US価格($)', 'usPriceUsd')}
-                                    {renderSortHeader('JP価格(円)', 'jpCostJpy')}
+                                    {renderSortHeader('Amazon JP価格(円)', 'jpAmazonCostJpy')}
+                                    {renderSortHeader('卸価格(円)', 'wholesaleCostJpy')}
+                                    {renderSortHeader('採用原価(円)', 'jpCostJpy')}
                                     {renderSortHeader('表面利益(US-JP)', 'grossProfitUsd')}
                                     {renderSortHeader('表面利益率', 'grossMarginPct')}
                                     {renderSortHeader('手数料(Amazon+FBA)', 'feesUsd')}
@@ -685,6 +696,15 @@ export default function AgentPage() {
                                             {candidate.usPriceUsd == null ? '-' : `$${Number(candidate.usPriceUsd).toFixed(2)}`}
                                         </td>
                                         <td className="px-4 py-3 text-slate-200">
+                                            {candidate.jpAmazonCostJpy == null ? '-' : `¥${Number(candidate.jpAmazonCostJpy).toFixed(0)}`}
+                                        </td>
+                                        <td className="px-4 py-3 text-slate-200">
+                                            {candidate.wholesaleCostJpy == null ? '-' : `¥${Number(candidate.wholesaleCostJpy).toFixed(0)}`}
+                                        </td>
+                                        <td
+                                            className="px-4 py-3 font-semibold text-slate-100"
+                                            title="実質利益・ROIの計算に実際使った原価。Amazon JP価格と卸価格の両方が判明している場合は安い方(CEO: 「利益等は安い方で計算してください」)"
+                                        >
                                             {candidate.jpCostJpy == null ? '-' : `¥${Number(candidate.jpCostJpy).toFixed(0)}`}
                                         </td>
                                         <td className={`px-4 py-3 font-semibold ${candidate.grossProfitUsd >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>

@@ -702,6 +702,12 @@ def evaluate_mcp_candidates(
             'ean': sell.get('ean'),
             **profit,  # unit_profit_usd, margin_pct など (jp_cost_usd 含む)
             'jp_cost_jpy': cost['price'],
+            # この経路はJP Amazon価格のみが原価情報(卸価格は別経路
+            # のnetsea_sourcing.py側でのみ判明する) - フロントエンドが
+            # 「Amazon JP価格」「卸価格」を別列で出し分けられるよう、
+            # どちらの経路でも同じ2フィールドを必ず持たせる。
+            'jp_amazon_cost_jpy': cost['price'],
+            'wholesale_cost_jpy': None,
         }
         entry['tier'] = _classify_tier(profit['margin_pct'], profit['us_price_usd'], profit['jp_cost_usd'], min_margin_pct)
 
@@ -753,6 +759,8 @@ def evaluate_mcp_candidates(
             'ean': skip.get('ean'),
             'us_price_usd': us_price,
             'jp_cost_jpy': jp_price,
+            'jp_amazon_cost_jpy': jp_price,
+            'wholesale_cost_jpy': None,
             'unit_profit_usd': None,
             'margin_pct': None,
             'tier': TIER_REJECT,  # 価格データが無い場合の既定値(下で価格が両方揃えば上書きされる)

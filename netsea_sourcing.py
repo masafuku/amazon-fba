@@ -9,8 +9,10 @@ CEO: 「Amazon以外にネット系の卸売り業者からの仕入れも考え
 本体ペンの検索結果に紛れ込んだ - を踏まえたもの):
   - JANコードが無い商品(NETSEA全体の約8割)は対象外とする。あいまいなキーワード
     一致によるフォールバックは追加しない - 「完全一致」というCEOの要求を優先する。
-  - jp_cost_jpy には JP Amazon小売価格ではなく、NETSEAの実際の卸価格をそのまま使う
-    (daily_scan.py 経由の候補より原価の精度が高い)。
+  - jp_cost_jpy には、NETSEAの実際の卸価格(wholesale_cost_jpy)と、同じJANで
+    Amazon JPにも出品があればその価格(jp_amazon_cost_jpy)のうち安い方を使う
+    (daily_scan.py 経由の候補より原価の精度が高い上、卸より小売の方が安いケースも
+    取りこぼさない。CEO: 「利益等は安い方で計算してください」)。
 """
 from __future__ import annotations
 
@@ -218,9 +220,30 @@ def find_jan_matched_candidates(
         else:
             fee_estimated = True
 
+        # CEO: 「卸売りの仕入れ価格がわかったら、Amazonとは別の列に価格を追加して
+        # ください。利益等は安い方で計算してください。」— 同じJANでAmazon JP側にも
+        # 出品があれば(卸で仕入れず小売で買った方が安いケースもあるため)、
+        # NETSEAの卸価格と比べて安い方を実際の原価として使う。JANは既に厳密な
+        # バーコード一致キーなので、追加のトークンを払ってでも一致確認する価値がある。
+        wholesale_cost_jpy = meta["jp_cost_jpy"]
+        jp_amazon_cost_jpy: Optional[float] = None
+        if wait_for_tokens:
+            _wait_for_one_token(api_key)
+        try:
+            jp_products, _cache_info = cached_lookup_by_code(api_key, jan, domain="JP")
+        except KeepaError:
+            jp_products = []
+        if jp_products:
+            jp_amazon_cost_jpy = analysis.current_price(jp_products[0], "JP")
+
+        if jp_amazon_cost_jpy is not None:
+            effective_cost_jpy = min(wholesale_cost_jpy, jp_amazon_cost_jpy)
+        else:
+            effective_cost_jpy = wholesale_cost_jpy
+
         profit = calc_unit_profit(
             us_price_usd=us_price,
-            jp_cost_jpy=meta["jp_cost_jpy"],
+            jp_cost_jpy=effective_cost_jpy,
             weight_kg=weight_kg,
             exchange_rate=exchange_rate,
             **fee_kwargs,
@@ -252,7 +275,9 @@ def find_jan_matched_candidates(
             "netsea_shop_name": meta["netsea_shop_name"],
             "netsea_product_url": meta["netsea_product_url"],
             **profit,
-            "jp_cost_jpy": meta["jp_cost_jpy"],
+            "jp_cost_jpy": effective_cost_jpy,  # 実際の利益計算に使った原価(安い方)
+            "wholesale_cost_jpy": wholesale_cost_jpy,
+            "jp_amazon_cost_jpy": jp_amazon_cost_jpy,
         }
         entry["tier"] = _classify_tier(
             profit["margin_pct"], profit["us_price_usd"], profit["jp_cost_usd"], min_margin_pct,

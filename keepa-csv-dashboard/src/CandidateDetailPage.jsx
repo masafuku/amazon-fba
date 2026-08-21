@@ -328,7 +328,9 @@ export default function CandidateDetailPage({ asin, onBack }) {
                 <h2 className="text-lg font-semibold text-white">価格・利益の内訳</h2>
                 <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                     <StatCard label="US価格" value={usd(candidate.usPriceUsd)} />
-                    <StatCard label="JP価格" value={jpy(candidate.jpCostJpy)} />
+                    <StatCard label="Amazon JP価格" value={jpy(data.jp_amazon_cost_jpy)} />
+                    <StatCard label="卸価格" value={jpy(data.wholesale_cost_jpy)} />
+                    <StatCard label="採用原価" value={jpy(candidate.jpCostJpy)} />
                     <StatCard
                         label="表面利益(US-JP)"
                         value={usdAsJpy(grossProfitUsd)}
