@@ -47,8 +47,8 @@ export default function AgentPage() {
     const [error, setError] = useState('');
     const [loading, setLoading] = useState(true);
     const [savingAsin, setSavingAsin] = useState('');
-    const [days, setDays] = useState(UNLIMITED_DAYS);
-    const [showRejected, setShowRejected] = useState(false);
+    const [days, setDays] = useState(storedAgentFilters.days ?? UNLIMITED_DAYS);
+    const [showRejected, setShowRejected] = useState(storedAgentFilters.showRejected ?? false);
     const [showRunHistory, setShowRunHistory] = useState(false);
     const [sortKey, setSortKey] = useState(storedAgentFilters.sortKey ?? 'marginPct');
     const [sortOrder, setSortOrder] = useState(storedAgentFilters.sortOrder ?? 'desc');
@@ -159,12 +159,15 @@ export default function AgentPage() {
         try {
             localStorage.setItem(
                 AGENT_FILTERS_STORAGE_KEY,
-                JSON.stringify({ searchText, categoryFilter, hideNoSalesSignal, hideNegativeRoi, sortKey, sortOrder })
+                JSON.stringify({
+                    searchText, categoryFilter, hideNoSalesSignal, hideNegativeRoi, sortKey, sortOrder,
+                    days, showRejected,
+                })
             );
         } catch {
             // プライベートブラウジング等でlocalStorageが使えない場合は無視(記憶できないだけ)
         }
-    }, [searchText, categoryFilter, hideNoSalesSignal, hideNegativeRoi, sortKey, sortOrder]);
+    }, [searchText, categoryFilter, hideNoSalesSignal, hideNegativeRoi, sortKey, sortOrder, days, showRejected]);
 
     // 実行中の検索があれば状態表示に使う(バナー・実行履歴の「実行中」
     // バッジ)。自動ポーリングはしない(CEOの希望) - 最新状況を見たい
