@@ -9,7 +9,7 @@ import {
     XAxis,
     YAxis,
 } from 'recharts';
-import { fetchCandidateHistory, loadAgentCandidateDetail, loadCandidateHistory, lookupAsin, saveFavorite } from './db';
+import { fetchCandidateHistory, fetchSellerCount, loadAgentCandidateDetail, loadCandidateHistory, lookupAsin, saveFavorite } from './db';
 import { formatDateTime } from './formatters';
 
 const EXCHANGE_RATE = 150;
@@ -82,6 +82,8 @@ export default function CandidateDetailPage({ asin, onBack }) {
     const [copyStatus, setCopyStatus] = useState('');
     const [investigating, setInvestigating] = useState(false);
     const [investigateError, setInvestigateError] = useState('');
+    const [sellerCountFetching, setSellerCountFetching] = useState(false);
+    const [sellerCountError, setSellerCountError] = useState('');
 
     useEffect(() => {
         let cancelled = false;
@@ -142,6 +144,30 @@ export default function CandidateDetailPage({ asin, onBack }) {
             setHistoryError(fetchError?.message || '履歴データの取得に失敗しました(トークン不足の可能性があります)。');
         } finally {
             setHistoryFetching(false);
+        }
+    };
+
+    // CEO: 「候補商品に対して、セラーの数...を取得できますか？」「すべての商品
+    // ではなく、有力候補のみ。」「選択的にバックフィルをしたい。」— 新規の合格
+    // 候補は最初から取得済みだが、過去の合格候補はこのボタンでCEOが気になった
+    // ものだけ個別に取得する(一括再実行はしない)。
+    const handleFetchSellerCount = async () => {
+        if (!candidate) return;
+        setSellerCountFetching(true);
+        setSellerCountError('');
+        try {
+            const result = await fetchSellerCount(candidate.runId, asin);
+            if (!result.ok) {
+                setSellerCountError(result.error || 'セラー数の取得に失敗しました。');
+                return;
+            }
+            setCandidate((current) => (current
+                ? { ...current, data: { ...current.data, competitor_seller_count: result.competitorSellerCount } }
+                : current));
+        } catch (fetchError) {
+            setSellerCountError(fetchError?.message || 'セラー数の取得に失敗しました(トークン不足の可能性があります)。');
+        } finally {
+            setSellerCountFetching(false);
         }
     };
 
@@ -387,6 +413,23 @@ export default function CandidateDetailPage({ asin, onBack }) {
                     <StatCard label="ランキング" value={candidate.salesRank ?? '-'} />
                     <StatCard label="レビュー数" value={candidate.reviewCount ?? '-'} />
                     <StatCard
+                        label="セラー数(競合)"
+                        value={
+                            data.competitor_seller_count != null ? (
+                                data.competitor_seller_count
+                            ) : (
+                                <button
+                                    type="button"
+                                    onClick={handleFetchSellerCount}
+                                    disabled={sellerCountFetching}
+                                    className="text-sm text-cyan-300 underline decoration-cyan-700 underline-offset-2 hover:text-cyan-200 disabled:opacity-50"
+                                >
+                                    {sellerCountFetching ? '取得中...' : 'セラー数を取得'}
+                                </button>
+                            )
+                        }
+                    />
+                    <StatCard
                         label="評価"
                         value={
                             data.rating != null || data.jp_rating != null
@@ -401,6 +444,7 @@ export default function CandidateDetailPage({ asin, onBack }) {
                     <StatCard label="EAN" value={data.ean || '-'} />
                     <StatCard label="調査日時" value={formatDateTime(candidate.createdAt)} />
                 </div>
+                {sellerCountError ? <p className="text-sm text-rose-300">{sellerCountError}</p> : null}
             </section>
 
             <section className="space-y-4 rounded-3xl border border-slate-800 bg-slate-900/80 p-6 shadow-xl shadow-slate-950/10">

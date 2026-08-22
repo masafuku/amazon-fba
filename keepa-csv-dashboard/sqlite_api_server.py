@@ -465,6 +465,67 @@ def lookup_asin_action(payload):
     return _run_asin_lookup_cli(['lookup', '--asin', asin])
 
 
+# CandidateDetailPageの「セラー数を取得」ボタン専用(CEO: 「候補商品に対して、
+# セラーの数...を取得できますか？」「すべての商品ではなく、有力候補のみ。」
+# 「選択的にバックフィルをしたい。」)。新規の合格候補はdaily_scan.py/
+# netsea_sourcing.py側で自動的にセラー数を取得済みだが、過去の合格候補は
+# このボタンでCEOが気になったものだけ個別に取得する(一括再実行はしない)。
+# asin_lookup_cliと同じサブプロセス橋渡しパターン。
+SELLER_COUNT_CLI = Path(__file__).resolve().parent.parent / 'scripts' / 'seller_count_cli.py'
+SELLER_COUNT_TIMEOUT_SECONDS = 60  # 単一ASINのoffers取得(1回のKeepa往復)なのでseller_mineより短くてよい
+
+
+def _run_seller_count_cli(args):
+    if not VENV_PYTHON.exists():
+        return {'ok': False, 'error': f'{VENV_PYTHON} が見つかりません(.venvのセットアップが必要です)'}
+    try:
+        result = subprocess.run(
+            [str(VENV_PYTHON), str(SELLER_COUNT_CLI), *args],
+            capture_output=True, text=True, timeout=SELLER_COUNT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return {'ok': False, 'error': f'セラー数取得処理がタイムアウトしました({SELLER_COUNT_TIMEOUT_SECONDS}秒)'}
+    stdout = (result.stdout or '').strip()
+    if stdout:
+        last_line = stdout.splitlines()[-1]
+        try:
+            return json.loads(last_line)
+        except ValueError:
+            pass
+    detail = (result.stderr or stdout or '').strip()
+    return {'ok': False, 'error': detail or f'seller_count_cli.py が異常終了しました(exit {result.returncode})'}
+
+
+def fetch_and_save_seller_count(run_id: str, asin: str):
+    """Keepaへ実際に問い合わせてセラー数を取得し、その(run_id, asin)行の
+    data_jsonへ書き戻す(他のフィールドは保持するread-modify-write)。"""
+    run_id = str(run_id or '').strip()
+    asin = str(asin or '').strip().upper()
+    if not run_id or not asin:
+        raise ValueError('runId and asin are required')
+
+    result = _run_seller_count_cli(['fetch', '--asin', asin])
+    if not result.get('ok'):
+        return result
+
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            'SELECT data_json FROM agent_candidates WHERE run_id = ? AND asin = ?',
+            (run_id, asin),
+        ).fetchone()
+        if row is None:
+            return {'ok': False, 'error': f'候補が見つかりません(run_id={run_id}, asin={asin})'}
+        data = json.loads(row[0])
+        data['competitor_seller_count'] = result.get('competitorSellerCount')
+        conn.execute(
+            'UPDATE agent_candidates SET data_json = ? WHERE run_id = ? AND asin = ?',
+            (json.dumps(data, ensure_ascii=False), run_id, asin),
+        )
+        conn.commit()
+
+    return {'ok': True, 'competitorSellerCount': result.get('competitorSellerCount')}
+
+
 # CandidateDetailPageの「詳細データ取得」ボタン専用。seller_mine_cli.pyと
 # 同じサブプロセス橋渡しパターン(このAPIサーバーはstdlib-onlyでkeepa_mcpを
 # 直接importできないため)。GET /api/agent/candidate-history はこのCLIを
@@ -2000,6 +2061,18 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 payload = json.loads(raw.decode('utf-8')) if raw else {}
                 self._send_json(200, lookup_asin_action(payload))
+            except ValueError as exc:
+                self._send_json(400, {'error': str(exc)})
+            except Exception as exc:
+                self._send_json(500, {'error': str(exc)})
+            return
+
+        if self.path == '/api/agent/seller-count':
+            length = int(self.headers.get('Content-Length', '0'))
+            raw = self.rfile.read(length)
+            try:
+                payload = json.loads(raw.decode('utf-8')) if raw else {}
+                self._send_json(200, fetch_and_save_seller_count(payload.get('runId'), payload.get('asin')))
             except ValueError as exc:
                 self._send_json(400, {'error': str(exc)})
             except Exception as exc:

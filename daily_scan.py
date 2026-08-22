@@ -80,6 +80,7 @@ from datetime import datetime, timezone
 
 from keepa_mcp.keepa_client import KeepaError
 from keepa_mcp.server import (
+    enrich_qualified_candidates_with_seller_count,
     expand_from_seller,
     expand_keyword,
     find_arbitrage_candidates,
@@ -234,6 +235,11 @@ def _expand_from_one_seller(
     qualified_count = len(seller_evaluation["qualified"])
     print(f"[INFO] セラー「{seller_name}」の出品: {seller_result.get('evaluated', 0)}件評価 / "
           f"実質利益率20%以上: {qualified_count}件")
+
+    if seller_evaluation["qualified"]:
+        enrich_qualified_candidates_with_seller_count(
+            seller_evaluation["qualified"], wait_for_tokens=wait_for_tokens,
+        )
 
     if seller_evaluation["qualified"] or seller_evaluation["rejected"]:
         seller_run_id = new_agent_run_id()
@@ -428,6 +434,13 @@ def run_daily_scan(
         print(f"[WARN] 重量データなし(仮値で計算): {evaluation['weight_missing']}")
     if evaluation["fee_missing"]:
         print(f"[WARN] 手数料データなし(仮値で計算): {evaluation['fee_missing']}")
+
+    if evaluation["qualified"]:
+        print(f"[INFO] 有力候補{len(evaluation['qualified'])}件のセラー数を取得中(Keepa offers、約7トークン/件)...")
+        seller_count_result = enrich_qualified_candidates_with_seller_count(
+            evaluation["qualified"], wait_for_tokens=wait_for_tokens,
+        )
+        print(f"[INFO] セラー数取得: 成功{seller_count_result['enriched']}件 / 失敗{seller_count_result['failed']}件")
 
     persist_agent_run(label, evaluation, run_id=run_id)
     print(f"[INFO] 「エージェント」ページ用に保存しました (run_id={run_id})。ダッシュボードで確認できます。")

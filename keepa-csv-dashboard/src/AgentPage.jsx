@@ -264,10 +264,15 @@ export default function AgentPage() {
             // jpCostJpyと一致するので、どちらが採用されたか列を見比べればわかる。
             const jpAmazonCostJpy = item.data?.jp_amazon_cost_jpy ?? null;
             const wholesaleCostJpy = item.data?.wholesale_cost_jpy ?? null;
+            // CEO: 「候補商品に対して、セラーの数...を取得できますか？」
+            // 「すべての商品ではなく、有力候補のみ。」— 合格候補だけ取得するため、
+            // 古い合格候補や不合格候補ではnullのまま(詳細ページの個別取得ボタンで
+            // 後から埋められる)。
+            const competitorSellerCount = item.data?.competitor_seller_count ?? null;
             return {
                 ...item, grossProfitUsd, grossMarginPct, feesUsd, shippingCostUsd, importDutyUsd, roiPct,
                 salesRankDrops30, monthlySoldOrDrops, sourcingSupplierName, sourcingSupplierUrl,
-                jpAmazonCostJpy, wholesaleCostJpy,
+                jpAmazonCostJpy, wholesaleCostJpy, competitorSellerCount,
             };
         });
 
@@ -608,6 +613,7 @@ export default function AgentPage() {
                                     {renderSortHeader('価格変動(90日)', 'priceVolatility90d')}
                                     {renderSortHeader('ランキング', 'salesRank')}
                                     {renderSortHeader('レビュー数', 'reviewCount')}
+                                    {renderSortHeader('セラー数', 'competitorSellerCount')}
                                     {renderSortHeader('調査日時', 'createdAt')}
                                     {renderSortHeader('発見回数', 'timesSeen')}
                                     <th className="px-4 py-3 font-medium text-slate-400">リンク</th>
@@ -758,6 +764,7 @@ export default function AgentPage() {
                                         </td>
                                         <td className="px-4 py-3 text-slate-200">{candidate.salesRank ?? '-'}</td>
                                         <td className="px-4 py-3 text-slate-200">{candidate.reviewCount ?? '-'}</td>
+                                        <td className="px-4 py-3 text-slate-200">{candidate.competitorSellerCount ?? '-'}</td>
                                         <td className="px-4 py-3 text-slate-400">{formatDateTime(candidate.createdAt)}</td>
                                         <td className="px-4 py-3 text-slate-200">
                                             {candidate.timesSeen > 1 ? (

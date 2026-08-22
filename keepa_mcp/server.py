@@ -696,6 +696,59 @@ def find_other_sellers_for_candidate(
     }
 
 
+def enrich_qualified_candidates_with_seller_count(
+    entries: List[Dict[str, Any]],
+    domain: str = "US",
+    wait_for_tokens: bool = True,
+    force_refresh: bool = False,
+) -> Dict[str, int]:
+    """合格候補(entries)の各要素にentry['competitor_seller_count']を追加する
+    (Amazon自身を除いた、現在出品中の第三者セラーの実数 - find_other_sellers_
+    for_candidate()と違いmax_sellersで切り詰めず、analysis.distinct_seller_ids()
+    をそのままlen()する。ダッシュボードには一部リストではなく正確な数が要るため)。
+
+    CEO: 「候補商品に対して、セラーの数...を取得できますか？」「すべての商品では
+    なく、有力候補のみ。」通常の商品取得1トークン/件に対し約7トークン/件かかる
+    (estimate_offers_product_request_cost()、正確な計算式が非公開のため保守的な
+    見積もり) - 呼び出し側は必ずtier=='pass'の候補(evaluation['qualified'])
+    だけを渡すこと。この関数自体はtierでフィルタしない。
+
+    内部ヘルパーとしてFastMCPには登録しない(@mcp.tool()を付けない) -
+    daily_scan.py/netsea_sourcing.pyから直接呼ぶパイプライン内部の処理で、
+    LLMが対話的に呼ぶツールではないため。
+
+    entriesを直接書き換える(mutates in place)。1件のKeepaError(不正なASIN
+    等)で全体を止めず、その候補のcompetitor_seller_countはNoneのまま次へ進む
+    (netsea_sourcing.pyのJAN照合ループと同じ方針)。
+
+    Returns: {'enriched': 成功件数, 'failed': 失敗件数}
+    """
+    api_key = _require_api_key()
+    needed = estimate_offers_product_request_cost(1)
+    enriched = failed = 0
+    for entry in entries:
+        asin = entry.get("asin")
+        if not asin:
+            continue
+        if wait_for_tokens:
+            _wait_for_budget(api_key, needed, 0)
+        try:
+            product, _cache_info = cached_get_product_with_offers(
+                api_key, asin, domain=domain, force_refresh=force_refresh,
+            )
+        except KeepaError:
+            entry["competitor_seller_count"] = None
+            failed += 1
+            continue
+        if product is None:
+            entry["competitor_seller_count"] = None
+            failed += 1
+            continue
+        entry["competitor_seller_count"] = len(analysis.distinct_seller_ids(product))
+        enriched += 1
+    return {"enriched": enriched, "failed": failed}
+
+
 @mcp.tool()
 def get_product_history(asin: str, domain: str = "US", force_refresh: bool = False) -> Dict[str, Any]:
     """Price and sales-rank time series for one ASIN, for

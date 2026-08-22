@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional
 from keepa_mcp import analysis
 from keepa_mcp.cached_ops import cached_get_products, cached_lookup_by_code
 from keepa_mcp.keepa_client import KeepaError, get_token_status
+from keepa_mcp.server import enrich_qualified_candidates_with_seller_count
 from netsea_client import BATCH_SIZE, NetseaError, get_items, get_suppliers
 from ops_finance import (
     DEFAULT_WEIGHT_KG_FALLBACK,
@@ -342,6 +343,10 @@ def run_netsea_sourcing_cycle(
             by_category[cat]["qualified" if qualified_flag else "rejected"].append(item)
 
     for cat, evaluation in by_category.items():
+        if evaluation["qualified"]:
+            enrich_qualified_candidates_with_seller_count(
+                evaluation["qualified"], wait_for_tokens=wait_for_tokens,
+            )
         if evaluation["qualified"] or evaluation["rejected"]:
             persist_agent_run(cat, evaluation, run_id=run_id, source_type="netsea")
 

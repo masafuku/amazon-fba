@@ -311,6 +311,18 @@ export const fetchCandidateHistory = async (asin) => {
     return response.json();
 };
 
+// CandidateDetailPageの「セラー数を取得」ボタン専用(CEO: 「選択的にバックフィル
+// をしたい」)。実際にKeepaへ問い合わせ、その(runId, asin)行のdata_jsonへ保存する。
+export const fetchSellerCount = async (runId, asin) => {
+    const response = await fetch(`${API_BASE}/api/agent/seller-count`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ runId, asin }),
+    });
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    return response.json();
+};
+
 // 指定したASINをUS/JPの実データで評価し、agent_candidatesに記録する
 // (CEO: 「ASIN指定で調査する入力UIを追加できますか？」)。実際にKeepaへ
 // 問い合わせるため、ボタン押下時のみ呼ぶこと。
