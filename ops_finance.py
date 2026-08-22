@@ -580,30 +580,72 @@ def weekly_report(year_month: str = None) -> dict:
 # ---------------------------------------------------------------------------
 
 DEFAULT_WEIGHT_KG_FALLBACK = 0.5  # weight_kg が取れない商品向けの保守的な仮値
-MIN_MARGIN_PCT = 0.20             # これ未満は自動除外
+
+# CEO: 「輸出ビジネスだと利益率よりも、ROIの方が適切な指標では？」「利益率は15%に
+# しましょう」— 資金を回転させて増やしていくビジネスモデルでは、投下資本(JP原価)
+# に対する回収率(ROI)の方が資金効率の観点で本質的に重要。ただし利益率(US価格に
+# 対する余裕度)は価格競争・手数料変動への耐性を示す安全弁として引き続き必要
+# (ROIが高くても利益率が極端に薄い商品は、僅かな値下げで簡単に赤字転落するため)。
+# ROIを主な合格基準、利益率を安全弁とする二段階ゲート(20%→15%に引き下げ)。
+MIN_MARGIN_PCT = 0.15             # 安全弁: これ未満は(ROIが良くても)自動除外
+MIN_ROI_PCT = 0.50                # 主な合格基準: 資金効率
 
 # 合格ラインの多段階化(CEO: 「合格ラインは何段階かに分けてください。たとえば、
 # US−JPがゼロ以上、つまり手数料が0円なら成立する、というのもみたいです」)。
 # qualified/rejectedという2リストのメンバーシップ自体は変えない(tier==passが
-# qualified、それ以外はすべてrejected、旧来のmargin_pct>=min_margin_pct判定と
-# 完全に等価) - 各エントリに付与するtierフィールドが新しい情報として増えるだけ。
-TIER_PASS = 'pass'            # 実質利益率 >= 20%(従来の合格ラインそのまま)
-TIER_CONSIDER = 'consider'    # 実質利益率 0%以上20%未満(手数料込みでも黒字、ただし閾値未満)
+# qualified、それ以外はすべてrejected) - 各エントリに付与するtierフィールドが
+# 新しい情報として増えるだけ。
+TIER_PASS = 'pass'            # ROI >= 50% かつ 実質利益率 >= 15%(両方満たして合格)
+TIER_CONSIDER = 'consider'    # 実質利益率 0%以上だが、ROIまたは利益率が基準未満
 TIER_REFERENCE = 'reference'  # 実質利益率マイナスだが、手数料を一切引かない粗差
                                # (US価格 - JP原価)が0以上(=手数料が0円なら成立する)
 TIER_REJECT = 'reject'        # 上記のいずれでもない、または価格データ自体が無い
 
+# CEO: 「何もしていないので特に課税事業者としては登録されていないとおもいます」
+# 「本業は不動産賃貸業です。課税事業者登録は、今後しますが、今は税込前提で試算
+# してください」— 免税事業者の間は消費税の仕入税額控除ができず、卸仕入れの消費税が
+# 実質コストになる。課税事業者登録(インボイス登録)が完了したらTrueに変更する。
+IS_JCT_REGISTERED = False
+JCT_RATE = 0.10
+
+
+def normalize_jp_cost_for_tax(
+    wholesale_raw_jpy: float | None,
+    jp_amazon_raw_jpy: float | None,
+) -> float | None:
+    """卸価格(NETSEA等、税抜表示が通例)とAmazon JP小売価格(Keepa経由、税込表示が
+    通例)は税基準が揃っていないため単純比較できない。IS_JCT_REGISTEREDに応じて
+    両方を同じ基準(免税事業者なら税込、課税事業者なら税抜)に揃えてから、両方
+    揃っていれば安い方を返す(CEO: 「利益等は安い方で計算してください」の前提を
+    保つ)。どちらか一方しか無ければそちらを正規化して返す。両方NoneならNone。
+    """
+    candidates = []
+    if wholesale_raw_jpy is not None:
+        candidates.append(
+            wholesale_raw_jpy if IS_JCT_REGISTERED else wholesale_raw_jpy * (1 + JCT_RATE)
+        )
+    if jp_amazon_raw_jpy is not None:
+        candidates.append(
+            jp_amazon_raw_jpy / (1 + JCT_RATE) if IS_JCT_REGISTERED else jp_amazon_raw_jpy
+        )
+    return min(candidates) if candidates else None
+
 
 def _classify_tier(
     margin_pct: float | None,
+    roi_pct: float | None,
     us_price_usd: float | None,
     jp_cost_usd: float | None,
     min_margin_pct: float = MIN_MARGIN_PCT,
+    min_roi_pct: float = MIN_ROI_PCT,
 ) -> str:
-    """calc_unit_profit()の結果から4段階のtierを判定する。"""
+    """calc_unit_profit()の結果から4段階のtierを判定する。
+    CEO: 「輸出ビジネスだと利益率よりも、ROIの方が適切な指標では？」— ROIを主な
+    合格基準(資金効率)、利益率を安全弁(価格競争・手数料変動への耐性)として
+    両方を満たす場合のみ合格とする。"""
     if margin_pct is None:
         return TIER_REJECT
-    if margin_pct >= min_margin_pct:
+    if margin_pct >= min_margin_pct and roi_pct is not None and roi_pct >= min_roi_pct:
         return TIER_PASS
     if margin_pct >= 0:
         return TIER_CONSIDER
@@ -615,6 +657,7 @@ def _classify_tier(
 def evaluate_mcp_candidates(
     mcp_result: dict,
     min_margin_pct: float = MIN_MARGIN_PCT,
+    min_roi_pct: float = MIN_ROI_PCT,
     exchange_rate: float = 150.0,
 ) -> dict:
     """keepa_mcp.server.find_arbitrage_candidates() の戻り値を受け取り、
@@ -711,12 +754,18 @@ def evaluate_mcp_candidates(
             'jp_amazon_cost_jpy': cost['price'],
             'wholesale_cost_jpy': None,
         }
-        entry['tier'] = _classify_tier(profit['margin_pct'], profit['us_price_usd'], profit['jp_cost_usd'], min_margin_pct)
+        entry['tier'] = _classify_tier(
+            profit['margin_pct'], profit['roi_pct'], profit['us_price_usd'], profit['jp_cost_usd'],
+            min_margin_pct, min_roi_pct,
+        )
 
         if entry['tier'] == TIER_PASS:
             qualified.append(entry)
         else:
-            entry['reason'] = f"実質利益率 {profit['margin_pct']:.1%} が閾値 {min_margin_pct:.0%} 未満"
+            entry['reason'] = (
+                f"実質利益率 {profit['margin_pct']:.1%}(閾値{min_margin_pct:.0%}) / "
+                f"ROI {profit['roi_pct']:.0%}(閾値{min_roi_pct:.0%}) が基準未満"
+            )
             rejected.append(entry)
 
     qualified.sort(key=lambda e: e['margin_pct'], reverse=True)
@@ -801,7 +850,10 @@ def evaluate_mcp_candidates(
             entry['weight_kg'] = weight_kg
             entry['weight_estimated'] = used_fallback_weight
             entry['fee_estimated'] = used_fallback_fee
-            entry['tier'] = _classify_tier(profit['margin_pct'], profit['us_price_usd'], profit['jp_cost_usd'], min_margin_pct)
+            entry['tier'] = _classify_tier(
+                profit['margin_pct'], profit['roi_pct'], profit['us_price_usd'], profit['jp_cost_usd'],
+                min_margin_pct, min_roi_pct,
+            )
 
         rejected.append(entry)
 

@@ -5,6 +5,7 @@ from ops_finance import (
     _is_searchable_keyword,
     _shipping_cost_jpy_for_weight,
     calc_unit_profit,
+    normalize_jp_cost_for_tax,
 )
 
 
@@ -114,30 +115,72 @@ class TestCalcUnitProfitRoi(unittest.TestCase):
 class TestClassifyTier(unittest.TestCase):
     """合格ラインの多段階化(CEO: 「合格ラインは何段階かに分けてください」)。
     _classify_tier() の境界値を確認する。
+
+    CEO: 「輸出ビジネスだと利益率よりも、ROIの方が適切な指標では？」「利益率は
+    15%にしましょう」— ROI(投下資本利益率)を主な合格基準、実質利益率15%を
+    安全弁とする二段階ゲート(両方満たして初めてpass)。デフォルトは
+    MIN_MARGIN_PCT=0.15, MIN_ROI_PCT=0.50。
     """
 
-    def test_exactly_at_pass_threshold(self):
-        self.assertEqual(_classify_tier(0.20, 100, 50), 'pass')
+    def test_exactly_at_both_thresholds_passes(self):
+        self.assertEqual(_classify_tier(0.15, 0.50, 100, 50), 'pass')
 
-    def test_just_below_pass_threshold(self):
-        self.assertEqual(_classify_tier(0.1999, 100, 50), 'consider')
+    def test_margin_below_threshold_with_good_roi_is_consider_not_pass(self):
+        # ROIは基準を満たすが、利益率という安全弁を割っているのでpassにしない
+        self.assertEqual(_classify_tier(0.1499, 0.90, 100, 50), 'consider')
+
+    def test_roi_below_threshold_with_good_margin_is_consider_not_pass(self):
+        # 利益率は十分だが、ROI(主な合格基準)が基準未満ならpassにしない
+        self.assertEqual(_classify_tier(0.30, 0.4999, 100, 50), 'consider')
+
+    def test_roi_none_does_not_pass_even_with_good_margin(self):
+        self.assertEqual(_classify_tier(0.30, None, 100, 50), 'consider')
 
     def test_exactly_zero_margin(self):
-        self.assertEqual(_classify_tier(0.0, 100, 50), 'consider')
+        self.assertEqual(_classify_tier(0.0, 0.50, 100, 50), 'consider')
 
     def test_just_below_zero_margin_with_nonneg_gross(self):
         # margin_pctはマイナスだが、手数料を一切引かない粗差(US-JP)はちょうど0
-        self.assertEqual(_classify_tier(-0.01, 100, 100), 'reference')
+        self.assertEqual(_classify_tier(-0.01, None, 100, 100), 'reference')
 
     def test_negative_margin_negative_gross(self):
-        self.assertEqual(_classify_tier(-0.01, 90, 100), 'reject')
+        self.assertEqual(_classify_tier(-0.01, None, 90, 100), 'reject')
 
     def test_no_price_data(self):
-        self.assertEqual(_classify_tier(None, None, None), 'reject')
+        self.assertEqual(_classify_tier(None, None, None, None), 'reject')
 
-    def test_custom_min_margin_pct(self):
-        self.assertEqual(_classify_tier(0.10, 100, 50, min_margin_pct=0.10), 'pass')
-        self.assertEqual(_classify_tier(0.09, 100, 50, min_margin_pct=0.10), 'consider')
+    def test_custom_thresholds(self):
+        self.assertEqual(
+            _classify_tier(0.10, 0.30, 100, 50, min_margin_pct=0.10, min_roi_pct=0.30), 'pass',
+        )
+        self.assertEqual(
+            _classify_tier(0.09, 0.30, 100, 50, min_margin_pct=0.10, min_roi_pct=0.30), 'consider',
+        )
+
+
+class TestNormalizeJpCostForTax(unittest.TestCase):
+    """CEO: 「課税事業者としては登録されていないとおもいます」「今は税込前提で
+    試算してください」— 卸価格(税抜表示が通例)とAmazon JP小売価格(税込表示が
+    通例)の税基準を揃えてから比較する normalize_jp_cost_for_tax() を確認する。
+    ops_finance.IS_JCT_REGISTERED は現状False(免税事業者)前提。
+    """
+
+    def test_wholesale_only_gets_tax_added_when_not_registered(self):
+        # 免税事業者: 税抜卸価格に10%上乗せした値になる
+        self.assertAlmostEqual(normalize_jp_cost_for_tax(1000, None), 1100)
+
+    def test_jp_amazon_only_stays_as_is_when_not_registered(self):
+        # 免税事業者: Amazon JP小売価格は既に税込表示なので調整不要
+        self.assertEqual(normalize_jp_cost_for_tax(None, 1000), 1000)
+
+    def test_picks_cheaper_after_normalizing_both(self):
+        # 卸税抜700(税込770) vs JP小売税込750 -> 税込770の方が高いのでJP小売750を採用
+        self.assertEqual(normalize_jp_cost_for_tax(700, 750), 750)
+        # 卸税抜600(税込660) vs JP小売税込750 -> 卸(税込660)の方が安い
+        self.assertAlmostEqual(normalize_jp_cost_for_tax(600, 750), 660)
+
+    def test_both_none_returns_none(self):
+        self.assertIsNone(normalize_jp_cost_for_tax(None, None))
 
 
 class TestIsSearchableKeyword(unittest.TestCase):

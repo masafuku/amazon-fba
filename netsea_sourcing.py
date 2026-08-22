@@ -12,7 +12,11 @@ CEO: 「Amazon以外にネット系の卸売り業者からの仕入れも考え
   - jp_cost_jpy には、NETSEAの実際の卸価格(wholesale_cost_jpy)と、同じJANで
     Amazon JPにも出品があればその価格(jp_amazon_cost_jpy)のうち安い方を使う
     (daily_scan.py 経由の候補より原価の精度が高い上、卸より小売の方が安いケースも
-    取りこぼさない。CEO: 「利益等は安い方で計算してください」)。
+    取りこぼさない。CEO: 「利益等は安い方で計算してください」)。ただし卸価格は
+    税抜表示・Amazon JP小売価格は税込表示が通例で税基準が揃っていないため、
+    ops_finance.normalize_jp_cost_for_tax()で基準を揃えてから比較する
+    (CEO: 「課税事業者としては登録されていないとおもいます」「今は税込前提で
+    試算してください」)。
 """
 from __future__ import annotations
 
@@ -29,11 +33,13 @@ from netsea_client import BATCH_SIZE, NetseaError, get_items, get_suppliers
 from ops_finance import (
     DEFAULT_WEIGHT_KG_FALLBACK,
     MIN_MARGIN_PCT,
+    MIN_ROI_PCT,
     _classify_tier,
     calc_unit_profit,
     init_ops_tables,
     log_agent_run,
     new_agent_run_id,
+    normalize_jp_cost_for_tax,
     persist_agent_run,
 )
 
@@ -132,6 +138,7 @@ def find_jan_matched_candidates(
     price_range_to: Optional[int] = None,
     exchange_rate: float = 150.0,
     min_margin_pct: float = MIN_MARGIN_PCT,
+    min_roi_pct: float = MIN_ROI_PCT,
     wait_for_tokens: bool = False,
 ) -> Dict[str, Any]:
     """メインのエントリポイント。指定カテゴリーのNETSEA商品のうちJANコード付きの
@@ -237,10 +244,7 @@ def find_jan_matched_candidates(
         if jp_products:
             jp_amazon_cost_jpy = analysis.current_price(jp_products[0], "JP")
 
-        if jp_amazon_cost_jpy is not None:
-            effective_cost_jpy = min(wholesale_cost_jpy, jp_amazon_cost_jpy)
-        else:
-            effective_cost_jpy = wholesale_cost_jpy
+        effective_cost_jpy = normalize_jp_cost_for_tax(wholesale_cost_jpy, jp_amazon_cost_jpy)
 
         profit = calc_unit_profit(
             us_price_usd=us_price,
@@ -283,14 +287,18 @@ def find_jan_matched_candidates(
             "jp_amazon_cost_jpy": jp_amazon_cost_jpy,
         }
         entry["tier"] = _classify_tier(
-            profit["margin_pct"], profit["us_price_usd"], profit["jp_cost_usd"], min_margin_pct,
+            profit["margin_pct"], profit["roi_pct"], profit["us_price_usd"], profit["jp_cost_usd"],
+            min_margin_pct, min_roi_pct,
         )
         entry["category"] = f"NETSEA卸仕入れ({meta['category_label']})"
 
         if entry["tier"] == "pass":
             qualified.append(entry)
         else:
-            entry["reason"] = f"実質利益率 {profit['margin_pct']:.1%} が閾値 {min_margin_pct:.0%} 未満"
+            entry["reason"] = (
+                f"実質利益率 {profit['margin_pct']:.1%}(閾値{min_margin_pct:.0%}) / "
+                f"ROI {profit['roi_pct']:.0%}(閾値{min_roi_pct:.0%}) が基準未満"
+            )
             rejected.append(entry)
 
     qualified.sort(key=lambda e: e["margin_pct"], reverse=True)
