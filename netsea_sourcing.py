@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional
 from keepa_mcp import analysis
 from keepa_mcp.cached_ops import cached_get_products, cached_lookup_by_code
 from keepa_mcp.keepa_client import KeepaError, get_token_status
-from keepa_mcp.server import enrich_qualified_candidates_with_seller_count
+from keepa_mcp.server import enrich_qualified_candidates_with_offer_details
 from netsea_client import BATCH_SIZE, NetseaError, get_items, get_suppliers
 from ops_finance import (
     DEFAULT_WEIGHT_KG_FALLBACK,
@@ -261,6 +261,8 @@ def find_jan_matched_candidates(
             "review_count": analysis.review_count(product),
             "monthly_sold": analysis.monthly_sold(product),
             "sales_rank_drops_30": analysis.sales_rank_drops_30(product),
+            "sales_rank_drops_90": analysis.sales_rank_drops_90(product),
+            "competitor_seller_count": analysis.total_offer_count(product),
             "price_diff_rate_gross": None,
             "price_volatility_90d": analysis.price_volatility_ratio(product, "US"),
             "weight_kg": weight_kg,
@@ -344,7 +346,7 @@ def run_netsea_sourcing_cycle(
 
     for cat, evaluation in by_category.items():
         if evaluation["qualified"]:
-            enrich_qualified_candidates_with_seller_count(
+            enrich_qualified_candidates_with_offer_details(
                 evaluation["qualified"], wait_for_tokens=wait_for_tokens,
             )
         if evaluation["qualified"] or evaluation["rejected"]:

@@ -9,7 +9,7 @@ import {
     XAxis,
     YAxis,
 } from 'recharts';
-import { fetchCandidateHistory, fetchSellerCount, loadAgentCandidateDetail, loadCandidateHistory, lookupAsin, saveFavorite } from './db';
+import { fetchCandidateHistory, fetchSellerCount, fetchStock, loadAgentCandidateDetail, loadCandidateHistory, lookupAsin, saveFavorite } from './db';
 import { formatDateTime } from './formatters';
 
 const EXCHANGE_RATE = 150;
@@ -84,6 +84,8 @@ export default function CandidateDetailPage({ asin, onBack }) {
     const [investigateError, setInvestigateError] = useState('');
     const [sellerCountFetching, setSellerCountFetching] = useState(false);
     const [sellerCountError, setSellerCountError] = useState('');
+    const [stockFetching, setStockFetching] = useState(false);
+    const [stockError, setStockError] = useState('');
 
     useEffect(() => {
         let cancelled = false;
@@ -147,10 +149,11 @@ export default function CandidateDetailPage({ asin, onBack }) {
         }
     };
 
-    // CEO: 「候補商品に対して、セラーの数...を取得できますか？」「すべての商品
-    // ではなく、有力候補のみ。」「選択的にバックフィルをしたい。」— 新規の合格
-    // 候補は最初から取得済みだが、過去の合格候補はこのボタンでCEOが気になった
-    // ものだけ個別に取得する(一括再実行はしない)。
+    // CEO: 「セラー数が38となっていますが、keepaで直接見た値と明らかに違います。
+    // 調査おねがいします。」— 原因は、旧実装がKeepaのoffers配列(過去の・もう
+    // 出品されていない古いオファーが混在)を全件カウントしていたバグと判明。
+    // v2は通常の商品取得のみで再計算する(追加コストなし)ため、既存の誤った値
+    // だろうと常に「再取得」ボタンから呼べる。
     const handleFetchSellerCount = async () => {
         if (!candidate) return;
         setSellerCountFetching(true);
@@ -168,6 +171,29 @@ export default function CandidateDetailPage({ asin, onBack }) {
             setSellerCountError(fetchError?.message || 'セラー数の取得に失敗しました(トークン不足の可能性があります)。');
         } finally {
             setSellerCountFetching(false);
+        }
+    };
+
+    // CEO: 「在庫の数...も取得して表示してください」— offers+stockの新規Keepa
+    // コール(トークン消費あり)なので、セラー数とは違い値が無い候補にのみ
+    // ボタンを出す(選択的に取得)。
+    const handleFetchStock = async () => {
+        if (!candidate) return;
+        setStockFetching(true);
+        setStockError('');
+        try {
+            const result = await fetchStock(candidate.runId, asin);
+            if (!result.ok) {
+                setStockError(result.error || '在庫の取得に失敗しました。');
+                return;
+            }
+            setCandidate((current) => (current
+                ? { ...current, data: { ...current.data, competitor_stock_total: result.competitorStockTotal } }
+                : current));
+        } catch (fetchError) {
+            setStockError(fetchError?.message || '在庫の取得に失敗しました(トークン不足の可能性があります)。');
+        } finally {
+            setStockFetching(false);
         }
     };
 
@@ -397,6 +423,10 @@ export default function CandidateDetailPage({ asin, onBack }) {
                         }
                     />
                     <StatCard
+                        label="過去の販売数(商品全体の目安)"
+                        value={data.sales_rank_drops_90 != null ? `ランク変動90日 ${data.sales_rank_drops_90}回(推定)` : '-'}
+                    />
+                    <StatCard
                         label="重量"
                         value={candidate.weightKg != null ? `${candidate.weightKg}kg${candidate.weightEstimated ? '(仮値)' : ''}` : '-'}
                     />
@@ -415,16 +445,32 @@ export default function CandidateDetailPage({ asin, onBack }) {
                     <StatCard
                         label="セラー数(競合)"
                         value={
-                            data.competitor_seller_count != null ? (
-                                data.competitor_seller_count
-                            ) : (
+                            <span className="flex items-center gap-2">
+                                <span>{data.competitor_seller_count ?? '-'}</span>
                                 <button
                                     type="button"
                                     onClick={handleFetchSellerCount}
                                     disabled={sellerCountFetching}
+                                    className="text-xs text-cyan-300 underline decoration-cyan-700 underline-offset-2 hover:text-cyan-200 disabled:opacity-50"
+                                >
+                                    {sellerCountFetching ? '取得中...' : '再取得'}
+                                </button>
+                            </span>
+                        }
+                    />
+                    <StatCard
+                        label="在庫(競合合計)"
+                        value={
+                            data.competitor_stock_total != null ? (
+                                data.competitor_stock_total
+                            ) : (
+                                <button
+                                    type="button"
+                                    onClick={handleFetchStock}
+                                    disabled={stockFetching}
                                     className="text-sm text-cyan-300 underline decoration-cyan-700 underline-offset-2 hover:text-cyan-200 disabled:opacity-50"
                                 >
-                                    {sellerCountFetching ? '取得中...' : 'セラー数を取得'}
+                                    {stockFetching ? '取得中...' : '在庫を取得'}
                                 </button>
                             )
                         }
@@ -445,6 +491,7 @@ export default function CandidateDetailPage({ asin, onBack }) {
                     <StatCard label="調査日時" value={formatDateTime(candidate.createdAt)} />
                 </div>
                 {sellerCountError ? <p className="text-sm text-rose-300">{sellerCountError}</p> : null}
+                {stockError ? <p className="text-sm text-rose-300">{stockError}</p> : null}
             </section>
 
             <section className="space-y-4 rounded-3xl border border-slate-800 bg-slate-900/80 p-6 shadow-xl shadow-slate-950/10">

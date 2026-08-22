@@ -311,10 +311,26 @@ export const fetchCandidateHistory = async (asin) => {
     return response.json();
 };
 
-// CandidateDetailPageの「セラー数を取得」ボタン専用(CEO: 「選択的にバックフィル
-// をしたい」)。実際にKeepaへ問い合わせ、その(runId, asin)行のdata_jsonへ保存する。
+// CandidateDetailPageの「再取得」ボタン専用(CEO: 「セラー数が38となっていますが、
+// keepaで直接見た値と明らかに違います」)。v2: 通常の商品取得のみ(追加コースト
+// なし)でセラー数を再計算する - 既存の誤った値も上書き訂正できるよう、値の
+// 有無に関わらず常に呼べる。実際にKeepaへ問い合わせ、その(runId, asin)行の
+// data_jsonへ保存する。
 export const fetchSellerCount = async (runId, asin) => {
     const response = await fetch(`${API_BASE}/api/agent/seller-count`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ runId, asin }),
+    });
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    return response.json();
+};
+
+// CandidateDetailPageの「在庫を取得」ボタン専用(CEO: 「在庫の数...も取得して
+// 表示してください」)。offers+stockの新規Keepaコール(トークン消費あり)。
+// 実際にKeepaへ問い合わせ、その(runId, asin)行のdata_jsonへ保存する。
+export const fetchStock = async (runId, asin) => {
+    const response = await fetch(`${API_BASE}/api/agent/stock`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ runId, asin }),

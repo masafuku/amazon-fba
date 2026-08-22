@@ -264,15 +264,17 @@ export default function AgentPage() {
             // jpCostJpyと一致するので、どちらが採用されたか列を見比べればわかる。
             const jpAmazonCostJpy = item.data?.jp_amazon_cost_jpy ?? null;
             const wholesaleCostJpy = item.data?.wholesale_cost_jpy ?? null;
-            // CEO: 「候補商品に対して、セラーの数...を取得できますか？」
-            // 「すべての商品ではなく、有力候補のみ。」— 合格候補だけ取得するため、
-            // 古い合格候補や不合格候補ではnullのまま(詳細ページの個別取得ボタンで
-            // 後から埋められる)。
+            // CEO: 「候補商品に対して、セラーの数、在庫...を取得できますか？」
+            // セラー数(v2): stats.totalOfferCountから無料で取得済み、全候補に付く
+            // (以前はoffers配列の水増しバグで誤った値だった - 詳細ページの
+            // 「再取得」ボタンで個別に訂正可能)。在庫は「有力候補のみ」有料取得
+            // なので、古い候補・不合格候補ではnullのまま。
             const competitorSellerCount = item.data?.competitor_seller_count ?? null;
+            const competitorStockTotal = item.data?.competitor_stock_total ?? null;
             return {
                 ...item, grossProfitUsd, grossMarginPct, feesUsd, shippingCostUsd, importDutyUsd, roiPct,
                 salesRankDrops30, monthlySoldOrDrops, sourcingSupplierName, sourcingSupplierUrl,
-                jpAmazonCostJpy, wholesaleCostJpy, competitorSellerCount,
+                jpAmazonCostJpy, wholesaleCostJpy, competitorSellerCount, competitorStockTotal,
             };
         });
 
@@ -614,6 +616,7 @@ export default function AgentPage() {
                                     {renderSortHeader('ランキング', 'salesRank')}
                                     {renderSortHeader('レビュー数', 'reviewCount')}
                                     {renderSortHeader('セラー数', 'competitorSellerCount')}
+                                    {renderSortHeader('在庫(競合合計)', 'competitorStockTotal')}
                                     {renderSortHeader('調査日時', 'createdAt')}
                                     {renderSortHeader('発見回数', 'timesSeen')}
                                     <th className="px-4 py-3 font-medium text-slate-400">リンク</th>
@@ -765,6 +768,7 @@ export default function AgentPage() {
                                         <td className="px-4 py-3 text-slate-200">{candidate.salesRank ?? '-'}</td>
                                         <td className="px-4 py-3 text-slate-200">{candidate.reviewCount ?? '-'}</td>
                                         <td className="px-4 py-3 text-slate-200">{candidate.competitorSellerCount ?? '-'}</td>
+                                        <td className="px-4 py-3 text-slate-200">{candidate.competitorStockTotal ?? '-'}</td>
                                         <td className="px-4 py-3 text-slate-400">{formatDateTime(candidate.createdAt)}</td>
                                         <td className="px-4 py-3 text-slate-200">
                                             {candidate.timesSeen > 1 ? (

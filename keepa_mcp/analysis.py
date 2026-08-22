@@ -90,6 +90,89 @@ def sales_rank_drops_30(product: Dict[str, Any]) -> Optional[int]:
     return int(val) if isinstance(val, (int, float)) and val >= 0 else None
 
 
+def sales_rank_drops_90(product: Dict[str, Any]) -> Optional[int]:
+    """sales_rank_drops_30と同じ考え方の90日版。追加のKeepaコールなし(同じ
+    statsオブジェクトの一部)。商品全体の目安であり、セラー別の販売数ではない
+    点に注意 - CEO: 「過去の販売数、30日の販売数も取得して表示してください」に
+    対する、Keepa APIで実際に取得できる範囲の代替値(セラー別の販売数は
+    Offer.java/Stats.javaの公式構造体を確認したが該当フィールドが存在せず、
+    APIでは取得不可能と判明したため)。"""
+    stats = product.get("stats") or {}
+    val = stats.get("salesRankDrops90")
+    return int(val) if isinstance(val, (int, float)) and val >= 0 else None
+
+
+def total_offer_count(product: Dict[str, Any]) -> Optional[int]:
+    """現在ライブな出品(セラー)の総数。stats.totalOfferCountをそのまま読むだけ -
+    通常の商品取得(1トークン/商品、どの候補でも既に取得済み)に含まれており、
+    offers=N(約7トークン/商品)の追加コールは不要。
+
+    以前はdistinct_seller_ids()でoffers配列を数えていたが、その配列には
+    過去の(もう出品されていない)古いオファーが混在しており、実データで
+    大きく水増しされることが判明した(ASIN B07V31TRKB: offers配列41件から
+    38セラーとカウントしていたが、実際にライブなのは2件のみ - stats.
+    totalOfferCount=2、liveOffersOrder=[36,34]と一致)。CEO:「セラー数が
+    38となっていますが、keepaで直接見た値と明らかに違います」。
+
+    既知の制約(Keepa非公開のため未確定): Amazon自身が出品中の場合にこの
+    カウントに含まれるかどうかは、検証した2件のASINでは判別できなかった
+    (どちらもAmazon自身のアクティブな出品が無かったため)。"""
+    stats = product.get("stats") or {}
+    val = stats.get("totalOfferCount")
+    return int(val) if isinstance(val, (int, float)) and val >= 0 else None
+
+
+def _live_offers(product: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """product['offers'](offers_limit指定時のみ存在)を、現在ライブな
+    (=もう出品終了していない)ものだけに絞り込む。実データで確定済み:
+    product['liveOffersOrder']はoffers配列への**インデックス**のリスト
+    (offerIdではない - ASIN B07V31TRKBで、liveOffersOrder=[36,34]は
+    インデックス34・36の要素と一致し、その2件はlastSeen==stats.
+    lastOffersUpdateとも一致する。offerIdとして解釈すると別の・古い2件に
+    なり不一致だった)。liveOffersOrderが無ければlastSeen==stats.
+    lastOffersUpdateにフォールバックする。"""
+    offers = product.get("offers")
+    if not offers or not isinstance(offers, list):
+        return []
+    stats = product.get("stats") or {}
+    live_order = product.get("liveOffersOrder")
+    if isinstance(live_order, list) and live_order:
+        live_indices = set(live_order)
+        return [o for i, o in enumerate(offers) if isinstance(o, dict) and i in live_indices]
+    last_update = stats.get("lastOffersUpdate")
+    if last_update is None:
+        # liveOffersOrderもlastOffersUpdateも無ければ絞り込みようがない -
+        # 以前の(誤った)全件返却に留める。
+        return [o for o in offers if isinstance(o, dict)]
+    return [o for o in offers if isinstance(o, dict) and o.get("lastSeen") == last_update]
+
+
+def total_live_stock(product: Dict[str, Any]) -> Optional[int]:
+    """ライブな出品の在庫数(stockCSVの最新値)の合計。keepa_client.get_products
+    (offers_limit=N, include_stock=True)で取得した商品でのみ意味を持つ
+    (stockCSVはstock=1指定時のみ各offerに付与される)。
+
+    stats側の集計フィールド(stockPerCondition3rdFBA等)は使わない -
+    Keepa公式ドキュメントで最大10までしか報告しない仕様と確認済み
+    (CEOのスクリーンショットは48・16・合計64という10超えの実例)。
+    個々のライブなofferのstockCSV最新値を合計する方式のみが正確。
+
+    stockCSVを持つofferが1件も無ければ(=stock=1を付けずに取得した場合、
+    または本当にデータが無い場合)Noneを返す(在庫0とは区別する)。"""
+    live = _live_offers(product)
+    if not live:
+        return None
+    total = 0
+    any_stock_data = False
+    for offer in live:
+        stock_csv = offer.get("stockCSV")
+        if not stock_csv or not isinstance(stock_csv, list) or len(stock_csv) < 2:
+            continue
+        any_stock_data = True
+        total += stock_csv[-1]
+    return total if any_stock_data else None
+
+
 # Keepa uses these sentinel seller ids in buyBoxSellerIdHistory to mean
 # "no seller qualified for the buy box" (-1) / "a brand-new, unknown seller"
 # (-2) - neither is a real, queryable seller id.
@@ -115,24 +198,25 @@ def current_buy_box_seller_id(product: Dict[str, Any]) -> Optional[str]:
 
 
 def distinct_seller_ids(product: Dict[str, Any], exclude_amazon: bool = True) -> List[str]:
-    """All distinct sellerIds currently offering this ASIN (not just the buy
+    """All distinct sellerIds *currently* offering this ASIN (not just the buy
     box winner) - Amazon's "Other sellers on Amazon" list, in effect. Only
     present when the product was fetched with offers_limit set (see
     keepa_client.get_products(offers_limit=N)); each real dict in the
     `offers` array has its own `sellerId`. Order is preserved, first-seen
     (roughly Amazon's own offer ranking), duplicates removed.
 
+    Filters to live offers only via _live_offers() - the raw `offers` array
+    mixes current listings with stale/historical ones no longer for sale
+    (verified live: ASIN B07V31TRKB had 41 raw offers but only 2 were
+    actually live), so counting/listing the raw array overstates real
+    competition significantly.
+
     exclude_amazon=True (default) drops offers where isAmazon is true -
     Amazon itself isn't a "seller to mine" for this pipeline's purposes.
     """
-    offers = product.get("offers")
-    if not offers or not isinstance(offers, list):
-        return []
     seen = set()
     seller_ids: List[str] = []
-    for offer in offers:
-        if not isinstance(offer, dict):
-            continue
+    for offer in _live_offers(product):
         if exclude_amazon and offer.get("isAmazon"):
             continue
         seller_id = offer.get("sellerId")

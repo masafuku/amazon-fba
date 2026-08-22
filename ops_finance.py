@@ -687,6 +687,8 @@ def evaluate_mcp_candidates(
             'review_count': sell.get('review_count'),
             'monthly_sold': sell.get('monthly_sold'),
             'sales_rank_drops_30': sell.get('sales_rank_drops_30'),
+            'sales_rank_drops_90': sell.get('sales_rank_drops_90'),
+            'competitor_seller_count': sell.get('competitor_seller_count'),
             'price_diff_rate_gross': candidate.get('price_diff_rate'),  # 手数料・送料考慮前
             'price_volatility_90d': candidate.get('price_volatility_90d'),
             'weight_kg': weight_kg,
@@ -746,6 +748,8 @@ def evaluate_mcp_candidates(
             'review_count': skip.get('review_count'),
             'monthly_sold': skip.get('monthly_sold'),
             'sales_rank_drops_30': skip.get('sales_rank_drops_30'),
+            'sales_rank_drops_90': skip.get('sales_rank_drops_90'),
+            'competitor_seller_count': skip.get('competitor_seller_count'),
             'price_diff_rate_gross': None,
             'price_volatility_90d': skip.get('price_volatility_90d'),
             'weight_kg': skip.get('weight_kg'),

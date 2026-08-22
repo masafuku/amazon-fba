@@ -465,14 +465,16 @@ def lookup_asin_action(payload):
     return _run_asin_lookup_cli(['lookup', '--asin', asin])
 
 
-# CandidateDetailPageの「セラー数を取得」ボタン専用(CEO: 「候補商品に対して、
-# セラーの数...を取得できますか？」「すべての商品ではなく、有力候補のみ。」
-# 「選択的にバックフィルをしたい。」)。新規の合格候補はdaily_scan.py/
-# netsea_sourcing.py側で自動的にセラー数を取得済みだが、過去の合格候補は
-# このボタンでCEOが気になったものだけ個別に取得する(一括再実行はしない)。
+# CandidateDetailPageの「セラー数」「在庫」取得ボタン専用(CEO: 「候補商品に対して、
+# セラーの数、在庫...を取得できますか？」「セラー数が38となっていますが、keepaで
+# 直接見た値と明らかに違います」)。v2: セラー数はoffers配列の水増しバグが判明した
+# ため、通常の商品取得だけで再計算する軽いコマンドに変更 - 既存の値の有無に関わらず
+# 「再取得」ボタンから常に呼べる(誤った値を上書き訂正するため)。在庫は逆に新規の
+# トークン消費が発生するため、値が無い候補にのみボタンを出す。
 # asin_lookup_cliと同じサブプロセス橋渡しパターン。
 SELLER_COUNT_CLI = Path(__file__).resolve().parent.parent / 'scripts' / 'seller_count_cli.py'
-SELLER_COUNT_TIMEOUT_SECONDS = 60  # 単一ASINのoffers取得(1回のKeepa往復)なのでseller_mineより短くてよい
+SELLER_COUNT_TIMEOUT_SECONDS = 30  # v2: 通常の商品取得のみ(offers不要)なので短くてよい
+STOCK_TIMEOUT_SECONDS = 60  # offers+stock取得(1回のKeepa往復)なのでseller_mineより短くてよい
 
 
 def _run_seller_count_cli(args):
@@ -524,6 +526,59 @@ def fetch_and_save_seller_count(run_id: str, asin: str):
         conn.commit()
 
     return {'ok': True, 'competitorSellerCount': result.get('competitorSellerCount')}
+
+
+def _run_stock_cli(args):
+    if not VENV_PYTHON.exists():
+        return {'ok': False, 'error': f'{VENV_PYTHON} が見つかりません(.venvのセットアップが必要です)'}
+    try:
+        result = subprocess.run(
+            [str(VENV_PYTHON), str(SELLER_COUNT_CLI), *args],
+            capture_output=True, text=True, timeout=STOCK_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return {'ok': False, 'error': f'在庫取得処理がタイムアウトしました({STOCK_TIMEOUT_SECONDS}秒)'}
+    stdout = (result.stdout or '').strip()
+    if stdout:
+        last_line = stdout.splitlines()[-1]
+        try:
+            return json.loads(last_line)
+        except ValueError:
+            pass
+    detail = (result.stderr or stdout or '').strip()
+    return {'ok': False, 'error': detail or f'seller_count_cli.py が異常終了しました(exit {result.returncode})'}
+
+
+def fetch_and_save_stock(run_id: str, asin: str):
+    """Keepaへ実際に問い合わせて在庫合計を取得し(offers+stock、新規トークン消費あり)、
+    その(run_id, asin)行のdata_jsonへ書き戻す(他のフィールドは保持するread-modify-write)。
+    セラー数の再取得とは別ルート(セラー数は無料の再計算、在庫は有料の新規取得なので
+    ボタンを混同させない)。"""
+    run_id = str(run_id or '').strip()
+    asin = str(asin or '').strip().upper()
+    if not run_id or not asin:
+        raise ValueError('runId and asin are required')
+
+    result = _run_stock_cli(['fetch-stock', '--asin', asin])
+    if not result.get('ok'):
+        return result
+
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            'SELECT data_json FROM agent_candidates WHERE run_id = ? AND asin = ?',
+            (run_id, asin),
+        ).fetchone()
+        if row is None:
+            return {'ok': False, 'error': f'候補が見つかりません(run_id={run_id}, asin={asin})'}
+        data = json.loads(row[0])
+        data['competitor_stock_total'] = result.get('competitorStockTotal')
+        conn.execute(
+            'UPDATE agent_candidates SET data_json = ? WHERE run_id = ? AND asin = ?',
+            (json.dumps(data, ensure_ascii=False), run_id, asin),
+        )
+        conn.commit()
+
+    return {'ok': True, 'competitorStockTotal': result.get('competitorStockTotal')}
 
 
 # CandidateDetailPageの「詳細データ取得」ボタン専用。seller_mine_cli.pyと
@@ -2073,6 +2128,18 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 payload = json.loads(raw.decode('utf-8')) if raw else {}
                 self._send_json(200, fetch_and_save_seller_count(payload.get('runId'), payload.get('asin')))
+            except ValueError as exc:
+                self._send_json(400, {'error': str(exc)})
+            except Exception as exc:
+                self._send_json(500, {'error': str(exc)})
+            return
+
+        if self.path == '/api/agent/stock':
+            length = int(self.headers.get('Content-Length', '0'))
+            raw = self.rfile.read(length)
+            try:
+                payload = json.loads(raw.decode('utf-8')) if raw else {}
+                self._send_json(200, fetch_and_save_stock(payload.get('runId'), payload.get('asin')))
             except ValueError as exc:
                 self._send_json(400, {'error': str(exc)})
             except Exception as exc:

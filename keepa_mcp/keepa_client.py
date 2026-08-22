@@ -176,6 +176,15 @@ def estimate_offers_product_request_cost(count: int, offers_limit: int = 20) -> 
     return max(0, count) * 7
 
 
+def estimate_offers_and_stock_product_request_cost(count: int, offers_limit: int = 20) -> int:
+    """Product Request with offers=N&stock=1: the incremental cost of stock=1
+    on top of plain offers=N isn't publicly documented either (same
+    uncertainty as estimate_offers_product_request_cost() itself). Treated
+    as offers cost + 50% margin so wait_for_tokens budget checks err toward
+    waiting. Revise once observed live."""
+    return math.ceil(estimate_offers_product_request_cost(count, offers_limit) * 1.5)
+
+
 def search_categories(api_key: str, term: str, domain: str = "US") -> List[Dict[str, Any]]:
     """Find category ids/names matching a search term (category names are in the
     target marketplace's language, e.g. English for US, Japanese for JP)."""
@@ -302,6 +311,7 @@ def get_products(
     history: bool = False,
     include_buybox: bool = False,
     offers_limit: Optional[int] = None,
+    include_stock: bool = False,
 ) -> List[Dict[str, Any]]:
     """Fetch full product data (price stats, identifiers, rank, reviews).
 
@@ -339,6 +349,14 @@ def get_products(
     a number) - treat estimate_offers_product_request_cost() as a rough
     upper bound until observed live, and only use this on candidates already
     worth digging into, same as include_buybox.
+
+    Pass include_stock=True (must be combined with offers_limit - stock data
+    rides along on the same `offers` array, meaningless without it) to add a
+    `stockCSV` field (Keepa-minute/stock-value history, most recent value
+    last) to each live offer - see analysis.total_live_stock(). Confirmed
+    real, documented Keepa API data (not a website-only feature) via Keepa's
+    own official Java SDK struct definitions. Incremental cost beyond plain
+    offers=N is undocumented - see estimate_offers_and_stock_product_request_cost().
     """
     if not asins and not codes:
         return []
@@ -353,6 +371,8 @@ def get_products(
         params["buybox"] = 1
     if offers_limit is not None:
         params["offers"] = offers_limit
+    if include_stock:
+        params["stock"] = 1
     if asins:
         params["asin"] = ",".join(asins)
     if codes:

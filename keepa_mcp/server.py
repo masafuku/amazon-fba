@@ -40,6 +40,7 @@ from .keepa_client import (
     CURRENCY_DIVISOR,
     KeepaError,
     estimate_finder_cost,
+    estimate_offers_and_stock_product_request_cost,
     estimate_offers_product_request_cost,
     estimate_product_request_cost,
     estimate_seller_lookup_cost,
@@ -123,6 +124,8 @@ def _summarize_product(product: Dict[str, Any], domain: str, cache_info: Optiona
         "rating": analysis.rating(product),
         "monthly_sold": analysis.monthly_sold(product),
         "sales_rank_drops_30": analysis.sales_rank_drops_30(product),
+        "sales_rank_drops_90": analysis.sales_rank_drops_90(product),
+        "competitor_seller_count": analysis.total_offer_count(product),
         "price_volatility_90d": analysis.price_volatility_ratio(product, domain),
         "image_url": analysis.product_image_url(product),
         "weight_kg": analysis.package_weight_kg(product),
@@ -696,35 +699,42 @@ def find_other_sellers_for_candidate(
     }
 
 
-def enrich_qualified_candidates_with_seller_count(
+def enrich_qualified_candidates_with_offer_details(
     entries: List[Dict[str, Any]],
     domain: str = "US",
     wait_for_tokens: bool = True,
     force_refresh: bool = False,
 ) -> Dict[str, int]:
-    """合格候補(entries)の各要素にentry['competitor_seller_count']を追加する
-    (Amazon自身を除いた、現在出品中の第三者セラーの実数 - find_other_sellers_
-    for_candidate()と違いmax_sellersで切り詰めず、analysis.distinct_seller_ids()
-    をそのままlen()する。ダッシュボードには一部リストではなく正確な数が要るため)。
+    """合格候補(entries)の各要素にentry['competitor_stock_total']を追加する
+    (ライブな出品の在庫数合計 - analysis.total_live_stock())。
 
-    CEO: 「候補商品に対して、セラーの数...を取得できますか？」「すべての商品では
-    なく、有力候補のみ。」通常の商品取得1トークン/件に対し約7トークン/件かかる
-    (estimate_offers_product_request_cost()、正確な計算式が非公開のため保守的な
-    見積もり) - 呼び出し側は必ずtier=='pass'の候補(evaluation['qualified'])
-    だけを渡すこと。この関数自体はtierでフィルタしない。
+    v2(前回はセラー数もこの関数で取得していたが、実データ検証の結果
+    stats.totalOfferCountから無料で正確に取得できると判明したため、
+    セラー数の役目はkeepa_mcp/server.pyの_summarize_product()経由の
+    無料パスに移した - keepa_mcp/analysis.pyのtotal_offer_count()参照。
+    CEO: 「セラー数が38となっていますが、keepaで直接見た値と明らかに
+    違います」への対応)。この関数に残るのは、真にoffers=N&stock=1相当の
+    コストが必要な在庫情報のみ。
+
+    CEO: 「在庫の数...も取得して表示してください」。通常の商品取得1
+    トークン/件に対し約10〜11トークン/件かかる
+    (estimate_offers_and_stock_product_request_cost()、正確な計算式が
+    非公開のため保守的な見積もり) - 呼び出し側は必ずtier=='pass'の候補
+    (evaluation['qualified'])だけを渡すこと。この関数自体はtierで
+    フィルタしない。
 
     内部ヘルパーとしてFastMCPには登録しない(@mcp.tool()を付けない) -
     daily_scan.py/netsea_sourcing.pyから直接呼ぶパイプライン内部の処理で、
     LLMが対話的に呼ぶツールではないため。
 
     entriesを直接書き換える(mutates in place)。1件のKeepaError(不正なASIN
-    等)で全体を止めず、その候補のcompetitor_seller_countはNoneのまま次へ進む
+    等)で全体を止めず、その候補のcompetitor_stock_totalはNoneのまま次へ進む
     (netsea_sourcing.pyのJAN照合ループと同じ方針)。
 
     Returns: {'enriched': 成功件数, 'failed': 失敗件数}
     """
     api_key = _require_api_key()
-    needed = estimate_offers_product_request_cost(1)
+    needed = estimate_offers_and_stock_product_request_cost(1)
     enriched = failed = 0
     for entry in entries:
         asin = entry.get("asin")
@@ -734,19 +744,34 @@ def enrich_qualified_candidates_with_seller_count(
             _wait_for_budget(api_key, needed, 0)
         try:
             product, _cache_info = cached_get_product_with_offers(
-                api_key, asin, domain=domain, force_refresh=force_refresh,
+                api_key, asin, domain=domain, include_stock=True, force_refresh=force_refresh,
             )
         except KeepaError:
-            entry["competitor_seller_count"] = None
+            entry["competitor_stock_total"] = None
             failed += 1
             continue
         if product is None:
-            entry["competitor_seller_count"] = None
+            entry["competitor_stock_total"] = None
             failed += 1
             continue
-        entry["competitor_seller_count"] = len(analysis.distinct_seller_ids(product))
+        entry["competitor_stock_total"] = analysis.total_live_stock(product)
         enriched += 1
     return {"enriched": enriched, "failed": failed}
+
+
+def recompute_seller_count(asin: str, domain: str = "US", force_refresh: bool = True) -> Optional[int]:
+    """1件のASINについて、通常の商品取得(1トークン、offers=N不要)から
+    セラー数(stats.totalOfferCount)だけを再計算する。CandidateDetailPage.jsx
+    の「再取得」ボタン専用 - 既存DBに残っている(offers配列の水増しバグによる)
+    誤った値を、CEOが個別に押した時点で正しい値に上書きするために使う
+    (scripts/backfill_seller_count.pyの一括版とは別に、個別の手動再取得用)。
+    force_refresh=True既定: ボタンを押したのに古いキャッシュ値を返さないため。
+    """
+    api_key = _require_api_key()
+    products, _cache_meta = cached_get_products(api_key, domain=domain, asins=[asin], force_refresh=force_refresh)
+    if not products:
+        return None
+    return analysis.total_offer_count(products[0])
 
 
 @mcp.tool()

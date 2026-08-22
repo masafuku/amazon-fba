@@ -227,14 +227,21 @@ def cached_get_product_with_buybox(
 
 
 def cached_get_product_with_offers(
-    api_key: str, asin: str, domain: str, offers_limit: int = 20, force_refresh: bool = False
+    api_key: str, asin: str, domain: str, offers_limit: int = 20,
+    include_stock: bool = False, force_refresh: bool = False,
 ) -> Tuple[Optional[Dict[str, Any]], CacheInfo]:
     """Single-ASIN fetch with offers=offers_limit (see keepa_client.get_products'
     docstring - cost not empirically pinned down, treated as pricier than the
     plain product fetch). Cached separately (kind='product_offers') from both
-    the plain and buybox product caches. Used only for seller discovery
-    (server.py's find_other_sellers_for_candidate)."""
-    key = f"{domain.upper()}:{asin}:offers={offers_limit}"
+    the plain and buybox product caches. Used for seller discovery
+    (server.py's find_other_sellers_for_candidate) and, with
+    include_stock=True, for competitor stock totals
+    (server.py's enrich_qualified_candidates_with_offer_details).
+
+    include_stock is part of the cache key - a response cached without
+    stock=1 has no stockCSV field on its offers, so serving it for an
+    include_stock=True request would silently return no stock data."""
+    key = f"{domain.upper()}:{asin}:offers={offers_limit}:stock={int(include_stock)}"
     ttl = _ttl(settings.cache_ttl_product_hours)
     if settings.cache_enabled and not force_refresh:
         hit = cache.get("product_offers", key, ttl)
@@ -242,7 +249,10 @@ def cached_get_product_with_offers(
             value, age = hit
             return value, _hit_info(age)
 
-    products = get_products(api_key, domain=domain, asins=[asin], stats_days=90, offers_limit=offers_limit)
+    products = get_products(
+        api_key, domain=domain, asins=[asin], stats_days=90,
+        offers_limit=offers_limit, include_stock=include_stock,
+    )
     if not products:
         return None, _miss_info()
     product = products[0]
