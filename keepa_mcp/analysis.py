@@ -122,6 +122,74 @@ def total_offer_count(product: Dict[str, Any]) -> Optional[int]:
     return int(val) if isinstance(val, (int, float)) and val >= 0 else None
 
 
+def demand_signal(product: Dict[str, Any], domain: str) -> Dict[str, Any]:
+    """複数の需要シグナルを優先順位付きで統合し、単一指標への過信を避ける
+    (参考: https://www.buppan-ai-lab.com/keepa-seller-research-1-token-optimization/
+    - monthlySold優先→salesRankDrops30→ランクのみ、という組み合わせ方を踏襲)。
+
+    CEO: 「この記事を参考にして、今の実装に対して取り入れられ所はある？」への
+    対応。monthly_sold()(Keepa自身の実売推定値、一部カテゴリのみ提供)を
+    最優先とし、無ければsales_rank_drops_30()(過去30日のランク下落回数=
+    販売機会の近似値であって実売数そのものではない)、それも無ければ
+    sales_rank()のみを「参考」として返す。
+
+    意図的にhigh/medium/low等の閾値による自動判定はしない - このセッション中の
+    実例(HARIO V60ペーパーフィルター: monthly_sold最大6000 vs KTC工具:
+    monthly_soldデータなし)を見ても、カテゴリによって桁が大きく異なるため、
+    恣意的な閾値を導入するとかえって誤解を招く。「どの数字を根拠に・どの程度
+    信頼して良いか(confidence)」を一貫した形で返すことに留め、大小の評価は
+    人間の判断に委ねる。追加のKeepa呼び出しは発生しない(渡されたproductから
+    導出するだけの純粋関数)。"""
+    monthly = monthly_sold(product)
+    drops_30 = sales_rank_drops_30(product)
+    drops_90 = sales_rank_drops_90(product)
+    rank = sales_rank(product)
+    sellers = total_offer_count(product)
+
+    if monthly is not None:
+        primary_value, primary_label, confidence = monthly, "月間販売数(Keepa推定)", "high"
+    elif drops_30 is not None:
+        primary_value, primary_label, confidence = drops_30, "ランク変動30日(実売数の近似値)", "medium"
+    elif rank is not None:
+        primary_value, primary_label, confidence = rank, "売上ランクのみ(実売シグナルなし)", "low"
+    else:
+        primary_value, primary_label, confidence = None, "データなし", "none"
+
+    return {
+        "primary_value": primary_value,
+        "primary_label": primary_label,
+        "confidence": confidence,  # high/medium/low/none
+        "monthly_sold": monthly,
+        "sales_rank_drops_30": drops_30,
+        "sales_rank_drops_90": drops_90,
+        "sales_rank": rank,
+        "competitor_seller_count": sellers,
+    }
+
+
+def brand_store_info(product: Dict[str, Any]) -> Dict[str, Any]:
+    """AmazonブランドストアがそのブランドにあるかどうかをbrandStoreName/
+    brandStoreUrlから判定する。追加のKeepaコールなし(通常の商品取得に
+    既に含まれる)。
+
+    CEO: 「amazonに正規代理店がいるかどうかは調べられる？」への対応。
+    ブランドストアの存在は、そのブランドがAmazonブランド登録(Brand
+    Registry)済みであることを示す無料のシグナル - 実データで確認した通り
+    (HARIO: ブランドストアあり→実際に新規セラーの出品を拒否された。
+    KTC: ブランドストア無し。VESSEL: ブランドストアあり→未検証だが
+    要注意)、ブランドストアを持つブランドは出品ゲーティングのリスクが
+    高い傾向がある。ただし完全な保証ではない(ブランドストアがあっても
+    出品可能なブランドもあれば、無くても個別ASINが閉じているケースも
+    あり得る) - 発注前の無料の一次スクリーニングとして使う。"""
+    name = product.get("brandStoreName")
+    url = product.get("brandStoreUrl")
+    return {
+        "has_brand_store": bool(name or url),
+        "brand_store_name": name,
+        "brand_store_url": url,
+    }
+
+
 def _live_offers(product: Dict[str, Any]) -> List[Dict[str, Any]]:
     """product['offers'](offers_limit指定時のみ存在)を、現在ライブな
     (=もう出品終了していない)ものだけに絞り込む。実データで確定済み:

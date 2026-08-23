@@ -631,6 +631,27 @@ def normalize_jp_cost_for_tax(
     return min(candidates) if candidates else None
 
 
+def _has_minimum_demand_evidence(demand_signal: dict | None) -> bool:
+    """需要データが完全に欠落している(=売上ランクも月間販売数も無い)候補を
+    見分ける。CEO: 「需要シグナルを加味する」への対応。
+
+    NETSEA本実行で、利益率・ROIは基準を満たすのに売上ランク無し・月間販売数
+    無し・出品者1件のみという「合格」判定が4件連続で発生した(実例:
+    B001AI0MDQ/B001AI6DJ8/B0779MLPPK/B07GSDKMPC)。共通していたのは
+    `sales_rank`が完全に欠落(Keepaのstats.current[SALES]が -1 = データなし)
+    していたこと - これは「ランクが低い」のとは違い、Amazonが売上ランクを
+    一切算出していない=ほぼ動きの無いリスティングであることを示す。
+    `sales_rank_drops_30`が0(値として存在はする)だけでは判定材料にしない
+    (0自体は正当な値であり、僅かな実売があるケースと区別がつかないため)。
+
+    demand_signal自体が渡されない(=呼び出し元がまだ対応していない、または
+    データ取得元がKeepaでない)場合は判定不能なので、常にTrue(=足切りしない、
+    従来通りの挙動)を返す。"""
+    if demand_signal is None:
+        return True
+    return demand_signal.get('sales_rank') is not None or demand_signal.get('monthly_sold') is not None
+
+
 def _classify_tier(
     margin_pct: float | None,
     roi_pct: float | None,
@@ -638,15 +659,24 @@ def _classify_tier(
     jp_cost_usd: float | None,
     min_margin_pct: float = MIN_MARGIN_PCT,
     min_roi_pct: float = MIN_ROI_PCT,
+    demand_signal: dict | None = None,
 ) -> str:
     """calc_unit_profit()の結果から4段階のtierを判定する。
     CEO: 「輸出ビジネスだと利益率よりも、ROIの方が適切な指標では？」— ROIを主な
     合格基準(資金効率)、利益率を安全弁(価格競争・手数料変動への耐性)として
-    両方を満たす場合のみ合格とする。"""
+    両方を満たす場合のみ合格とする。
+
+    CEO: 「需要シグナルを加味する」— 利益率・ROIの基準を満たしていても、
+    売上ランク・月間販売数のどちらも存在しない(=需要の裏付けが全く無い)
+    候補は、価格が歪んだ放置リスティングである可能性が高いため合格にせず
+    「要検討」に格下げする(不合格にはしない - 価格計算自体は間違っていない
+    ため、人間の目視確認に委ねる)。"""
     if margin_pct is None:
         return TIER_REJECT
     if margin_pct >= min_margin_pct and roi_pct is not None and roi_pct >= min_roi_pct:
-        return TIER_PASS
+        if _has_minimum_demand_evidence(demand_signal):
+            return TIER_PASS
+        return TIER_CONSIDER
     if margin_pct >= 0:
         return TIER_CONSIDER
     if us_price_usd is not None and jp_cost_usd is not None and (us_price_usd - jp_cost_usd) >= 0:
@@ -732,6 +762,8 @@ def evaluate_mcp_candidates(
             'sales_rank_drops_30': sell.get('sales_rank_drops_30'),
             'sales_rank_drops_90': sell.get('sales_rank_drops_90'),
             'competitor_seller_count': sell.get('competitor_seller_count'),
+            'demand_signal': sell.get('demand_signal'),
+            'brand_store': sell.get('brand_store'),
             'price_diff_rate_gross': candidate.get('price_diff_rate'),  # 手数料・送料考慮前
             'price_volatility_90d': candidate.get('price_volatility_90d'),
             'weight_kg': weight_kg,
@@ -756,7 +788,7 @@ def evaluate_mcp_candidates(
         }
         entry['tier'] = _classify_tier(
             profit['margin_pct'], profit['roi_pct'], profit['us_price_usd'], profit['jp_cost_usd'],
-            min_margin_pct, min_roi_pct,
+            min_margin_pct, min_roi_pct, entry['demand_signal'],
         )
 
         if entry['tier'] == TIER_PASS:
@@ -799,6 +831,8 @@ def evaluate_mcp_candidates(
             'sales_rank_drops_30': skip.get('sales_rank_drops_30'),
             'sales_rank_drops_90': skip.get('sales_rank_drops_90'),
             'competitor_seller_count': skip.get('competitor_seller_count'),
+            'demand_signal': skip.get('demand_signal'),
+            'brand_store': skip.get('brand_store'),
             'price_diff_rate_gross': None,
             'price_volatility_90d': skip.get('price_volatility_90d'),
             'weight_kg': skip.get('weight_kg'),
@@ -852,7 +886,7 @@ def evaluate_mcp_candidates(
             entry['fee_estimated'] = used_fallback_fee
             entry['tier'] = _classify_tier(
                 profit['margin_pct'], profit['roi_pct'], profit['us_price_usd'], profit['jp_cost_usd'],
-                min_margin_pct, min_roi_pct,
+                min_margin_pct, min_roi_pct, entry['demand_signal'],
             )
 
         rejected.append(entry)

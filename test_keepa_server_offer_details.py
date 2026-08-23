@@ -74,5 +74,36 @@ class TestRecomputeSellerCount(unittest.TestCase):
         self.assertIsNone(count)
 
 
+class TestSummarizeProductIncludesDemandSignal(unittest.TestCase):
+    """CEO: 「この記事を参考にして、今の実装に対して取り入れられ所はある？」への
+    対応 -- _summarize_product()経由の全MCPツール結果にdemand_signalが自動で
+    乗ること(get_product_detail/find_arbitrage_candidates/expand_from_seller/
+    investigate_asinすべてがこの関数を通る)を確認する。"""
+
+    def test_summary_includes_demand_signal_key(self):
+        product = {
+            "asin": "B0TEST",
+            "monthlySold": 500,
+            "stats": {"current": [None, None, None, 1234]},
+        }
+        summary = server._summarize_product(product, "US")
+
+        self.assertIn("demand_signal", summary)
+        self.assertEqual(summary["demand_signal"]["primary_value"], 500)
+        self.assertEqual(summary["demand_signal"]["confidence"], "high")
+
+    def test_summary_includes_brand_store_key(self):
+        product = {
+            "asin": "B0TEST",
+            "brand": "HARIO",
+            "brandStoreName": "HARIO",
+            "brandStoreUrl": "/stores/Hario/page/xyz",
+        }
+        summary = server._summarize_product(product, "US")
+
+        self.assertIn("brand_store", summary)
+        self.assertTrue(summary["brand_store"]["has_brand_store"])
+
+
 if __name__ == "__main__":
     unittest.main()

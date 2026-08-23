@@ -2,6 +2,8 @@ import unittest
 
 from keepa_mcp.analysis import (
     _live_offers,
+    brand_store_info,
+    demand_signal,
     distinct_seller_ids,
     sales_rank_drops_90,
     total_live_stock,
@@ -119,6 +121,85 @@ class TestSalesRankDrops90(unittest.TestCase):
 
     def test_missing_returns_none(self):
         self.assertIsNone(sales_rank_drops_90({}))
+
+
+class TestDemandSignal(unittest.TestCase):
+    """CEO: 「この記事を参考にして、今の実装に対して取り入れられ所はある？」
+    (https://www.buppan-ai-lab.com/keepa-seller-research-1-token-optimization/)
+    -- monthlySold優先 -> salesRankDrops30 -> ランクのみ、の優先順位で複数の
+    需要シグナルを組み合わせ、単一指標への過信を避ける。"""
+
+    def test_monthly_sold_present_is_highest_confidence(self):
+        # HARIO V60ペーパーフィルター(B073RWF7NT)のような実例: monthlySoldが
+        # あれば最優先・confidence="high"。
+        product = {
+            "monthlySold": 6000,
+            "stats": {"salesRankDrops30": 38, "current": [None, None, None, 309]},
+        }
+        result = demand_signal(product, "US")
+        self.assertEqual(result["primary_value"], 6000)
+        self.assertEqual(result["confidence"], "high")
+        self.assertEqual(result["monthly_sold"], 6000)
+        self.assertEqual(result["sales_rank_drops_30"], 38)
+        self.assertEqual(result["sales_rank"], 309)
+
+    def test_no_monthly_sold_falls_back_to_rank_drops_30(self):
+        product = {"stats": {"salesRankDrops30": 12, "current": [None, None, None, 31564]}}
+        result = demand_signal(product, "US")
+        self.assertEqual(result["primary_value"], 12)
+        self.assertEqual(result["confidence"], "medium")
+        self.assertIsNone(result["monthly_sold"])
+
+    def test_only_rank_available_is_low_confidence(self):
+        # KTC工具(B001EQH4NA)のような実例: monthlySoldもsalesRankDrops30も
+        # 無く、ランクのみ。
+        product = {"stats": {"current": [None, None, None, 373762]}}
+        result = demand_signal(product, "US")
+        self.assertEqual(result["primary_value"], 373762)
+        self.assertEqual(result["confidence"], "low")
+        self.assertIsNone(result["monthly_sold"])
+        self.assertIsNone(result["sales_rank_drops_30"])
+
+    def test_nothing_available_returns_none_confidence(self):
+        result = demand_signal({}, "US")
+        self.assertIsNone(result["primary_value"])
+        self.assertEqual(result["confidence"], "none")
+
+    def test_includes_competitor_seller_count_alongside_primary_signal(self):
+        # 単一指標だけで判断しないよう、競合出品者数も併せて返す。
+        product = {"monthlySold": 100, "stats": {"totalOfferCount": 6}}
+        result = demand_signal(product, "US")
+        self.assertEqual(result["competitor_seller_count"], 6)
+
+
+class TestBrandStoreInfo(unittest.TestCase):
+    """CEO: 「amazonに正規代理店がいるかどうかは調べられる？」「自動で表示する
+    仕組みを組み込めますか？」への対応。ブランドストアの有無(brandStoreName/
+    brandStoreUrl、通常の商品取得に無料で含まれる)を、ブランドゲーティング
+    リスクの無料の一次スクリーニングとして使う。"""
+
+    def test_brand_with_store_present(self):
+        # HARIO(B073RWF7NT)の実データで確認済みの実例
+        product = {
+            "brand": "HARIO",
+            "brandStoreName": "HARIO",
+            "brandStoreUrl": "/stores/Hario/page/BB8ACFCF-67B8-4932-AC01-30172390D0D9",
+        }
+        result = brand_store_info(product)
+        self.assertTrue(result["has_brand_store"])
+        self.assertEqual(result["brand_store_name"], "HARIO")
+        self.assertEqual(result["brand_store_url"], product["brandStoreUrl"])
+
+    def test_brand_without_store(self):
+        # KTC(B001EQH4NA)の実データで確認済みの実例
+        product = {"brand": "KTC", "brandStoreName": None, "brandStoreUrl": None}
+        result = brand_store_info(product)
+        self.assertFalse(result["has_brand_store"])
+        self.assertIsNone(result["brand_store_name"])
+
+    def test_missing_fields_entirely(self):
+        result = brand_store_info({})
+        self.assertFalse(result["has_brand_store"])
 
 
 if __name__ == "__main__":

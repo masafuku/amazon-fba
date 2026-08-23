@@ -2,6 +2,7 @@ import unittest
 
 from ops_finance import (
     _classify_tier,
+    _has_minimum_demand_evidence,
     _is_searchable_keyword,
     _shipping_cost_jpy_for_weight,
     calc_unit_profit,
@@ -156,6 +157,57 @@ class TestClassifyTier(unittest.TestCase):
         self.assertEqual(
             _classify_tier(0.09, 0.30, 100, 50, min_margin_pct=0.10, min_roi_pct=0.30), 'consider',
         )
+
+    def test_demand_signal_not_passed_does_not_gate(self):
+        # 後方互換: demand_signal省略時は従来通り需要データを見ずに合格させる
+        self.assertEqual(_classify_tier(0.15, 0.50, 100, 50), 'pass')
+
+    def test_no_demand_evidence_demotes_pass_to_consider(self):
+        # CEO: 「需要シグナルを加味する」— NETSEA本実行で実際に発生した誤検知
+        # (売上ランクも月間販売数も無いのに利益率・ROIは基準を満たす)の実例に
+        # 基づく。不合格にはせず要検討に格下げする。
+        no_demand = {'sales_rank': None, 'monthly_sold': None}
+        self.assertEqual(_classify_tier(0.15, 0.50, 100, 50, demand_signal=no_demand), 'consider')
+
+    def test_sales_rank_present_is_enough_even_without_monthly_sold(self):
+        has_rank_only = {'sales_rank': 36158, 'monthly_sold': None}
+        self.assertEqual(_classify_tier(0.15, 0.50, 100, 50, demand_signal=has_rank_only), 'pass')
+
+    def test_monthly_sold_present_is_enough_even_without_sales_rank(self):
+        has_monthly_only = {'sales_rank': None, 'monthly_sold': 200}
+        self.assertEqual(_classify_tier(0.15, 0.50, 100, 50, demand_signal=has_monthly_only), 'pass')
+
+    def test_demand_gate_does_not_affect_non_pass_tiers(self):
+        # 需要データが無くても、そもそもmargin/roiで合格していない場合は
+        # 従来通りconsider/reference/rejectのまま(格下げの対象はpassのみ)
+        no_demand = {'sales_rank': None, 'monthly_sold': None}
+        self.assertEqual(_classify_tier(0.10, 0.30, 100, 50, demand_signal=no_demand), 'consider')
+
+
+class TestHasMinimumDemandEvidence(unittest.TestCase):
+    """CEO: 「需要シグナルを加味する」— NETSEA本実行で4件連続発生した誤検知
+    (B001AI0MDQ/B001AI6DJ8/B0779MLPPK/B07GSDKMPCいずれも売上ランク・月間販売数
+    ともに無し、出品者1件のみ)を踏まえた足切り判定。"""
+
+    def test_none_demand_signal_means_not_gated(self):
+        # 呼び出し元がまだdemand_signalを渡していない場合は判定不能 -> 従来通り
+        self.assertTrue(_has_minimum_demand_evidence(None))
+
+    def test_both_missing_returns_false(self):
+        self.assertFalse(_has_minimum_demand_evidence({'sales_rank': None, 'monthly_sold': None}))
+
+    def test_sales_rank_drops_30_zero_alone_is_not_enough(self):
+        # sales_rank_drops_30が0(値としては存在)だけでは需要の裏付けにしない -
+        # 実際の誤検知4件は全てdrops_30=0だった
+        self.assertFalse(_has_minimum_demand_evidence(
+            {'sales_rank': None, 'monthly_sold': None, 'sales_rank_drops_30': 0}
+        ))
+
+    def test_sales_rank_present_is_sufficient(self):
+        self.assertTrue(_has_minimum_demand_evidence({'sales_rank': 36158, 'monthly_sold': None}))
+
+    def test_monthly_sold_present_is_sufficient(self):
+        self.assertTrue(_has_minimum_demand_evidence({'sales_rank': None, 'monthly_sold': 200}))
 
 
 class TestNormalizeJpCostForTax(unittest.TestCase):
