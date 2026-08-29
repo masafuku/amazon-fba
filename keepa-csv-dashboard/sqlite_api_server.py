@@ -1416,6 +1416,95 @@ def load_agent_candidates(days: int = 7):
     return candidates
 
 
+def load_seller_candidates(seller_id: str):
+    """SellerDetailPage用: 指定セラー(source_type='seller'かつseller_id一致)が
+    出品していた商品を、load_agent_candidates()と同じASIN重複排除(最新1件+
+    発見回数)で返す。CEO: 「セラーが売っている一覧とそのパフォーマンスを
+    表形式で確認して、何が良いのかを理解しやすくしてほしい」への対応。
+
+    load_agent_candidates()と違い、期間(days)では絞らない - そのセラーを
+    再訪すべきかの参考情報として、過去に見つかった全商品を対象にする
+    (seller_pool の集計が全期間であるのと同じ考え方)。
+    """
+    seller_id = (seller_id or '').strip()
+    if not seller_id:
+        return []
+
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            '''
+            WITH ranked AS (
+                SELECT
+                    ac.*,
+                    ROW_NUMBER() OVER (PARTITION BY ac.asin ORDER BY ac.created_at DESC) AS rn,
+                    COUNT(*) OVER (PARTITION BY ac.asin) AS times_seen
+                FROM agent_candidates ac
+                WHERE ac.source_type = 'seller' AND ac.seller_id = ?
+            )
+            SELECT
+                r.run_id, r.category, r.asin, r.title, r.image_url, r.us_url, r.jp_asin, r.jp_url,
+                r.us_price_usd, r.jp_cost_jpy, r.sales_rank, r.review_count, r.monthly_sold, r.price_volatility_90d,
+                r.weight_kg, r.weight_estimated, r.fee_estimated,
+                r.price_diff_rate_gross, r.unit_profit_usd, r.margin_pct,
+                r.qualified, r.tier, r.reason, r.data_json, r.created_at, r.times_seen,
+                r.source_type, r.seller_id, r.seller_name, r.seed_asin,
+                CASE WHEN f.asin IS NULL THEN 0 ELSE 1 END AS already_favorited
+            FROM ranked r
+            LEFT JOIN favorites f ON f.asin = r.asin
+            WHERE r.rn = 1
+            ORDER BY r.qualified DESC, r.margin_pct DESC, r.created_at DESC
+            ''',
+            (seller_id,),
+        ).fetchall()
+
+    candidates = []
+    for row in rows:
+        (run_id, category, asin, title, image_url, us_url, jp_asin, jp_url,
+         us_price_usd, jp_cost_jpy, sales_rank, review_count, monthly_sold, price_volatility_90d,
+         weight_kg, weight_estimated, fee_estimated,
+         price_diff_rate_gross, unit_profit_usd, margin_pct,
+         qualified, tier, reason, data_json, created_at, times_seen,
+         source_type, row_seller_id, seller_name, seed_asin, already_favorited) = row
+        try:
+            data = json.loads(data_json)
+        except Exception:
+            data = {}
+        candidates.append({
+            'runId': run_id,
+            'category': category,
+            'asin': asin,
+            'title': title,
+            'imageUrl': image_url,
+            'usUrl': us_url,
+            'jpAsin': jp_asin,
+            'jpUrl': jp_url,
+            'usPriceUsd': us_price_usd,
+            'jpCostJpy': jp_cost_jpy,
+            'salesRank': sales_rank,
+            'reviewCount': review_count,
+            'monthlySold': monthly_sold,
+            'priceVolatility90d': price_volatility_90d,
+            'weightKg': weight_kg,
+            'weightEstimated': bool(weight_estimated),
+            'feeEstimated': bool(fee_estimated),
+            'priceDiffRateGross': price_diff_rate_gross,
+            'unitProfitUsd': unit_profit_usd,
+            'marginPct': margin_pct,
+            'qualified': bool(qualified),
+            'tier': tier or ('pass' if qualified else 'reject'),
+            'reason': reason,
+            'data': data,
+            'createdAt': created_at,
+            'timesSeen': times_seen,
+            'sourceType': source_type or 'seller',
+            'sellerId': row_seller_id,
+            'sellerName': seller_name,
+            'seedAsin': seed_asin,
+            'alreadyFavorited': bool(already_favorited),
+        })
+    return candidates
+
+
 def load_agent_candidate_detail(asin: str):
     """CandidateDetailPage用: 1つのASINについて、直近のスキャンで見つかった
     最新の評価結果を1件返す(見つからなければNone)。load_agent_candidates()
@@ -1931,6 +2020,11 @@ class Handler(BaseHTTPRequestHandler):
             asin = (params.get('asin') or [''])[0]
             candidate = load_agent_candidate_detail(asin) if asin else None
             self._send_json(200, {'ok': True, 'candidate': candidate})
+            return
+
+        if parsed.path == '/api/agent/seller-candidates':
+            seller_id = (params.get('sellerId') or [''])[0]
+            self._send_json(200, {'ok': True, 'candidates': load_seller_candidates(seller_id)})
             return
 
         if parsed.path == '/api/agent/candidate-history':

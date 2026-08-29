@@ -570,8 +570,13 @@ export default function SellerMiningPage() {
                                                 item.sellerId === nextPickSellerId ? 'bg-cyan-950/30' : 'bg-slate-950/80'
                                             }`}
                                         >
-                                            <td className="px-4 py-3 font-mono text-xs text-white">
-                                                {item.sellerId}
+                                            <td className="px-4 py-3 font-mono text-xs">
+                                                <a
+                                                    href={`#seller/${encodeURIComponent(item.sellerId)}`}
+                                                    className="text-cyan-300 underline decoration-cyan-700 underline-offset-2 hover:text-cyan-200"
+                                                >
+                                                    {item.sellerId}
+                                                </a>
                                                 {item.sellerId === nextPickSellerId ? (
                                                     <span className="ml-2 rounded-lg bg-cyan-500 px-2 py-0.5 text-[10px] font-semibold text-slate-950">
                                                         次回選択
@@ -620,15 +625,23 @@ export default function SellerMiningPage() {
                                                 </span>
                                             </td>
                                             <td className="px-4 py-3">
-                                                <button
-                                                    type="button"
-                                                    onClick={() => handleDeleteFromPool(item.sellerId)}
-                                                    disabled={deletingSellerId === item.sellerId}
-                                                    className="inline-flex items-center gap-1 rounded-lg bg-rose-950/60 px-2 py-1 text-xs font-semibold text-rose-200 hover:bg-rose-900 disabled:opacity-50"
-                                                >
-                                                    <Trash2 className="h-3.5 w-3.5" />
-                                                    {deletingSellerId === item.sellerId ? '削除中...' : '削除'}
-                                                </button>
+                                                <div className="flex flex-wrap gap-2">
+                                                    <a
+                                                        href={`#seller/${encodeURIComponent(item.sellerId)}`}
+                                                        className="rounded-lg bg-slate-800 px-2 py-1 text-xs font-semibold text-cyan-300 hover:bg-slate-700"
+                                                    >
+                                                        詳細を見る
+                                                    </a>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => handleDeleteFromPool(item.sellerId)}
+                                                        disabled={deletingSellerId === item.sellerId}
+                                                        className="inline-flex items-center gap-1 rounded-lg bg-rose-950/60 px-2 py-1 text-xs font-semibold text-rose-200 hover:bg-rose-900 disabled:opacity-50"
+                                                    >
+                                                        <Trash2 className="h-3.5 w-3.5" />
+                                                        {deletingSellerId === item.sellerId ? '削除中...' : '削除'}
+                                                    </button>
+                                                </div>
                                             </td>
                                         </tr>
                                     );

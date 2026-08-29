@@ -7,6 +7,7 @@ import AgentPage from './AgentPage.jsx';
 import KeywordPoolPage from './KeywordPoolPage.jsx';
 import SellerMiningPage from './SellerMiningPage.jsx';
 import CandidateDetailPage from './CandidateDetailPage.jsx';
+import SellerDetailPage from './SellerDetailPage.jsx';
 import './index.css';
 
 function Root() {
@@ -26,7 +27,12 @@ function Root() {
     // #candidate/<ASIN>: このコードベース初のパラメータ付きハッシュルート。
     // ナビゲーションバーには追加しない(AgentPage一覧からのクリック遷移のみが導線)。
     const candidateAsin = hash.startsWith('#candidate/') ? decodeURIComponent(hash.slice('#candidate/'.length)) : null;
-    const isDashboard = !isFinder && !isFavorites && !isAgent && !isKeywords && !isSellerMining && !candidateAsin;
+    // #seller/<sellerId>: #candidate/<ASIN>と同じパラメータ付きハッシュルートパターン。
+    // ナビゲーションバーには追加しない(セラーマイニングページの一覧からのクリック遷移のみが導線)。
+    // CEO: 「セラーサーチで見つけたセラーの結果をもう少しみやすくしたい。少なくとも、
+    // そのセラーのページを一枚作ること。」
+    const sellerId = hash.startsWith('#seller/') ? decodeURIComponent(hash.slice('#seller/'.length)) : null;
+    const isDashboard = !isFinder && !isFavorites && !isAgent && !isKeywords && !isSellerMining && !candidateAsin && !sellerId;
 
     return (
         <div className="min-h-screen bg-slate-950 text-slate-100">
@@ -71,6 +77,8 @@ function Root() {
                 </nav>
                 {candidateAsin ? (
                     <CandidateDetailPage asin={candidateAsin} onBack={() => { window.location.hash = '#agent'; }} />
+                ) : sellerId ? (
+                    <SellerDetailPage sellerId={sellerId} onBack={() => { window.location.hash = '#seller-mining'; }} />
                 ) : isFinder ? (
                     <KeepaFinderPage />
                 ) : isFavorites ? (

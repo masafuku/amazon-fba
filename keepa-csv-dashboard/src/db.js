@@ -249,6 +249,14 @@ export const deleteKeywordFromPool = async (keyword) => {
     return response.json();
 };
 
+export const loadSellerCandidates = async (sellerId) => {
+    const params = new URLSearchParams({ sellerId: String(sellerId) });
+    const response = await fetch(`${API_BASE}/api/agent/seller-candidates?${params.toString()}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const json = await response.json();
+    return json.candidates || [];
+};
+
 export const loadSellerPool = async () => {
     const response = await fetch(`${API_BASE}/api/seller-pool`);
     if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
