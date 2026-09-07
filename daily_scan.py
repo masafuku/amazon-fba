@@ -359,6 +359,7 @@ def run_daily_scan(
     category_id: int | None,
     max_candidates: int,
     wait_for_tokens: bool,
+    price_min: int | None = None,
 ) -> None:
     init_ops_tables()
 
@@ -404,6 +405,11 @@ def run_daily_scan(
           f"max_candidates={max_candidates}, wait_for_tokens={wait_for_tokens}) ...")
     search_params = dict(DEFAULT_SEARCH_PARAMS)
     search_params["max_candidates"] = max_candidates
+    if price_min is not None:
+        # デフォルトは$30(3000)固定 - 文具女子アワード/JetPens受賞歴のような
+        # 低単価帯($3〜20程度)のキーワードはこの下限で全滅していた(2026-09-06
+        # に判明)。呼び出し側が明示的に下げられるようにする。
+        search_params["price_min"] = price_min
     mcp_result = find_arbitrage_candidates(
         keyword=keyword, category_id=category_id, wait_for_tokens=wait_for_tokens, **search_params
     )
@@ -551,6 +557,10 @@ def main() -> None:
     parser.add_argument("--category-id", type=int, default=None, help="Keepaカテゴリ ID を直接指定(--category より優先)")
     parser.add_argument("--max-candidates", type=int, default=DEFAULT_SEARCH_PARAMS["max_candidates"],
                          help="評価するASIN数の上限(Keepaトークン消費に直結)")
+    parser.add_argument("--price-min", type=int, default=None,
+                         help="US側の最低価格(セント単位、例: 300 = $3.00)。省略時はfind_arbitrage_candidates()"
+                              "のデフォルト($30/3000)。文具女子アワード/JetPens受賞歴等、低単価帯のキーワードで"
+                              "使う(デフォルトのままだと$30未満の商品が全滅する)")
     parser.add_argument("--no-wait", dest="wait_for_tokens", action="store_false",
                          help="トークン不足時に待たず、その時点までの結果で打ち切る(デフォルトは待つ)")
     parser.set_defaults(wait_for_tokens=True)
@@ -600,6 +610,7 @@ def main() -> None:
         category_id=args.category_id,
         max_candidates=args.max_candidates,
         wait_for_tokens=args.wait_for_tokens,
+        price_min=args.price_min,
     )
 
 
