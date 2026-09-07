@@ -253,6 +253,7 @@ def find_candidates(
     keyword: str,
     category_id: Optional[int] = None,
     price_min: Optional[int] = 3000,
+    price_max: Optional[int] = None,
     require_amazon_out_of_stock: bool = True,
     monthly_sold_peak_min: Optional[int] = 10,
     sales_rank_min: Optional[int] = None,
@@ -282,6 +283,10 @@ def find_candidates(
             domain's smallest currency unit - cents for USD, whole yen for
             JPY (so 3000 means $30 on domain="US" but Y3000 on domain="JP").
             None to disable this filter.
+        price_max: Maximum current buy-box price, same unit as price_min.
+            None (default) to disable this filter - added for low-price
+            keyword pools (e.g. award-winning stationery under $30) that
+            the default price_min floor filters out entirely.
         require_amazon_out_of_stock: If True (default), only match listings
             where Amazon itself has no offer - i.e. 3rd-party-seller-only,
             typically less direct Amazon competition.
@@ -302,7 +307,7 @@ def find_candidates(
             api_key, domain=domain, keyword=keyword, category_id=category_id,
             sales_rank_min=sales_rank_min, sales_rank_max=sales_rank_max,
             review_count_max=review_count_max, review_count_min=None,
-            per_page=max_results, price_min=price_min,
+            per_page=max_results, price_min=price_min, price_max=price_max,
             require_amazon_out_of_stock=require_amazon_out_of_stock,
             monthly_sold_peak_min=monthly_sold_peak_min, product_type=["0"],
             force_refresh=force_refresh,
@@ -494,6 +499,7 @@ def find_arbitrage_candidates(
     keyword: str,
     category_id: Optional[int] = None,
     price_min: Optional[int] = 3000,
+    price_max: Optional[int] = None,
     require_amazon_out_of_stock: bool = True,
     monthly_sold_peak_min: Optional[int] = 10,
     sales_rank_min: Optional[int] = None,
@@ -531,6 +537,11 @@ def find_arbitrage_candidates(
             side, in the domain's smallest currency unit (cents for USD, whole
             yen for JPY). Mirrors the dashboard's manual Finder recipe. None
             to disable.
+        price_max: Maximum current buy-box price on the sell side, same unit
+            as price_min. None (default) disables this filter. Use this
+            (with a low/None price_min) for low-price keyword pools - e.g.
+            award-winning stationery under $30 - that the default price_min
+            floor used to filter out entirely.
         require_amazon_out_of_stock: If True (default), only match sell-side
             listings where Amazon itself has no offer (3rd-party-seller-only).
         monthly_sold_peak_min: Minimum peak monthly-sold signal on the sell
@@ -600,7 +611,7 @@ def find_arbitrage_candidates(
             api_key, domain=sell_domain, keyword=keyword, category_id=category_id,
             sales_rank_min=sales_rank_min, sales_rank_max=sales_rank_max,
             review_count_max=review_count_max, review_count_min=None,
-            per_page=max_candidates, price_min=price_min,
+            per_page=max_candidates, price_min=price_min, price_max=price_max,
             require_amazon_out_of_stock=require_amazon_out_of_stock,
             monthly_sold_peak_min=monthly_sold_peak_min, product_type=["0"],
             force_refresh=force_refresh,

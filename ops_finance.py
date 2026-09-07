@@ -158,7 +158,13 @@ def init_ops_tables():
                 last_used_at TEXT,
                 times_used INTEGER NOT NULL DEFAULT 0,
                 total_qualified INTEGER NOT NULL DEFAULT 0,
-                status TEXT NOT NULL DEFAULT 'active'  -- active/paused
+                status TEXT NOT NULL DEFAULT 'active',  -- active/paused
+                price_min INTEGER              -- find_arbitrage_candidates()のprice_min
+                                                -- 上書き(米セント単位)。NULLならそちらの
+                                                -- デフォルト($30/3000)のまま。文具女子
+                                                -- アワード/JetPens受賞歴等、$30未満が
+                                                -- 中心のキーワード群は自動巡回でも
+                                                -- 全滅しないようここに低い値を入れる。
             );
             CREATE INDEX IF NOT EXISTS idx_keyword_pool_status ON keyword_pool(status);
 
@@ -256,6 +262,10 @@ def init_ops_tables():
         seller_pool_columns = {row[1] for row in conn.execute('PRAGMA table_info(seller_pool)').fetchall()}
         if 'seed_keyword' not in seller_pool_columns:
             conn.execute('ALTER TABLE seller_pool ADD COLUMN seed_keyword TEXT')
+
+        keyword_pool_columns = {row[1] for row in conn.execute('PRAGMA table_info(keyword_pool)').fetchall()}
+        if 'price_min' not in keyword_pool_columns:
+            conn.execute('ALTER TABLE keyword_pool ADD COLUMN price_min INTEGER')
 
         # seller_poolの一度きりの自動バックフィル: 既にsource_type='seller'の
         # 実績がagent_candidatesにある(過去のセラーマイニング結果)場合、
@@ -1253,12 +1263,16 @@ def log_agent_run(
 # 7. Keyword/Categoryエージェント: キーワードプール管理
 # ---------------------------------------------------------------------------
 
-def add_keywords(keywords, source: str, seed_keyword: str = None) -> int:
+def add_keywords(keywords, source: str, seed_keyword: str = None, price_min: int = None) -> int:
     """キーワードをプールに追加する(既存のものはスキップ)。追加できた件数を返す。
     _is_searchable_keyword()(Amazon大分類名・日本語表記・食品など不向きな
     カテゴリを除外)をここで一元的に適用する - --expand経由のKeepaカテゴリ
     ツリー由来のキーワードもこれを通るので、呼び出し元ごとに個別にフィルタを
     書く必要はない。
+    price_min: daily_scan.pyのfind_arbitrage_candidates()呼び出しに渡す
+    price_min上書き(米セント単位)。省略時はデフォルト(下限なし、$30以下の
+    み対象)のまま追加される。高単価カテゴリのキーワード群だけ下限を戻したい
+    場合に指定する。
     """
     init_ops_tables()
     keywords = [str(k).strip() for k in keywords if str(k or '').strip()]
@@ -1270,10 +1284,10 @@ def add_keywords(keywords, source: str, seed_keyword: str = None) -> int:
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.executemany(
             '''
-            INSERT OR IGNORE INTO keyword_pool (keyword, source, seed_keyword, added_at, times_used, total_qualified, status)
-            VALUES (?, ?, ?, ?, 0, 0, 'active')
+            INSERT OR IGNORE INTO keyword_pool (keyword, source, seed_keyword, added_at, times_used, total_qualified, status, price_min)
+            VALUES (?, ?, ?, ?, 0, 0, 'active', ?)
             ''',
-            [(keyword, source, seed_keyword, now) for keyword in keywords],
+            [(keyword, source, seed_keyword, now, price_min) for keyword in keywords],
         )
         return cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
 
@@ -1411,22 +1425,25 @@ def seed_keyword_pool_from_favorites() -> dict:
     return {'seeds_found': seeds_list, 'added': added}
 
 
-def pick_next_keyword() -> str:
+def pick_next_keyword() -> tuple[str, int | None] | tuple[None, None]:
     """次にdaily_scan.pyで使うキーワードを選ぶ。一度も使っていないものを
     優先し、次に最後に使ってから時間が経っているものを優先する。
-    プールが空の場合は None を返す(呼び出し側でフォールバックする)。
+    プールが空の場合は (None, None) を返す(呼び出し側でフォールバックする)。
+    戻り値は (keyword, price_min) のタプル - price_minはそのキーワードに
+    add_keywords()で個別設定された上書き値(無ければNone、呼び出し側の
+    デフォルトのまま)。
     """
     init_ops_tables()
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
             '''
-            SELECT keyword FROM keyword_pool
+            SELECT keyword, price_min FROM keyword_pool
             WHERE status = 'active'
             ORDER BY times_used ASC, COALESCE(last_used_at, '') ASC
             LIMIT 1
             '''
         ).fetchone()
-    return row[0] if row else None
+    return (row[0], row[1]) if row else (None, None)
 
 
 def record_keyword_used(keyword: str, qualified_count: int = 0) -> None:
@@ -1473,7 +1490,7 @@ def list_keyword_pool() -> list:
         rows = conn.execute(
             '''
             SELECT keyword, source, seed_keyword, added_at, last_used_at,
-                   times_used, total_qualified, status
+                   times_used, total_qualified, status, price_min
             FROM keyword_pool
             ORDER BY times_used ASC, COALESCE(last_used_at, '') ASC
             '''
@@ -1488,8 +1505,9 @@ def list_keyword_pool() -> list:
             'timesUsed': times_used,
             'totalQualified': total_qualified,
             'status': status,
+            'priceMin': price_min,
         }
-        for keyword, source, seed_keyword, added_at, last_used_at, times_used, total_qualified, status in rows
+        for keyword, source, seed_keyword, added_at, last_used_at, times_used, total_qualified, status, price_min in rows
     ]
 
 

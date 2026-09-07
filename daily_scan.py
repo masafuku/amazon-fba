@@ -120,9 +120,16 @@ KEYWORD_ROTATION = {
 }
 
 DEFAULT_SEARCH_PARAMS = dict(
-    # price_min / require_amazon_out_of_stock / monthly_sold_peak_min は
+    # require_amazon_out_of_stock / monthly_sold_peak_min は
     # find_arbitrage_candidates() 側のデフォルト(ダッシュボードの手動Finderと
-    # 同じ「Amazon自体は在庫なし・3000円/ドル以上」レシピ)をそのまま使う。
+    # 同じ「Amazon自体は在庫なし」レシピ)をそのまま使う。
+    # price_min/price_maxはCEOの指示(2026-09-07: 「デフォルトでは30ドル以下を
+    # 探すようにして欲しい」)でここを$30以下に上書きする。find_arbitrage_
+    # candidates()自体のデフォルトはprice_min=3000($30)のみでprice_max無し
+    # (=$30以上しか見ない)だったため、文具女子アワード/JetPens受賞歴等の
+    # $3〜27程度の候補が軒並み検索対象外になっていた(2026-09-06に判明)。
+    price_min=None,
+    price_max=3000,
     price_diff_min=0.30,   # MCP側の粗いフィルタ(実質利益率はここでは見ていない)
     # 価格変動フィルタは無効化(CEOの指示: 除外基準にはせず、結果の列として
     # 見えるだけにする)。price_volatility_90dは引き続き各候補に付与される。
@@ -360,6 +367,7 @@ def run_daily_scan(
     max_candidates: int,
     wait_for_tokens: bool,
     price_min: int | None = None,
+    price_max: int | None = None,
 ) -> None:
     init_ops_tables()
 
@@ -369,9 +377,14 @@ def run_daily_scan(
 
     keyword_from_pool = False
     if keyword is None:
-        keyword = pick_next_keyword()  # Keyword/Categoryエージェント: 未使用/最も久しく使っていないものを優先
+        # Keyword/Categoryエージェント: 未使用/最も久しく使っていないものを優先。
+        # pool_price_minは--price-min未指定(CLIから明示指定していない)場合のみ
+        # 採用する - CLI引数の方が優先度が高い。
+        keyword, pool_price_min = pick_next_keyword()
         if keyword:
             keyword_from_pool = True
+            if price_min is None and pool_price_min is not None:
+                price_min = pool_price_min
             print(f"[INFO] キーワードプールから選択: {keyword}")
         else:
             weekday = datetime.now(timezone.utc).weekday()
@@ -406,10 +419,12 @@ def run_daily_scan(
     search_params = dict(DEFAULT_SEARCH_PARAMS)
     search_params["max_candidates"] = max_candidates
     if price_min is not None:
-        # デフォルトは$30(3000)固定 - 文具女子アワード/JetPens受賞歴のような
-        # 低単価帯($3〜20程度)のキーワードはこの下限で全滅していた(2026-09-06
-        # に判明)。呼び出し側が明示的に下げられるようにする。
+        # デフォルト(DEFAULT_SEARCH_PARAMS)はprice_min=None/price_max=3000
+        # ($30以下)。--price-min / キーワードプールのper-keyword price_minで
+        # 個別に下限を上書きしたい場合(例: 高単価カテゴリを試す時)にここで反映する。
         search_params["price_min"] = price_min
+    if price_max is not None:
+        search_params["price_max"] = price_max
     mcp_result = find_arbitrage_candidates(
         keyword=keyword, category_id=category_id, wait_for_tokens=wait_for_tokens, **search_params
     )
@@ -558,9 +573,10 @@ def main() -> None:
     parser.add_argument("--max-candidates", type=int, default=DEFAULT_SEARCH_PARAMS["max_candidates"],
                          help="評価するASIN数の上限(Keepaトークン消費に直結)")
     parser.add_argument("--price-min", type=int, default=None,
-                         help="US側の最低価格(セント単位、例: 300 = $3.00)。省略時はfind_arbitrage_candidates()"
-                              "のデフォルト($30/3000)。文具女子アワード/JetPens受賞歴等、低単価帯のキーワードで"
-                              "使う(デフォルトのままだと$30未満の商品が全滅する)")
+                         help="US側の最低価格(セント単位、例: 3000 = $30.00)。省略時はデフォルト(下限なし、"
+                              "$30以下のみを対象)のまま。高単価カテゴリを試す時など、下限を上書きしたい場合に使う")
+    parser.add_argument("--price-max", type=int, default=None,
+                         help="US側の最高価格(セント単位、例: 5000 = $50.00)。省略時はデフォルトの$30(3000)のまま")
     parser.add_argument("--no-wait", dest="wait_for_tokens", action="store_false",
                          help="トークン不足時に待たず、その時点までの結果で打ち切る(デフォルトは待つ)")
     parser.set_defaults(wait_for_tokens=True)
@@ -611,6 +627,7 @@ def main() -> None:
         max_candidates=args.max_candidates,
         wait_for_tokens=args.wait_for_tokens,
         price_min=args.price_min,
+        price_max=args.price_max,
     )
 
 

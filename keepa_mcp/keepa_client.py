@@ -231,6 +231,7 @@ def find_products(
     keyword: Optional[str] = None,
     category_id: Optional[int] = None,
     price_min: Optional[int] = None,
+    price_max: Optional[int] = None,
     require_amazon_out_of_stock: bool = False,
     monthly_sold_peak_min: Optional[int] = None,
     product_type: Optional[List[str]] = None,
@@ -255,9 +256,13 @@ def find_products(
     (see keepa-csv-dashboard/sqlite_api_server.py's
     build_keepa_finder_selection): Amazon itself has no offer (only 3rd-party
     sellers do) and the buy-box price clears a floor - i.e. "Amazonに在庫が
-    ない、価格が閾値以上" niche/reseller-only listings. `price_min` is in the
-    domain's smallest currency unit (cents for USD, whole yen for JPY - so
-    price_min=3000 means $30 on domain="US" but Y3000 on domain="JP").
+    ない、価格が閾値以上" niche/reseller-only listings. `price_min` /
+    `price_max` are in the domain's smallest currency unit (cents for USD,
+    whole yen for JPY - so price_min=3000 means $30 on domain="US" but
+    Y3000 on domain="JP"). `price_max` is optional and off by default (no
+    ceiling) - added for low-price keyword pools (e.g. award-winning
+    stationery under $30) that the default $30 floor used to filter out
+    entirely.
 
     Keepa requires perPage >= 50 (a 400 error otherwise); the result is
     trimmed back down to the caller's requested `per_page` before returning.
@@ -280,6 +285,8 @@ def find_products(
         selection["current_AMAZON_lte"] = -1
     if price_min is not None:
         selection["current_BUY_BOX_SHIPPING_gte"] = price_min
+    if price_max is not None:
+        selection["current_BUY_BOX_SHIPPING_lte"] = price_max
     if monthly_sold_peak_min is not None:
         selection["monthlySoldPeak_gte"] = monthly_sold_peak_min
     if sales_rank_min is not None:

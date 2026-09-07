@@ -1166,11 +1166,15 @@ def init_db() -> None:
                 last_used_at TEXT,
                 times_used INTEGER NOT NULL DEFAULT 0,
                 total_qualified INTEGER NOT NULL DEFAULT 0,
-                status TEXT NOT NULL DEFAULT 'active'
+                status TEXT NOT NULL DEFAULT 'active',
+                price_min INTEGER
             )
             '''
         )
         conn.execute('CREATE INDEX IF NOT EXISTS idx_keyword_pool_status ON keyword_pool(status)')
+        keyword_pool_columns = {row[1] for row in conn.execute('PRAGMA table_info(keyword_pool)').fetchall()}
+        if 'price_min' not in keyword_pool_columns:
+            conn.execute('ALTER TABLE keyword_pool ADD COLUMN price_min INTEGER')
 
         # Sellerエージェントのセラープール。定義元はops_finance.py側だが、
         # keyword_pool と同じ理由でここにも同じ定義を用意しておく。
@@ -1648,7 +1652,7 @@ def load_keyword_pool():
         rows = conn.execute(
             '''
             SELECT keyword, source, seed_keyword, added_at, last_used_at,
-                   times_used, total_qualified, status
+                   times_used, total_qualified, status, price_min
             FROM keyword_pool
             ORDER BY times_used ASC, COALESCE(last_used_at, '') ASC
             '''
@@ -1663,8 +1667,9 @@ def load_keyword_pool():
             'timesUsed': times_used,
             'totalQualified': total_qualified,
             'status': status,
+            'priceMin': price_min,
         }
-        for keyword, source, seed_keyword, added_at, last_used_at, times_used, total_qualified, status in rows
+        for keyword, source, seed_keyword, added_at, last_used_at, times_used, total_qualified, status, price_min in rows
     ]
 
 
