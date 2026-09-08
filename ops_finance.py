@@ -1273,6 +1273,18 @@ def add_keywords(keywords, source: str, seed_keyword: str = None, price_min: int
     price_min上書き(米セント単位)。省略時はデフォルト(下限なし、$30以下の
     み対象)のまま追加される。高単価カテゴリのキーワード群だけ下限を戻したい
     場合に指定する。
+
+    キーワードの2方向運用(2026-09-09、文具女子アワード/JetPens受賞コレクション
+    19件中2件しか実質利益率20%に届かなかった反省から): JP発の商品名(受賞リスト等)
+    を直接キーワード化する場合(チャンネルB/JP→US)は、Keepaを叩く前にブラウザで
+    (1)JP側の実売バッジ・ベストセラー順位、(2)US側に対応ASINが実在するか+実際の
+    Amazonタイトル、を確認してから、その実タイトルの部分文字列をキーワードにする
+    (自己流の言い換えは表記ゆれ(例: "Sun-Star"と"Sunstar")で0件になりやすい)。
+    一方、日本メーカーのブランド名(Pilot/Kokuyo/Sun-Star/Tombow/Zebra/Uni
+    Mitsubishi/Midori/Kutsuwa/Maruman/Nakabayashi/Lihit Lab等)は手がかり無しで
+    直接投入してよい(チャンネルA/US→JP、source='jp_brand_name')。ブランド名は
+    表記ゆれが起きにくく、find_arbitrage_candidates()自体のUS側実需フィルタ
+    (monthly_sold_peak_min等)が「US側で既に売れているもの」だけを自然に残す。
     """
     init_ops_tables()
     keywords = [str(k).strip() for k in keywords if str(k or '').strip()]
