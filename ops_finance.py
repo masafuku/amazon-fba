@@ -195,6 +195,101 @@ def init_ops_tables():
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 last_sent_at TEXT
             );
+
+            -- ===================================================================
+            -- 収支・在庫ダッシュボード(SP-API連携)用テーブル群。
+            -- Keepaには一切依存しない(sp_api/, gmail_client.py, sd_email_parser.py,
+            -- sp_api_sync.pyのみが書き込む)。詳細は計画メモ
+            -- 「SP-API連携による収支・在庫ダッシュボード」参照。
+            -- ===================================================================
+
+            -- Orders API (getOrders) の取得結果。
+            CREATE TABLE IF NOT EXISTS sp_orders (
+                order_id TEXT PRIMARY KEY,
+                purchase_date TEXT,
+                asin TEXT,
+                sku TEXT,
+                quantity INTEGER,
+                item_price_usd REAL,
+                order_status TEXT,
+                updated_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_sp_orders_asin ON sp_orders(asin);
+            CREATE INDEX IF NOT EXISTS idx_sp_orders_purchase_date ON sp_orders(purchase_date);
+
+            -- Finances API (listFinancialEventsByOrderId) の取得結果。
+            -- referral_fee_percent/fba_pickpack_feeという「推定値」ではなく、
+            -- Amazonが実際に請求した金額をここに実績値として持つ。
+            CREATE TABLE IF NOT EXISTS sp_financial_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,  -- Commission/FBAPerUnitFulfillmentFee/StorageFee 等
+                amount_usd REAL NOT NULL,
+                posted_date TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_sp_financial_events_order_id ON sp_financial_events(order_id);
+
+            -- FBA Inventory API (getInventorySummaries) の最新スナップショット
+            -- (履歴ではなく毎回上書き。時系列が必要になれば別途拡張)。
+            CREATE TABLE IF NOT EXISTS sp_fba_inventory (
+                asin TEXT PRIMARY KEY,
+                sku TEXT,
+                fnsku TEXT,
+                fulfillable_quantity INTEGER,
+                snapshot_at TEXT
+            );
+
+            -- SP-APIエンドポイントごとの前回同期時刻(digest_stateと同じsingleton行)。
+            CREATE TABLE IF NOT EXISTS sp_sync_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                orders_synced_at TEXT,
+                finances_synced_at TEXT,
+                inventory_synced_at TEXT
+            );
+
+            -- Amazon大口出品プラン/Keepa Pro/Claude等、SP-APIでは取得できない
+            -- 固定費の手入力テーブル。
+            CREATE TABLE IF NOT EXISTS fixed_costs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                monthly_amount_jpy REAL NOT NULL,
+                effective_from TEXT,
+                note TEXT
+            );
+
+            -- Super Deliveryの注文確定メール(「＜SD＞ご注文内容控え」)を
+            -- sd_email_parser.pyがパースして書き込む仕入原価・数量の実績。
+            CREATE TABLE IF NOT EXISTS jp_purchase_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_date TEXT,
+                sd_reception_no TEXT UNIQUE,   -- 受付番号(メール1通に複数出展企業分入ることがあるが、受付番号は行ごとに一意)
+                supplier_name TEXT,            -- 出展企業名(丸進/Zoomy BUNGU等)
+                sd_product_no TEXT,            -- SD品番
+                product_name TEXT,
+                jan_code TEXT,
+                variant TEXT,                  -- 内訳(色/キャラクター等)
+                unit_price_jpy REAL,           -- 注文単価
+                quantity INTEGER,              -- 注文点数
+                amount_jpy REAL,               -- 注文金額
+                asin TEXT                      -- asin_jan_map経由で手動リンク(未リンクならNULL)
+            );
+            CREATE INDEX IF NOT EXISTS idx_jp_purchase_records_jan_code ON jp_purchase_records(jan_code);
+            CREATE INDEX IF NOT EXISTS idx_jp_purchase_records_asin ON jp_purchase_records(asin);
+
+            -- JANコード<->ASINの手動リンク。Keepaのeanフィールドで自動照合も
+            -- できるが、それだとKeepa依存が復活してしまうため、出品確定時に
+            -- 手で1行登録する運用にして独立性を保つ(「Keepaからの独立性」参照)。
+            CREATE TABLE IF NOT EXISTS asin_jan_map (
+                asin TEXT PRIMARY KEY,
+                jan_code TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_asin_jan_map_jan_code ON asin_jan_map(jan_code);
+
+            -- sd_email_parser.pyの前回実行時刻(digest_stateと同じsingleton行)。
+            CREATE TABLE IF NOT EXISTS sd_parse_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                last_parsed_at TEXT
+            );
             '''
         )
         # 既存DBに対する後方互換マイグレーション(CREATE TABLE IF NOT EXISTSは
@@ -1647,6 +1742,276 @@ def list_seller_pool() -> list:
         }
         for seller_id, seller_name, source, seed_asin, added_at, last_mined_at, times_mined, total_qualified, status in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# SP-API連携(収支・在庫ダッシュボード)。Keepaには依存しない
+# — sp_api/, gmail_client.py, sd_email_parser.py, sp_api_sync.py が書き込み、
+# sqlite_api_server.py の /api/finance/* が読み出す。
+# ---------------------------------------------------------------------------
+
+def get_sp_sync_state() -> dict:
+    """SP-APIエンドポイントごとの前回同期時刻。一度も同期していなければ全てNone。"""
+    init_ops_tables()
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            'SELECT orders_synced_at, finances_synced_at, inventory_synced_at FROM sp_sync_state WHERE id = 1'
+        ).fetchone()
+    if not row:
+        return {'ordersSyncedAt': None, 'financesSyncedAt': None, 'inventorySyncedAt': None}
+    return {'ordersSyncedAt': row[0], 'financesSyncedAt': row[1], 'inventorySyncedAt': row[2]}
+
+
+def set_sp_sync_state(*, orders_synced_at=None, finances_synced_at=None, inventory_synced_at=None) -> None:
+    """渡されたフィールドだけ更新する(未指定のフィールドは既存値を保持)。"""
+    init_ops_tables()
+    current = get_sp_sync_state()
+    orders_synced_at = orders_synced_at if orders_synced_at is not None else current['ordersSyncedAt']
+    finances_synced_at = finances_synced_at if finances_synced_at is not None else current['financesSyncedAt']
+    inventory_synced_at = inventory_synced_at if inventory_synced_at is not None else current['inventorySyncedAt']
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            '''
+            INSERT INTO sp_sync_state (id, orders_synced_at, finances_synced_at, inventory_synced_at)
+            VALUES (1, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                orders_synced_at = excluded.orders_synced_at,
+                finances_synced_at = excluded.finances_synced_at,
+                inventory_synced_at = excluded.inventory_synced_at
+            ''',
+            (orders_synced_at, finances_synced_at, inventory_synced_at),
+        )
+
+
+def upsert_sp_orders(orders: list) -> int:
+    """orders: [{orderId, purchaseDate, asin, sku, quantity, itemPriceUsd, orderStatus}, ...]"""
+    init_ops_tables()
+    now = datetime.now(timezone.utc).isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.executemany(
+            '''
+            INSERT INTO sp_orders (order_id, purchase_date, asin, sku, quantity, item_price_usd, order_status, updated_at)
+            VALUES (:orderId, :purchaseDate, :asin, :sku, :quantity, :itemPriceUsd, :orderStatus, :updatedAt)
+            ON CONFLICT(order_id) DO UPDATE SET
+                purchase_date = excluded.purchase_date,
+                asin = excluded.asin,
+                sku = excluded.sku,
+                quantity = excluded.quantity,
+                item_price_usd = excluded.item_price_usd,
+                order_status = excluded.order_status,
+                updated_at = excluded.updated_at
+            ''',
+            [{**o, 'updatedAt': now} for o in orders],
+        )
+    return len(orders)
+
+
+def upsert_sp_financial_events(order_id: str, events: list) -> int:
+    """events: [{eventType, amountUsd, postedDate}, ...]. 既存の同order_id分は洗い替え。"""
+    init_ops_tables()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute('DELETE FROM sp_financial_events WHERE order_id = ?', (order_id,))
+        conn.executemany(
+            'INSERT INTO sp_financial_events (order_id, event_type, amount_usd, posted_date) VALUES (?, ?, ?, ?)',
+            [(order_id, e['eventType'], e['amountUsd'], e.get('postedDate')) for e in events],
+        )
+    return len(events)
+
+
+def replace_sp_fba_inventory(items: list) -> int:
+    """items: [{asin, sku, fnsku, fulfillableQuantity}, ...]. 毎回スナップショット全洗い替え。"""
+    init_ops_tables()
+    now = datetime.now(timezone.utc).isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute('DELETE FROM sp_fba_inventory')
+        conn.executemany(
+            '''
+            INSERT INTO sp_fba_inventory (asin, sku, fnsku, fulfillable_quantity, snapshot_at)
+            VALUES (:asin, :sku, :fnsku, :fulfillableQuantity, :snapshotAt)
+            ''',
+            [{**i, 'snapshotAt': now} for i in items],
+        )
+    return len(items)
+
+
+def get_sd_parse_state() -> str | None:
+    init_ops_tables()
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute('SELECT last_parsed_at FROM sd_parse_state WHERE id = 1').fetchone()
+    return row[0] if row else None
+
+
+def set_sd_parse_state(parsed_at: str) -> None:
+    init_ops_tables()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            '''
+            INSERT INTO sd_parse_state (id, last_parsed_at) VALUES (1, ?)
+            ON CONFLICT(id) DO UPDATE SET last_parsed_at = excluded.last_parsed_at
+            ''',
+            (parsed_at,),
+        )
+
+
+def upsert_jp_purchase_record(record: dict) -> bool:
+    """record: {orderDate, sdReceptionNo, supplierName, sdProductNo, productName,
+    janCode, variant, unitPriceJpy, quantity, amountJpy}. 受付番号が重複していれば
+    スキップ(受付番号はSuper Delivery側で一意なので、同じメールを2回パースしても
+    多重登録しない)。ASINは asin_jan_map から自動で引ければ埋める。"""
+    init_ops_tables()
+    with sqlite3.connect(DB_PATH) as conn:
+        existing = conn.execute(
+            'SELECT 1 FROM jp_purchase_records WHERE sd_reception_no = ?', (record['sdReceptionNo'],)
+        ).fetchone()
+        if existing:
+            return False
+        asin_row = conn.execute(
+            'SELECT asin FROM asin_jan_map WHERE jan_code = ?', (record.get('janCode'),)
+        ).fetchone()
+        asin = asin_row[0] if asin_row else None
+        conn.execute(
+            '''
+            INSERT INTO jp_purchase_records
+                (order_date, sd_reception_no, supplier_name, sd_product_no, product_name,
+                 jan_code, variant, unit_price_jpy, quantity, amount_jpy, asin)
+            VALUES (:orderDate, :sdReceptionNo, :supplierName, :sdProductNo, :productName,
+                    :janCode, :variant, :unitPriceJpy, :quantity, :amountJpy, :asin)
+            ''',
+            {**record, 'asin': asin},
+        )
+    return True
+
+
+def set_asin_jan_map(asin: str, jan_code: str) -> None:
+    """出品確定時に1回手動で呼ぶ。以後のjp_purchase_records取り込みでASINが自動で埋まる。"""
+    init_ops_tables()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            '''
+            INSERT INTO asin_jan_map (asin, jan_code) VALUES (?, ?)
+            ON CONFLICT(asin) DO UPDATE SET jan_code = excluded.jan_code
+            ''',
+            (asin, jan_code),
+        )
+        # 既存の未リンク行があれば今回のマッピングで埋める。
+        conn.execute(
+            'UPDATE jp_purchase_records SET asin = ? WHERE jan_code = ? AND asin IS NULL',
+            (asin, jan_code),
+        )
+
+
+def add_fixed_cost(name: str, monthly_amount_jpy: float, effective_from: str | None = None, note: str | None = None) -> None:
+    init_ops_tables()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            'INSERT INTO fixed_costs (name, monthly_amount_jpy, effective_from, note) VALUES (?, ?, ?, ?)',
+            (name, monthly_amount_jpy, effective_from, note),
+        )
+
+
+def list_fixed_costs() -> list:
+    init_ops_tables()
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            'SELECT id, name, monthly_amount_jpy, effective_from, note FROM fixed_costs ORDER BY id'
+        ).fetchall()
+    return [
+        {'id': i, 'name': n, 'monthlyAmountJpy': a, 'effectiveFrom': ef, 'note': note}
+        for i, n, a, ef, note in rows
+    ]
+
+
+def compute_finance_summary(days: int = 30, usd_to_jpy: float = 150.0) -> dict:
+    """収支ページ用の集計。売上(sp_orders)・COGS(jp_purchase_records、ASINごと
+    直近仕入単価)・実手数料(sp_financial_events)・固定費(fixed_costs月額)・
+    純利益・固定費カバー率を返す。SP-API/Gmail未設定でsp_orders等が空でも
+    0埋めで正常に返る(例外を投げない)。"""
+    init_ops_tables()
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        orders = conn.execute(
+            'SELECT order_id, asin, quantity, item_price_usd FROM sp_orders WHERE purchase_date >= ?',
+            (since,),
+        ).fetchall()
+        fees_by_order = {}
+        for row in conn.execute(
+            '''
+            SELECT order_id, SUM(amount_usd) AS total
+            FROM sp_financial_events
+            WHERE order_id IN (SELECT order_id FROM sp_orders WHERE purchase_date >= ?)
+            GROUP BY order_id
+            ''',
+            (since,),
+        ):
+            fees_by_order[row['order_id']] = row['total'] or 0.0
+        cost_by_asin = {}
+        for row in conn.execute(
+            '''
+            SELECT asin, unit_price_jpy
+            FROM jp_purchase_records
+            WHERE asin IS NOT NULL
+            ORDER BY order_date ASC
+            '''
+        ):
+            cost_by_asin[row['asin']] = row['unit_price_jpy']  # 後勝ちで直近単価が残る
+        monthly_fixed_jpy = sum(r['monthlyAmountJpy'] for r in list_fixed_costs())
+
+    revenue_usd = sum((o['item_price_usd'] or 0) * (o['quantity'] or 0) for o in orders)
+    fees_usd = sum(fees_by_order.values())
+    cogs_usd = sum(
+        (cost_by_asin.get(o['asin'], 0) or 0) / usd_to_jpy * (o['quantity'] or 0) for o in orders
+    )
+    net_profit_usd = revenue_usd - fees_usd - cogs_usd - (monthly_fixed_jpy / usd_to_jpy) * (days / 30.0)
+    fixed_cost_period_usd = (monthly_fixed_jpy / usd_to_jpy) * (days / 30.0)
+
+    return {
+        'periodDays': days,
+        'orderCount': len(orders),
+        'revenueUsd': round(revenue_usd, 2),
+        'cogsUsd': round(cogs_usd, 2),
+        'feesUsd': round(fees_usd, 2),
+        'fixedCostUsd': round(fixed_cost_period_usd, 2),
+        'netProfitUsd': round(net_profit_usd, 2),
+        'fixedCostCoveragePct': round(100.0 * (revenue_usd - fees_usd - cogs_usd) / fixed_cost_period_usd, 1)
+        if fixed_cost_period_usd > 0 else None,
+    }
+
+
+def get_sp_fba_inventory_with_days_of_stock(days_for_velocity: int = 30) -> list:
+    """在庫日数付きのFBA在庫一覧。直近days_for_velocity日の販売ペースから算出。"""
+    init_ops_tables()
+    since = (datetime.now(timezone.utc) - timedelta(days=days_for_velocity)).date().isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        sold_by_asin = {
+            row['asin']: row['total_qty']
+            for row in conn.execute(
+                'SELECT asin, SUM(quantity) AS total_qty FROM sp_orders WHERE purchase_date >= ? GROUP BY asin',
+                (since,),
+            )
+        }
+        inventory = conn.execute(
+            'SELECT asin, sku, fnsku, fulfillable_quantity, snapshot_at FROM sp_fba_inventory'
+        ).fetchall()
+
+    result = []
+    for row in inventory:
+        sold = sold_by_asin.get(row['asin'], 0) or 0
+        daily_rate = sold / days_for_velocity if days_for_velocity else 0
+        days_of_stock = (row['fulfillable_quantity'] / daily_rate) if daily_rate > 0 else None
+        result.append(
+            {
+                'asin': row['asin'],
+                'sku': row['sku'],
+                'fnsku': row['fnsku'],
+                'fulfillableQuantity': row['fulfillable_quantity'],
+                'snapshotAt': row['snapshot_at'],
+                'soldLast30d': sold,
+                'daysOfStock': round(days_of_stock, 1) if days_of_stock is not None else None,
+            }
+        )
+    return result
 
 
 if __name__ == '__main__':

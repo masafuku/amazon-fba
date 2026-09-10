@@ -8,6 +8,7 @@ import KeywordPoolPage from './KeywordPoolPage.jsx';
 import SellerMiningPage from './SellerMiningPage.jsx';
 import CandidateDetailPage from './CandidateDetailPage.jsx';
 import SellerDetailPage from './SellerDetailPage.jsx';
+import FinancePage from './FinancePage.jsx';
 import './index.css';
 
 function Root() {
@@ -24,6 +25,7 @@ function Root() {
     const isAgent = hash === '#agent';
     const isKeywords = hash === '#keywords';
     const isSellerMining = hash === '#seller-mining';
+    const isFinance = hash === '#finance';
     // #candidate/<ASIN>: このコードベース初のパラメータ付きハッシュルート。
     // ナビゲーションバーには追加しない(AgentPage一覧からのクリック遷移のみが導線)。
     const candidateAsin = hash.startsWith('#candidate/') ? decodeURIComponent(hash.slice('#candidate/'.length)) : null;
@@ -32,12 +34,12 @@ function Root() {
     // CEO: 「セラーサーチで見つけたセラーの結果をもう少しみやすくしたい。少なくとも、
     // そのセラーのページを一枚作ること。」
     const sellerId = hash.startsWith('#seller/') ? decodeURIComponent(hash.slice('#seller/'.length)) : null;
-    const isDashboard = !isFinder && !isFavorites && !isAgent && !isKeywords && !isSellerMining && !candidateAsin && !sellerId;
+    const isDashboard = !isFinder && !isFavorites && !isAgent && !isKeywords && !isSellerMining && !isFinance && !candidateAsin && !sellerId;
 
     return (
         <div className="min-h-screen bg-slate-950 text-slate-100">
             <div className="mx-auto max-w-7xl px-3 py-3 sm:px-6 sm:py-4 lg:px-8">
-                <nav className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-6" aria-label="メインメニュー">
+                <nav className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-7" aria-label="メインメニュー">
                     <a
                         href="#dashboard"
                         className={`min-h-11 rounded-xl px-2 py-2 text-center text-xs font-semibold sm:px-4 sm:text-sm ${isDashboard ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-100'}`}
@@ -74,6 +76,12 @@ function Root() {
                     >
                         お気に入り
                     </a>
+                    <a
+                        href="#finance"
+                        className={`min-h-11 rounded-xl px-2 py-2 text-center text-xs font-semibold sm:px-4 sm:text-sm ${isFinance ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-100'}`}
+                    >
+                        💰 収支
+                    </a>
                 </nav>
                 {candidateAsin ? (
                     <CandidateDetailPage asin={candidateAsin} onBack={() => { window.location.hash = '#agent'; }} />
@@ -89,6 +97,8 @@ function Root() {
                     <KeywordPoolPage />
                 ) : isSellerMining ? (
                     <SellerMiningPage />
+                ) : isFinance ? (
+                    <FinancePage />
                 ) : (
                     <App />
                 )}

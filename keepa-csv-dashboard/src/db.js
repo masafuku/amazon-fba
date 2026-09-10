@@ -359,3 +359,26 @@ export const lookupAsin = async (asin) => {
     if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
     return response.json();
 };
+
+// 収支ページ(SP-API連携、Keepaには依存しない)。認証情報未設定でも
+// 500ではなく空データで返る設計なので、呼び出し側は「まだデータがありません」
+// の空状態を表示すればよい。
+export const loadFinanceSummary = async (days = 30) => {
+    const response = await fetch(`${API_BASE}/api/finance/summary?days=${days}`);
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    return response.json();
+};
+
+export const loadFinanceInventory = async () => {
+    const response = await fetch(`${API_BASE}/api/finance/inventory`);
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    const json = await response.json();
+    return json.inventory ?? [];
+};
+
+export const loadFinanceOrders = async (days = 30) => {
+    const response = await fetch(`${API_BASE}/api/finance/orders?days=${days}`);
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    const json = await response.json();
+    return json.orders ?? [];
+};

@@ -1244,6 +1244,117 @@ def init_db() -> None:
             '''
         )
 
+        # ===================================================================
+        # 収支・在庫ダッシュボード(SP-API連携)用テーブル群。ops_finance.py側の
+        # init_ops_tables()と同一定義をここにもミラーする(CLAUDE.md記載の既知
+        # パターン、二つのPythonエントリポイントはお互いをimportしない)。
+        # スキーマを変更する場合は必ず両方を更新すること。Keepaには依存しない。
+        # ===================================================================
+        conn.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS sp_orders (
+                order_id TEXT PRIMARY KEY,
+                purchase_date TEXT,
+                asin TEXT,
+                sku TEXT,
+                quantity INTEGER,
+                item_price_usd REAL,
+                order_status TEXT,
+                updated_at TEXT
+            )
+            '''
+        )
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_sp_orders_asin ON sp_orders(asin)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_sp_orders_purchase_date ON sp_orders(purchase_date)')
+
+        conn.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS sp_financial_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                amount_usd REAL NOT NULL,
+                posted_date TEXT
+            )
+            '''
+        )
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_sp_financial_events_order_id ON sp_financial_events(order_id)')
+
+        conn.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS sp_fba_inventory (
+                asin TEXT PRIMARY KEY,
+                sku TEXT,
+                fnsku TEXT,
+                fulfillable_quantity INTEGER,
+                snapshot_at TEXT
+            )
+            '''
+        )
+
+        conn.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS sp_sync_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                orders_synced_at TEXT,
+                finances_synced_at TEXT,
+                inventory_synced_at TEXT
+            )
+            '''
+        )
+
+        conn.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS fixed_costs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                monthly_amount_jpy REAL NOT NULL,
+                effective_from TEXT,
+                note TEXT
+            )
+            '''
+        )
+
+        conn.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS jp_purchase_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_date TEXT,
+                sd_reception_no TEXT UNIQUE,
+                supplier_name TEXT,
+                sd_product_no TEXT,
+                product_name TEXT,
+                jan_code TEXT,
+                variant TEXT,
+                unit_price_jpy REAL,
+                quantity INTEGER,
+                amount_jpy REAL,
+                asin TEXT
+            )
+            '''
+        )
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_jp_purchase_records_jan_code ON jp_purchase_records(jan_code)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_jp_purchase_records_asin ON jp_purchase_records(asin)')
+
+        conn.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS asin_jan_map (
+                asin TEXT PRIMARY KEY,
+                jan_code TEXT NOT NULL
+            )
+            '''
+        )
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_asin_jan_map_jan_code ON asin_jan_map(jan_code)')
+
+        conn.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS sd_parse_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                last_parsed_at TEXT
+            )
+            '''
+        )
+
 
 def insert_rows(rows, metadata):
     imported_at = metadata.get('importedAt') or datetime.now(timezone.utc).isoformat()
@@ -1331,6 +1442,109 @@ def load_favorites():
             'updatedAt': updated_at,
         })
     return favorites
+
+
+def load_finance_summary(days: int = 30, usd_to_jpy: float = 150.0):
+    """収支ページ用の集計。ops_finance.pyのcompute_finance_summary()と同一ロジック
+    (二つのPythonエントリポイントはお互いをimportしないという既存方針のため、
+    ここにも複製する)。SP-API/Gmail未設定でデータが0件でも例外を投げず0埋めで返す。"""
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        orders = conn.execute(
+            'SELECT order_id, asin, quantity, item_price_usd FROM sp_orders WHERE purchase_date >= ?',
+            (since,),
+        ).fetchall()
+        fees_by_order = {}
+        for row in conn.execute(
+            '''
+            SELECT order_id, SUM(amount_usd) AS total
+            FROM sp_financial_events
+            WHERE order_id IN (SELECT order_id FROM sp_orders WHERE purchase_date >= ?)
+            GROUP BY order_id
+            ''',
+            (since,),
+        ):
+            fees_by_order[row['order_id']] = row['total'] or 0.0
+        cost_by_asin = {}
+        for row in conn.execute(
+            'SELECT asin, unit_price_jpy FROM jp_purchase_records WHERE asin IS NOT NULL ORDER BY order_date ASC'
+        ):
+            cost_by_asin[row['asin']] = row['unit_price_jpy']
+        monthly_fixed_jpy = conn.execute(
+            'SELECT COALESCE(SUM(monthly_amount_jpy), 0) FROM fixed_costs'
+        ).fetchone()[0]
+
+    revenue_usd = sum((o['item_price_usd'] or 0) * (o['quantity'] or 0) for o in orders)
+    fees_usd = sum(fees_by_order.values())
+    cogs_usd = sum((cost_by_asin.get(o['asin'], 0) or 0) / usd_to_jpy * (o['quantity'] or 0) for o in orders)
+    fixed_cost_period_usd = (monthly_fixed_jpy / usd_to_jpy) * (days / 30.0)
+    net_profit_usd = revenue_usd - fees_usd - cogs_usd - fixed_cost_period_usd
+
+    return {
+        'periodDays': days,
+        'orderCount': len(orders),
+        'revenueUsd': round(revenue_usd, 2),
+        'cogsUsd': round(cogs_usd, 2),
+        'feesUsd': round(fees_usd, 2),
+        'fixedCostUsd': round(fixed_cost_period_usd, 2),
+        'netProfitUsd': round(net_profit_usd, 2),
+        'fixedCostCoveragePct': round(100.0 * (revenue_usd - fees_usd - cogs_usd) / fixed_cost_period_usd, 1)
+        if fixed_cost_period_usd > 0 else None,
+    }
+
+
+def load_fba_inventory(days_for_velocity: int = 30):
+    """在庫日数付きのFBA在庫一覧。ops_finance.pyのget_sp_fba_inventory_with_days_of_stock()と同一ロジック。"""
+    since = (datetime.now(timezone.utc) - timedelta(days=days_for_velocity)).date().isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        sold_by_asin = {
+            row['asin']: row['total_qty']
+            for row in conn.execute(
+                'SELECT asin, SUM(quantity) AS total_qty FROM sp_orders WHERE purchase_date >= ? GROUP BY asin',
+                (since,),
+            )
+        }
+        inventory = conn.execute(
+            'SELECT asin, sku, fnsku, fulfillable_quantity, snapshot_at FROM sp_fba_inventory'
+        ).fetchall()
+
+    result = []
+    for row in inventory:
+        sold = sold_by_asin.get(row['asin'], 0) or 0
+        daily_rate = sold / days_for_velocity if days_for_velocity else 0
+        days_of_stock = (row['fulfillable_quantity'] / daily_rate) if daily_rate > 0 else None
+        result.append({
+            'asin': row['asin'],
+            'sku': row['sku'],
+            'fnsku': row['fnsku'],
+            'fulfillableQuantity': row['fulfillable_quantity'],
+            'snapshotAt': row['snapshot_at'],
+            'soldLast30d': sold,
+            'daysOfStock': round(days_of_stock, 1) if days_of_stock is not None else None,
+        })
+    return result
+
+
+def load_sp_orders(days: int = 30, limit: int = 100):
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            '''
+            SELECT order_id, purchase_date, asin, sku, quantity, item_price_usd, order_status
+            FROM sp_orders WHERE purchase_date >= ?
+            ORDER BY purchase_date DESC LIMIT ?
+            ''',
+            (since, limit),
+        ).fetchall()
+    return [
+        {
+            'orderId': order_id, 'purchaseDate': purchase_date, 'asin': asin, 'sku': sku,
+            'quantity': quantity, 'itemPriceUsd': item_price_usd, 'orderStatus': order_status,
+        }
+        for order_id, purchase_date, asin, sku, quantity, item_price_usd, order_status in rows
+    ]
 
 
 def load_agent_candidates(days: int = 7):
@@ -2049,6 +2263,29 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed.path == '/api/agent/scan-loop':
             self._send_json(200, {'ok': True, **get_scan_loop_status()})
+            return
+
+        if parsed.path == '/api/finance/summary':
+            days = to_int_or_default((params.get('days') or [None])[0], 30)
+            try:
+                self._send_json(200, {'ok': True, **load_finance_summary(days=days)})
+            except Exception as exc:
+                self._send_json(500, {'error': str(exc)})
+            return
+
+        if parsed.path == '/api/finance/inventory':
+            try:
+                self._send_json(200, {'ok': True, 'inventory': load_fba_inventory()})
+            except Exception as exc:
+                self._send_json(500, {'error': str(exc)})
+            return
+
+        if parsed.path == '/api/finance/orders':
+            days = to_int_or_default((params.get('days') or [None])[0], 30)
+            try:
+                self._send_json(200, {'ok': True, 'orders': load_sp_orders(days=days)})
+            except Exception as exc:
+                self._send_json(500, {'error': str(exc)})
             return
 
         if parsed.path == '/api/latest':
