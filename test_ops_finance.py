@@ -6,6 +6,7 @@ from ops_finance import (
     _is_searchable_keyword,
     _shipping_cost_jpy_for_weight,
     calc_unit_profit,
+    evaluate_mcp_candidates,
     normalize_jp_cost_for_tax,
 )
 
@@ -275,6 +276,49 @@ class TestIsSearchableKeyword(unittest.TestCase):
     def test_actual_tea_and_coffee_consumables_are_excluded(self):
         for keyword in ('Green Tea', 'Loose Tea Leaves', 'Coffee Beans', 'Instant Coffee'):
             self.assertFalse(_is_searchable_keyword(keyword), keyword)
+
+    def test_figure_and_collectible_keywords_are_excluded(self):
+        # CEO: 「キーワードサーチの結果がフィギアなどの出品が難しいものが
+        # おおい。除外できる?」— ブランドゲーティング/Transparency/ライセンス
+        # 許諾で繰り返し行き止まりになったカテゴリ(メモリ「Excluded sourcing
+        # categories」参照)。
+        for keyword in (
+            'Nendoroid Hatsune Miku', 'Funko Pop Vinyl', 'PVC Scale Figure',
+            'Gundam Model Kit', 'Pokemon Trading Cards', 'Gacha Capsule Toy',
+        ):
+            self.assertFalse(_is_searchable_keyword(keyword), keyword)
+
+
+class TestEvaluateMcpCandidatesFigureFilter(unittest.TestCase):
+    """商品タイトル段階でのフィギュア/コレクタブル除外。ブランド名("Sanrio"等)
+    のような広いキーワードで検索した結果に、そのブランドのフィギュア/
+    コレクタブル商品が紛れ込むケースに対応する(キーワード自体は問題なくても
+    タイトルで弾く)。"""
+
+    def _candidate(self, title, asin='B0TEST0001'):
+        return {
+            'sell': {
+                'asin': asin, 'title': title, 'price': 20.0, 'weight_kg': 0.1,
+                'referral_fee_percent': 15.0, 'fba_pickpack_fee': 3.0,
+            },
+            'cost': {'price': 1000, 'asin': 'JP123'},
+            'price_diff_rate': 0.5,
+        }
+
+    def test_figure_titled_candidate_is_rejected_before_profit_calc(self):
+        result = evaluate_mcp_candidates({
+            'candidates': [self._candidate('Sanrio Hello Kitty Nendoroid Figure')],
+        })
+        self.assertEqual(result['qualified'], [])
+        self.assertEqual(len(result['rejected']), 1)
+        self.assertEqual(result['rejected'][0]['reason'], 'figure_or_collectible')
+
+    def test_ordinary_stationery_candidate_is_not_rejected_as_figure(self):
+        result = evaluate_mcp_candidates({
+            'candidates': [self._candidate('Sanrio Hello Kitty Ruler 15cm')],
+        })
+        figure_rejections = [r for r in result['rejected'] if r.get('reason') == 'figure_or_collectible']
+        self.assertEqual(figure_rejections, [])
 
 
 if __name__ == '__main__':

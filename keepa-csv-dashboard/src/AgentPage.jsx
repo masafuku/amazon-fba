@@ -56,6 +56,12 @@ export default function AgentPage() {
     const [categoryFilter, setCategoryFilter] = useState(storedAgentFilters.categoryFilter ?? 'all');
     const [hideNoSalesSignal, setHideNoSalesSignal] = useState(storedAgentFilters.hideNoSalesSignal ?? false);
     const [hideNegativeRoi, setHideNegativeRoi] = useState(storedAgentFilters.hideNegativeRoi ?? false);
+    // フィギュア/キャラクターコレクタブル(reason='figure_or_collectible')は
+    // ブランドゲーティング等で出品が難しいため、デフォルトで非表示にする
+    // (CEO: 「キーワードサーチのページのリストでこれらをフィルターできる
+    // ようにしてデフォルメでは見えないようにして」)。他のhide*トグルと違い
+    // 既定値がtrue = 「隠す」がデフォルト。
+    const [hideFigures, setHideFigures] = useState(storedAgentFilters.hideFigures ?? true);
     const [scanLoopStatus, setScanLoopStatus] = useState(null);
     const [scanLoopBusy, setScanLoopBusy] = useState(false);
     const [lookupAsinInput, setLookupAsinInput] = useState('');
@@ -160,14 +166,14 @@ export default function AgentPage() {
             localStorage.setItem(
                 AGENT_FILTERS_STORAGE_KEY,
                 JSON.stringify({
-                    searchText, categoryFilter, hideNoSalesSignal, hideNegativeRoi, sortKey, sortOrder,
+                    searchText, categoryFilter, hideNoSalesSignal, hideNegativeRoi, hideFigures, sortKey, sortOrder,
                     days, showRejected,
                 })
             );
         } catch {
             // プライベートブラウジング等でlocalStorageが使えない場合は無視(記憶できないだけ)
         }
-    }, [searchText, categoryFilter, hideNoSalesSignal, hideNegativeRoi, sortKey, sortOrder, days, showRejected]);
+    }, [searchText, categoryFilter, hideNoSalesSignal, hideNegativeRoi, hideFigures, sortKey, sortOrder, days, showRejected]);
 
     // 実行中の検索があれば状態表示に使う(バナー・実行履歴の「実行中」
     // バッジ)。自動ポーリングはしない(CEOの希望) - 最新状況を見たい
@@ -231,7 +237,15 @@ export default function AgentPage() {
     }, [candidates]);
 
     const visibleCandidates = useMemo(() => {
-        const filtered = showRejected ? candidates : candidates.filter((item) => item.qualified);
+        const byQualified = showRejected ? candidates : candidates.filter((item) => item.qualified);
+        // フィギュア/コレクタブル(evaluate_mcp_candidates()側でreason=
+        // 'figure_or_collectible'として却下済み)は、showRejectedがオンでも
+        // 別トグルで独立に隠せるようにする(showRejectedは「利益率で
+        // 落ちた候補も見たい」用途で、こちらは「そもそも出品できない
+        // カテゴリを視界から消したい」という別の目的のため)。
+        const filtered = hideFigures
+            ? byQualified.filter((item) => item.reason !== 'figure_or_collectible')
+            : byQualified;
         // 表面利益/表面利益率/手数料/輸送費はAPIの生フィールドではなくcandidate.dataから算出する値。
         // 既存の汎用ソート比較関数(candidate[sortKey]を直接参照する)にそのまま乗せられるよう、
         // ソート前に候補オブジェクトへ事前計算して付与する(SellerMiningPage.jsxのpassRateと同じパターン)。
@@ -336,7 +350,7 @@ export default function AgentPage() {
             }
             return rightRoi - leftRoi;
         });
-    }, [candidates, showRejected, sortKey, sortOrder, searchText, categoryFilter, hideNoSalesSignal, hideNegativeRoi]);
+    }, [candidates, showRejected, hideFigures, sortKey, sortOrder, searchText, categoryFilter, hideNoSalesSignal, hideNegativeRoi]);
 
     const qualifiedCount = useMemo(() => candidates.filter((item) => item.qualified).length, [candidates]);
 
@@ -566,7 +580,15 @@ export default function AgentPage() {
                     >
                         ROIマイナスを隠す
                     </button>
-                    {searchText || categoryFilter !== 'all' || hideNoSalesSignal || hideNegativeRoi ? (
+                    <button
+                        type="button"
+                        onClick={() => setHideFigures((current) => !current)}
+                        className={`rounded-2xl px-4 py-1.5 text-sm font-semibold ${hideFigures ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-300'}`}
+                        title="フィギュア/キャラクターコレクタブル(出品が難しいカテゴリ)を隠す。既定でオン"
+                    >
+                        フィギュアを隠す
+                    </button>
+                    {searchText || categoryFilter !== 'all' || hideNoSalesSignal || hideNegativeRoi || !hideFigures ? (
                         <button
                             type="button"
                             onClick={() => {
@@ -574,6 +596,7 @@ export default function AgentPage() {
                                 setCategoryFilter('all');
                                 setHideNoSalesSignal(false);
                                 setHideNegativeRoi(false);
+                                setHideFigures(true);
                             }}
                             className="rounded-2xl px-4 py-1.5 text-sm font-semibold text-slate-400 hover:text-slate-200"
                         >

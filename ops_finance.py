@@ -821,6 +821,29 @@ def evaluate_mcp_candidates(
         cost = candidate['cost']
         asin = sell['asin']
 
+        # ブランド名等の広いキーワード("Sanrio"等)で検索すると、そのブランドが
+        # 展開しているフィギュア/コレクタブルもヒットしてしまう。これらは
+        # 出品時にブランドゲーティング・Transparency・ライセンス許諾で
+        # 行き止まりになることが繰り返し確認されている(CEOメモリ
+        # 「Excluded sourcing categories」)ため、キーワード自体が問題ない
+        # 場合でも商品タイトル段階でここで弾く。
+        title = sell.get('title') or ''
+        if _is_figure_or_collectible_keyword(title):
+            # ダッシュボードの「エージェント」ページでフィルタ・表示できるよう、
+            # 却下理由(reason)に加えて画像・価格など一覧表示に要る最低限の
+            # フィールドも持たせておく(qualified候補ほど詳細ではないが、
+            # 一覧上でどの商品か判別できる程度)。
+            rejected.append({
+                'asin': asin,
+                'title': title,
+                'url': sell.get('url'),
+                'image_url': sell.get('image_url'),
+                'us_price_usd': sell.get('price'),
+                'jp_cost_jpy': cost.get('price'),
+                'reason': 'figure_or_collectible',
+            })
+            continue
+
         weight_kg = sell.get('weight_kg')
         used_fallback_weight = weight_kg is None
         if used_fallback_weight:
@@ -1481,17 +1504,42 @@ def _is_food_or_unsuitable_keyword(candidate: str) -> bool:
     )
 
 
+# フィギュア/キャラクターコレクタブルは、ブランドゲーティング・Amazon
+# Transparency・ライセンス許諾の壁でこのセッション中に繰り返し行き止まりに
+# なった(CEO: メモリ「Excluded sourcing categories」参照)。食品と同じ扱いで
+# キーワード段階・候補タイトル段階の両方で除外する。
+_FIGURE_AND_COLLECTIBLE_KEYWORDS = (
+    'figure', 'figures', 'figurine', 'figurines', 'action figure', 'action figures',
+    'pvc figure', 'scale figure', 'prize figure', 'nendoroid', 'figma',
+    'funko', 'pop vinyl', 'statue', 'statues', 'model kit', 'model kits',
+    'gunpla', 'garage kit', 'garage kits', 'trading card', 'trading cards',
+    'tcg', 'blind box', 'blind boxes', 'gacha', 'capsule toy', 'capsule toys',
+    'collectible', 'collectibles', 'diorama', 'dioramas',
+)
+
+
+def _is_figure_or_collectible_keyword(candidate: str) -> bool:
+    lowered = candidate.strip().lower()
+    return any(
+        re.search(r'\b' + re.escape(term) + r'\b', lowered)
+        for term in _FIGURE_AND_COLLECTIBLE_KEYWORDS
+    )
+
+
 def _is_searchable_keyword(candidate: str) -> bool:
     """お気に入りから拾った文字列が、Keepaのtitleキーワード検索(常にUS側の
     タイトルに対して行われる)として使えそうかを判定する: Amazonの大分類名
-    そのものではないか、日本語表記ではないか、食品などFBA輸出に向かない
-    カテゴリではないか。"""
+    そのものではないか、日本語表記ではないか、食品/フィギュア・
+    キャラクターコレクタブルなどFBA輸出・出品に向かないカテゴリでは
+    ないか。"""
     stripped = candidate.strip()
     if stripped.lower() in _AMAZON_TOP_LEVEL_CATEGORIES:
         return False
     if _contains_japanese(stripped):
         return False
     if _is_food_or_unsuitable_keyword(stripped):
+        return False
+    if _is_figure_or_collectible_keyword(stripped):
         return False
     return True
 
