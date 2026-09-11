@@ -57,6 +57,86 @@ export const deleteFavorite = async (asin) => {
     return response.json();
 };
 
+export const loadAgentCandidates = async (days = 7) => {
+    const params = new URLSearchParams({ days: String(days) });
+    const response = await fetch(`${API_BASE}/api/agent/candidates?${params.toString()}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const json = await response.json();
+    return json.candidates || [];
+};
+
+export const loadAgentRuns = async (days = 30) => {
+    const params = new URLSearchParams({ days: String(days) });
+    const response = await fetch(`${API_BASE}/api/agent/runs?${params.toString()}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const json = await response.json();
+    return json.runs || [];
+};
+
+export const loadKeepaTokenStatus = async () => {
+    const response = await fetch(`${API_BASE}/api/keepa/token`);
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || `HTTP ${response.status}`);
+    }
+    return response.json();
+};
+
+export const loadScanLoopStatus = async () => {
+    const response = await fetch(`${API_BASE}/api/agent/scan-loop`);
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || `HTTP ${response.status}`);
+    }
+    return response.json();
+};
+
+export const controlScanLoop = async (action) => {
+    const response = await fetch(`${API_BASE}/api/agent/scan-loop`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+    });
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || `HTTP ${response.status}`);
+    }
+    return response.json();
+};
+
+export const setScanLoopMode = async (mode) => {
+    const response = await fetch(`${API_BASE}/api/agent/scan-loop`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode }),
+    });
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || `HTTP ${response.status}`);
+    }
+    return response.json();
+};
+
+export const discoverSellersForAsin = async ({ asin, maxSellers }) => {
+    const response = await fetch(`${API_BASE}/api/seller-mining/discover-sellers`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ asin, maxSellers }),
+    });
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    return response.json();
+};
+
+export const expandFromSeller = async ({ sellerId, maxCandidates, seedAsin }) => {
+    const response = await fetch(`${API_BASE}/api/seller-mining/expand`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sellerId, maxCandidates, seedAsin }),
+    });
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    return response.json();
+};
+
 export const loadDbStatsFromDb = async () => {
     const response = await fetch(`${API_BASE}/api/health`);
     if (!response.ok) {
@@ -146,6 +226,60 @@ export const fetchKeepaProduct = async (payload) => {
     };
 };
 
+export const loadKeywordPool = async () => {
+    const response = await fetch(`${API_BASE}/api/keyword-pool`);
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    const json = await response.json();
+    return json.keywords || [];
+};
+
+export const addKeywordToPool = async (keyword) => {
+    const response = await fetch(`${API_BASE}/api/keyword-pool`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keyword }),
+    });
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    return response.json();
+};
+
+export const deleteKeywordFromPool = async (keyword) => {
+    const response = await fetch(`${API_BASE}/api/keyword-pool?keyword=${encodeURIComponent(keyword)}`, { method: 'DELETE' });
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    return response.json();
+};
+
+export const loadSellerCandidates = async (sellerId) => {
+    const params = new URLSearchParams({ sellerId: String(sellerId) });
+    const response = await fetch(`${API_BASE}/api/agent/seller-candidates?${params.toString()}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const json = await response.json();
+    return json.candidates || [];
+};
+
+export const loadSellerPool = async () => {
+    const response = await fetch(`${API_BASE}/api/seller-pool`);
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    const json = await response.json();
+    return json.sellers || [];
+};
+
+export const addSellerToPool = async (sellerId) => {
+    const response = await fetch(`${API_BASE}/api/seller-pool`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sellerId }),
+    });
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    return response.json();
+};
+
+export const deleteSellerFromPool = async (sellerId) => {
+    const response = await fetch(`${API_BASE}/api/seller-pool?sellerId=${encodeURIComponent(sellerId)}`, { method: 'DELETE' });
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    return response.json();
+};
+
 export const loadKeepaFinderRun = async (runId) => {
     const params = new URLSearchParams({ runId });
     const response = await fetch(`${API_BASE}/api/keepa/finder-run?${params.toString()}`);
@@ -154,4 +288,97 @@ export const loadKeepaFinderRun = async (runId) => {
         throw new Error(errorText || `HTTP ${response.status}`);
     }
     return response.json();
+};
+
+export const loadAgentCandidateDetail = async (asin) => {
+    const params = new URLSearchParams({ asin });
+    const response = await fetch(`${API_BASE}/api/agent/candidate?${params.toString()}`);
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    const json = await response.json();
+    return json.candidate || null;
+};
+
+// DBに保存済みの履歴データを読むだけ(Keepaへは問い合わせない・トークン消費なし)。
+// ページを開くたびに呼んでよい。
+export const loadCandidateHistory = async (asin) => {
+    const params = new URLSearchParams({ asin });
+    const response = await fetch(`${API_BASE}/api/agent/candidate-history?${params.toString()}`);
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    const json = await response.json();
+    return json.history || null;
+};
+
+// 「取得」/「再取得」ボタンからのみ呼ぶこと - 実際にKeepaへ問い合わせてDBに保存する。
+export const fetchCandidateHistory = async (asin) => {
+    const response = await fetch(`${API_BASE}/api/agent/candidate-history`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ asin }),
+    });
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    return response.json();
+};
+
+// CandidateDetailPageの「再取得」ボタン専用(CEO: 「セラー数が38となっていますが、
+// keepaで直接見た値と明らかに違います」)。v2: 通常の商品取得のみ(追加コースト
+// なし)でセラー数を再計算する - 既存の誤った値も上書き訂正できるよう、値の
+// 有無に関わらず常に呼べる。実際にKeepaへ問い合わせ、その(runId, asin)行の
+// data_jsonへ保存する。
+export const fetchSellerCount = async (runId, asin) => {
+    const response = await fetch(`${API_BASE}/api/agent/seller-count`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ runId, asin }),
+    });
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    return response.json();
+};
+
+// CandidateDetailPageの「在庫を取得」ボタン専用(CEO: 「在庫の数...も取得して
+// 表示してください」)。offers+stockの新規Keepaコール(トークン消費あり)。
+// 実際にKeepaへ問い合わせ、その(runId, asin)行のdata_jsonへ保存する。
+export const fetchStock = async (runId, asin) => {
+    const response = await fetch(`${API_BASE}/api/agent/stock`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ runId, asin }),
+    });
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    return response.json();
+};
+
+// 指定したASINをUS/JPの実データで評価し、agent_candidatesに記録する
+// (CEO: 「ASIN指定で調査する入力UIを追加できますか？」)。実際にKeepaへ
+// 問い合わせるため、ボタン押下時のみ呼ぶこと。
+export const lookupAsin = async (asin) => {
+    const response = await fetch(`${API_BASE}/api/agent/asin-lookup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ asin }),
+    });
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    return response.json();
+};
+
+// 収支ページ(SP-API連携、Keepaには依存しない)。認証情報未設定でも
+// 500ではなく空データで返る設計なので、呼び出し側は「まだデータがありません」
+// の空状態を表示すればよい。
+export const loadFinanceSummary = async (days = 30) => {
+    const response = await fetch(`${API_BASE}/api/finance/summary?days=${days}`);
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    return response.json();
+};
+
+export const loadFinanceInventory = async () => {
+    const response = await fetch(`${API_BASE}/api/finance/inventory`);
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    const json = await response.json();
+    return json.inventory ?? [];
+};
+
+export const loadFinanceOrders = async (days = 30) => {
+    const response = await fetch(`${API_BASE}/api/finance/orders?days=${days}`);
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    const json = await response.json();
+    return json.orders ?? [];
 };

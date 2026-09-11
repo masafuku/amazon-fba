@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+# run_all_day.sh — daily_scan.py を止めずに1日中回し続けるループ。
+#
+# daily_scan.py は1回の実行で「キーワードプールから1個選ぶ→検索→評価→
+# LINE通知」までを行い、それで終了する。Keepaのトークンは1分に1個しか
+# 回復しない(かつ60個までしか貯まらない)プランなので、1日分のトークン
+# (最大1,440個/日 = 1分×1,440分)を使い切るには、このスクリプトのように
+# 外側からdaily_scan.pyを繰り返し呼び出し続ける必要がある。
+#
+# daily_scan.py自身はwait_for_tokens=True(デフォルト)で、トークンが
+# 足りない間は内部でポーリング待機するので、このループは単純に
+# 「1回実行→少し待つ→次のキーワードで1回実行→...」を繰り返すだけでよい。
+# キーワードはキーワードプールから「一番使われていないもの」が毎回自動で
+# 選ばれる(pick_next_keyword())ので、指定は不要。
+#
+# 使い方:
+#   ./scripts/run_all_day.sh                  # デフォルト設定で開始
+#   MAX_CANDIDATES=20 ./scripts/run_all_day.sh # 1回あたりの候補数を変更
+#   ./scripts/run_all_day.sh --max-candidates 20 --category "Kitchen Utensils & Gadgets"
+#     (daily_scan.py に渡す追加の引数。--keyword は指定しないこと -
+#      指定するとプールを使わず常に同じキーワードになってしまう)
+#
+# 停止: Ctrl+C、または `kill <pid>`。SIGINT/SIGTERM で安全に終了する。
+#
+# ダッシュボードの停止ボタン(または `touch .scan_loop_stop_requested`)は
+# これとは別の、よりソフトな停止方法: 実行中のサイクルを中断せず、次の
+# サイクルを開始しないだけ。フラグファイル(リポジトリ直下の
+# .scan_loop_stop_requested)の有無をサイクルの節目ごとにチェックし、
+# あれば消費中のトークンを無駄にせず綺麗に終了する(SIGTERM経由の停止は
+# 実行中のdaily_scan.pyごと即座に中断してしまうため、意図的に別の仕組みに
+# している)。再開はダッシュボードの再開ボタン(フラグファイルを消して
+# `systemctl start`)から。
+#
+# 常駐させたい場合(macOSでログイン時に自動起動するなど)は、この
+# スクリプトを launchd の plist や `nohup ./scripts/run_all_day.sh &`
+# から起動する。
+#
+# Sellerエージェント(定期セラーマイニング、CEOの指示「夜中に一定時間
+# セラーマイニングの時間を使う」): JST の指定時間帯(デフォルト深夜1:00〜
+# 6:00)は、サイクルごとにキーワード検索の代わりにセラープールから1件選んで
+# マイニングする(daily_scan.py --seller-mining)。日中はCEOがダッシュボードを
+# 見ながらキーワード検索の進捗を追う可能性があるため、キーワード検索を
+# 優先させる形。時間帯以外は従来通り。AWS(Lightsail)はシステム時刻が
+# UTCなので、サーバーのTZ設定に依存せず `TZ=Asia/Tokyo date +%H` でJST時刻を
+# 明示的に取得する。
+#   SELLER_MINING_NIGHT_START_JST=0 SELLER_MINING_NIGHT_END_JST=0 ./scripts/run_all_day.sh
+#     (開始・終了を同じ値にすると実質無効化 = 常にキーワード検索のみ)
+#
+# 手動モード切り替え(CEOの指示「セラーマイニングと検索モードの手動切り替えも
+# できるようにして欲しい」): ダッシュボードの「検索ループ(AWS)」パネルの
+# モードボタン(またはフラグファイル .scan_loop_mode_override への直接書き込み)
+# で、上記の時間帯自動判定を上書きできる。停止フラグと同じソフトな仕組み
+# (実行中のサイクルは中断せず、次のサイクルから反映)。ファイルの中身が
+# "seller-mining" なら常にセラーマイニング、"keyword-search" なら常に
+# キーワード検索、ファイルが無い(または不正な内容)なら "auto"
+# (=is_seller_mining_hourによる時間帯自動判定、従来通り)。
+set -uo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO_ROOT"
+STOP_FLAG="$REPO_ROOT/.scan_loop_stop_requested"
+MODE_OVERRIDE_FILE="$REPO_ROOT/.scan_loop_mode_override"
+
+VENV_PYTHON="$REPO_ROOT/.venv/bin/python"
+if [ ! -x "$VENV_PYTHON" ]; then
+  echo "[ERROR] $VENV_PYTHON が見つかりません。先に 'python3 -m venv .venv' & 'pip install -r requirements.txt' を実行してください。" >&2
+  exit 1
+fi
+
+# 1回あたりの評価件数上限(小さいほどトークン消費が少なく、1日に回せる
+# キーワード数が増える。目安: 10〜15件なら1回あたり最大31〜41トークン)。
+MAX_CANDIDATES="${MAX_CANDIDATES:-12}"
+
+# 定期セラーマイニングの時間帯(JST、24時間表記、終了は排他的)。
+# start > end の場合は日をまたぐ範囲として扱う(例: 23〜4時)。
+SELLER_MINING_NIGHT_START_JST="${SELLER_MINING_NIGHT_START_JST:-1}"
+SELLER_MINING_NIGHT_END_JST="${SELLER_MINING_NIGHT_END_JST:-6}"
+SELLER_MINING_MAX_CANDIDATES="${SELLER_MINING_MAX_CANDIDATES:-10}"
+
+LOG_DIR="$REPO_ROOT/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/run_all_day.log"
+
+# 連続エラー時に無限ループでAPIを叩き続けないためのバックオフ設定。
+NORMAL_SLEEP_SECONDS=30
+ERROR_SLEEP_SECONDS=300
+consecutive_errors=0
+
+running=1
+trap 'running=0; log "[INFO] 停止シグナルを受信しました。今のサイクルが終わり次第終了します。"' INT TERM
+
+log() {
+  echo "$(date '+%Y-%m-%d %H:%M:%S') $*" | tee -a "$LOG_FILE"
+}
+
+# 現在時刻(JST)がセラーマイニング時間帯に入っているかを判定する。
+# start==end の場合は常にfalse(機能の実質無効化)。
+is_seller_mining_hour() {
+  local hour start end
+  hour=$(TZ='Asia/Tokyo' date '+%H')
+  hour=$((10#$hour))  # 先頭0のある数字("08"等)が8進数扱いされるのを防ぐ
+  start="$SELLER_MINING_NIGHT_START_JST"
+  end="$SELLER_MINING_NIGHT_END_JST"
+  if [ "$start" -eq "$end" ]; then
+    return 1
+  elif [ "$start" -lt "$end" ]; then
+    [ "$hour" -ge "$start" ] && [ "$hour" -lt "$end" ]
+  else
+    [ "$hour" -ge "$start" ] || [ "$hour" -lt "$end" ]
+  fi
+}
+
+# 手動モード上書きの現在値を返す("seller-mining" / "keyword-search" / "auto")。
+# ファイルが無い、または想定外の内容の場合は安全側に倒して"auto"を返す
+# (=時間帯自動判定にフォールバック)。
+get_mode_override() {
+  local value
+  if [ -f "$MODE_OVERRIDE_FILE" ]; then
+    value=$(tr -d '[:space:]' < "$MODE_OVERRIDE_FILE" 2>/dev/null)
+  else
+    value="auto"
+  fi
+  case "$value" in
+    seller-mining|keyword-search) echo "$value" ;;
+    *) echo "auto" ;;
+  esac
+}
+
+log "[INFO] run_all_day.sh 開始 (MAX_CANDIDATES=$MAX_CANDIDATES, "\
+"SELLER_MINING_NIGHT_JST=${SELLER_MINING_NIGHT_START_JST}-${SELLER_MINING_NIGHT_END_JST}, PID=$$)"
+log "[INFO] 追加引数: $*"
+
+cycle=0
+while [ "$running" -eq 1 ]; do
+  if [ -e "$STOP_FLAG" ]; then
+    log "[INFO] 停止フラグ($STOP_FLAG)を検出。次のサイクルは開始せず終了します。"
+    break
+  fi
+
+  cycle=$((cycle + 1))
+
+  mode_override=$(get_mode_override)
+  if [ "$mode_override" = "seller-mining" ]; then
+    use_seller_mining=1; mode_reason="手動固定"
+  elif [ "$mode_override" = "keyword-search" ]; then
+    use_seller_mining=0; mode_reason="手動固定"
+  elif is_seller_mining_hour; then
+    use_seller_mining=1; mode_reason="自動スケジュール"
+  else
+    use_seller_mining=0; mode_reason="自動スケジュール"
+  fi
+
+  if [ "$use_seller_mining" -eq 1 ]; then
+    cycle_args=(daily_scan.py --seller-mining --seller-mining-max-candidates "$SELLER_MINING_MAX_CANDIDATES")
+    cycle_label="セラーマイニング"
+  else
+    cycle_args=(daily_scan.py --max-candidates "$MAX_CANDIDATES" "$@")
+    cycle_label="キーワード検索"
+  fi
+  log "[INFO] --- サイクル $cycle 開始 (${cycle_label} / ${mode_reason}) ---"
+
+  if "$VENV_PYTHON" "${cycle_args[@]}" >> "$LOG_FILE" 2>&1; then
+    log "[INFO] サイクル $cycle 完了 (${cycle_label})。"
+    consecutive_errors=0
+    sleep_seconds="$NORMAL_SLEEP_SECONDS"
+  else
+    consecutive_errors=$((consecutive_errors + 1))
+    log "[WARN] サイクル $cycle (${cycle_label}) が異常終了しました(連続 $consecutive_errors 回目)。詳細は $LOG_FILE を確認してください。"
+    sleep_seconds="$ERROR_SLEEP_SECONDS"
+  fi
+
+  if [ "$running" -eq 0 ]; then
+    break
+  fi
+
+  log "[INFO] ${sleep_seconds}秒待機します..."
+  # sleepを中断可能にする(シグナル、または停止フラグで即座にループを抜ける)。
+  for _ in $(seq 1 "$sleep_seconds"); do
+    [ "$running" -eq 1 ] || break
+    [ -e "$STOP_FLAG" ] && break
+    sleep 1
+  done
+done
+
+log "[INFO] run_all_day.sh 終了。"
