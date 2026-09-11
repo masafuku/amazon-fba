@@ -151,6 +151,48 @@ export default function FinancePage() {
                     </div>
 
                     <div className="rounded-xl bg-slate-900 p-4">
+                        <h2 className="mb-3 text-sm font-semibold text-slate-300">固定費の内訳</h2>
+                        {(summary.fixedCosts || []).length === 0 ? (
+                            <p className="text-sm text-slate-500">固定費が登録されていません。</p>
+                        ) : (
+                            <div className="overflow-x-auto">
+                                <table className="w-full text-left text-sm">
+                                    <thead>
+                                        <tr className="text-slate-400">
+                                            <th className="px-2 py-2">項目</th>
+                                            <th className="px-2 py-2">月額</th>
+                                            <th className="px-2 py-2">期間按分</th>
+                                            <th className="px-2 py-2">備考</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {summary.fixedCosts.map((item) => (
+                                            <tr key={item.id} className="border-t border-slate-800">
+                                                <td className="px-2 py-2">{item.name}</td>
+                                                <td className="px-2 py-2">
+                                                    ¥{Number(item.monthlyAmountJpy).toLocaleString('ja-JP')}
+                                                </td>
+                                                <td className="px-2 py-2">{usd(item.periodUsd)}</td>
+                                                <td className="px-2 py-2 text-xs text-slate-500">{item.note || '-'}</td>
+                                            </tr>
+                                        ))}
+                                        <tr className="border-t border-slate-700 font-semibold">
+                                            <td className="px-2 py-2">合計</td>
+                                            <td className="px-2 py-2">
+                                                ¥{summary.fixedCosts
+                                                    .reduce((sum, item) => sum + Number(item.monthlyAmountJpy), 0)
+                                                    .toLocaleString('ja-JP')}
+                                            </td>
+                                            <td className="px-2 py-2">{usd(summary.fixedCostUsd)}</td>
+                                            <td className="px-2 py-2" />
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+                    </div>
+
+                    <div className="rounded-xl bg-slate-900 p-4">
                         <h2 className="mb-3 text-sm font-semibold text-slate-300">内訳(期間合計)</h2>
                         <ResponsiveContainer width="100%" height={220}>
                             <BarChart data={chartData}>

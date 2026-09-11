@@ -2012,15 +2012,28 @@ def compute_finance_summary(days: int = 30, usd_to_jpy: float = 150.0) -> dict:
             '''
         ):
             cost_by_asin[row['asin']] = row['unit_price_jpy']  # 後勝ちで直近単価が残る
-        monthly_fixed_jpy = sum(r['monthlyAmountJpy'] for r in list_fixed_costs())
+        fixed_cost_rows = list_fixed_costs()
+        monthly_fixed_jpy = sum(r['monthlyAmountJpy'] for r in fixed_cost_rows)
 
     revenue_usd = sum((o['item_price_usd'] or 0) * (o['quantity'] or 0) for o in orders)
     fees_usd = sum(fees_by_order.values())
     cogs_usd = sum(
         (cost_by_asin.get(o['asin'], 0) or 0) / usd_to_jpy * (o['quantity'] or 0) for o in orders
     )
-    net_profit_usd = revenue_usd - fees_usd - cogs_usd - (monthly_fixed_jpy / usd_to_jpy) * (days / 30.0)
     fixed_cost_period_usd = (monthly_fixed_jpy / usd_to_jpy) * (days / 30.0)
+    net_profit_usd = revenue_usd - fees_usd - cogs_usd - fixed_cost_period_usd
+
+    # 内訳(CEO: 「固定費の内訳もわかるようにして」)
+    fixed_costs_breakdown = [
+        {
+            'id': r['id'],
+            'name': r['name'],
+            'monthlyAmountJpy': r['monthlyAmountJpy'],
+            'periodUsd': round((r['monthlyAmountJpy'] / usd_to_jpy) * (days / 30.0), 2),
+            'note': r['note'],
+        }
+        for r in fixed_cost_rows
+    ]
 
     return {
         'periodDays': days,
@@ -2029,6 +2042,7 @@ def compute_finance_summary(days: int = 30, usd_to_jpy: float = 150.0) -> dict:
         'cogsUsd': round(cogs_usd, 2),
         'feesUsd': round(fees_usd, 2),
         'fixedCostUsd': round(fixed_cost_period_usd, 2),
+        'fixedCosts': fixed_costs_breakdown,
         'netProfitUsd': round(net_profit_usd, 2),
         'fixedCostCoveragePct': round(100.0 * (revenue_usd - fees_usd - cogs_usd) / fixed_cost_period_usd, 1)
         if fixed_cost_period_usd > 0 else None,

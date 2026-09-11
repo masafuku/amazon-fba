@@ -1471,15 +1471,29 @@ def load_finance_summary(days: int = 30, usd_to_jpy: float = 150.0):
             'SELECT asin, unit_price_jpy FROM jp_purchase_records WHERE asin IS NOT NULL ORDER BY order_date ASC'
         ):
             cost_by_asin[row['asin']] = row['unit_price_jpy']
-        monthly_fixed_jpy = conn.execute(
-            'SELECT COALESCE(SUM(monthly_amount_jpy), 0) FROM fixed_costs'
-        ).fetchone()[0]
+        fixed_cost_rows = conn.execute(
+            'SELECT id, name, monthly_amount_jpy, effective_from, note FROM fixed_costs ORDER BY id'
+        ).fetchall()
+        monthly_fixed_jpy = sum(row['monthly_amount_jpy'] for row in fixed_cost_rows)
 
     revenue_usd = sum((o['item_price_usd'] or 0) * (o['quantity'] or 0) for o in orders)
     fees_usd = sum(fees_by_order.values())
     cogs_usd = sum((cost_by_asin.get(o['asin'], 0) or 0) / usd_to_jpy * (o['quantity'] or 0) for o in orders)
     fixed_cost_period_usd = (monthly_fixed_jpy / usd_to_jpy) * (days / 30.0)
     net_profit_usd = revenue_usd - fees_usd - cogs_usd - fixed_cost_period_usd
+
+    # 内訳(CEO: 「固定費の内訳もわかるようにして」) - 各項目の月額と、
+    # 選択中の期間(days)に按分した金額の両方を返す。
+    fixed_costs_breakdown = [
+        {
+            'id': row['id'],
+            'name': row['name'],
+            'monthlyAmountJpy': row['monthly_amount_jpy'],
+            'periodUsd': round((row['monthly_amount_jpy'] / usd_to_jpy) * (days / 30.0), 2),
+            'note': row['note'],
+        }
+        for row in fixed_cost_rows
+    ]
 
     return {
         'periodDays': days,
@@ -1488,6 +1502,7 @@ def load_finance_summary(days: int = 30, usd_to_jpy: float = 150.0):
         'cogsUsd': round(cogs_usd, 2),
         'feesUsd': round(fees_usd, 2),
         'fixedCostUsd': round(fixed_cost_period_usd, 2),
+        'fixedCosts': fixed_costs_breakdown,
         'netProfitUsd': round(net_profit_usd, 2),
         'fixedCostCoveragePct': round(100.0 * (revenue_usd - fees_usd - cogs_usd) / fixed_cost_period_usd, 1)
         if fixed_cost_period_usd > 0 else None,
