@@ -3,10 +3,13 @@
 Keepaからの独立性を保つ設計を検証する意図も込めて、これらのテストは
 keepa_mcp/keepa関連のものを一切importしない。
 """
+import tempfile
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import ops_finance as of
 import sd_email_parser
 import sp_api.client as sp_client
 import sp_api_sync
@@ -127,6 +130,70 @@ class TestSdEmailParserGuard(unittest.TestCase):
              patch.object(sd_email_parser.gmail, "search_messages") as mock_search:
             sd_email_parser.run_once()
         mock_search.assert_not_called()
+
+
+class TestAllocateOrderShipping(unittest.TestCase):
+    """CEO: 「送料は商品ごとに配分して」— 同一発注(supplier_name+order_date)内の
+    商品行に、送料を数量按分で書き込み、COGS計算(compute_finance_summary)に
+    反映されることを確認する。"""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._original_db_path = of.DB_PATH
+        of.DB_PATH = Path(self._tmpdir.name) / "test.sqlite3"
+        of.init_ops_tables()
+
+    def tearDown(self):
+        of.DB_PATH = self._original_db_path
+        self._tmpdir.cleanup()
+
+    def test_shipping_allocated_proportionally_by_quantity(self):
+        of.upsert_jp_purchase_record({
+            "orderDate": "2026-08-26", "sdReceptionNo": "R1", "supplierName": "丸進",
+            "sdProductNo": None, "productName": "定規", "janCode": "JAN1", "variant": None,
+            "unitPriceJpy": 195, "quantity": 30, "amountJpy": 5850,
+        })
+        of.upsert_jp_purchase_record({
+            "orderDate": "2026-08-26", "sdReceptionNo": "R2", "supplierName": "丸進",
+            "sdProductNo": None, "productName": "シール", "janCode": "JAN2", "variant": None,
+            "unitPriceJpy": 238, "quantity": 30, "amountJpy": 7140,
+        })
+        updated = of.allocate_order_shipping("丸進", "2026-08-26", 800)
+        self.assertEqual(len(updated), 2)
+        # 30個+30個=60個のうち、各行30個ずつ -> 半分ずつ(¥400)に配分される
+        for row in updated:
+            self.assertAlmostEqual(row["shippingCostJpy"], 400.0)
+
+    def test_shipping_allocation_only_affects_matching_order(self):
+        of.upsert_jp_purchase_record({
+            "orderDate": "2026-08-26", "sdReceptionNo": "R3", "supplierName": "丸進",
+            "sdProductNo": None, "productName": "定規", "janCode": "JAN3", "variant": None,
+            "unitPriceJpy": 195, "quantity": 10, "amountJpy": 1950,
+        })
+        of.upsert_jp_purchase_record({
+            "orderDate": "2026-09-08", "sdReceptionNo": "R4", "supplierName": "Zoomy BUNGU",
+            "sdProductNo": None, "productName": "パタップ", "janCode": "JAN4", "variant": None,
+            "unitPriceJpy": 196, "quantity": 10, "amountJpy": 1960,
+        })
+        updated = of.allocate_order_shipping("丸進", "2026-08-26", 800)
+        self.assertEqual(len(updated), 1)
+        self.assertAlmostEqual(updated[0]["shippingCostJpy"], 800.0)
+
+    def test_finance_summary_cogs_includes_allocated_shipping(self):
+        of.set_asin_jan_map("B0TEST", "JAN5")
+        of.upsert_jp_purchase_record({
+            "orderDate": "2026-08-26", "sdReceptionNo": "R5", "supplierName": "丸進",
+            "sdProductNo": None, "productName": "定規", "janCode": "JAN5", "variant": None,
+            "unitPriceJpy": 200, "quantity": 10, "amountJpy": 2000,
+        })
+        of.allocate_order_shipping("丸進", "2026-08-26", 500)  # -> 送料/個 = ¥50
+        of.upsert_sp_orders([{
+            "orderId": "O1", "purchaseDate": "2026-09-01", "asin": "B0TEST", "sku": "SKU1",
+            "quantity": 2, "itemPriceUsd": 10.0, "orderStatus": "Shipped",
+        }])
+        summary = of.compute_finance_summary(days=30, usd_to_jpy=150.0)
+        # 着地原価/個 = ¥200(商品単価) + ¥50(送料按分) = ¥250 -> $250/150 * 2個 = $3.33...
+        self.assertAlmostEqual(summary["cogsUsd"], (250 / 150.0) * 2, places=2)
 
 
 if __name__ == "__main__":

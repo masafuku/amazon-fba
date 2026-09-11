@@ -1329,12 +1329,16 @@ def init_db() -> None:
                 unit_price_jpy REAL,
                 quantity INTEGER,
                 amount_jpy REAL,
-                asin TEXT
+                asin TEXT,
+                shipping_cost_jpy REAL
             )
             '''
         )
         conn.execute('CREATE INDEX IF NOT EXISTS idx_jp_purchase_records_jan_code ON jp_purchase_records(jan_code)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_jp_purchase_records_asin ON jp_purchase_records(asin)')
+        jp_purchase_records_columns = {row[1] for row in conn.execute('PRAGMA table_info(jp_purchase_records)').fetchall()}
+        if 'shipping_cost_jpy' not in jp_purchase_records_columns:
+            conn.execute('ALTER TABLE jp_purchase_records ADD COLUMN shipping_cost_jpy REAL')
 
         conn.execute(
             '''
@@ -1466,11 +1470,17 @@ def load_finance_summary(days: int = 30, usd_to_jpy: float = 150.0):
             (since,),
         ):
             fees_by_order[row['order_id']] = row['total'] or 0.0
+        # 着地原価(landed cost) = 商品単価 + その行に配分された送料/数量
+        # (CEO: 「送料は商品ごとに配分して」)。ops_finance.pyのcompute_finance_summary()と同一ロジック。
         cost_by_asin = {}
         for row in conn.execute(
-            'SELECT asin, unit_price_jpy FROM jp_purchase_records WHERE asin IS NOT NULL ORDER BY order_date ASC'
+            '''
+            SELECT asin, unit_price_jpy, quantity, COALESCE(shipping_cost_jpy, 0) AS shipping_cost_jpy
+            FROM jp_purchase_records WHERE asin IS NOT NULL ORDER BY order_date ASC
+            '''
         ):
-            cost_by_asin[row['asin']] = row['unit_price_jpy']
+            shipping_per_unit = (row['shipping_cost_jpy'] / row['quantity']) if row['quantity'] else 0
+            cost_by_asin[row['asin']] = (row['unit_price_jpy'] or 0) + shipping_per_unit
         fixed_cost_rows = conn.execute(
             'SELECT id, name, monthly_amount_jpy, effective_from, note FROM fixed_costs ORDER BY id'
         ).fetchall()

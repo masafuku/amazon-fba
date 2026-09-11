@@ -271,7 +271,11 @@ def init_ops_tables():
                 unit_price_jpy REAL,           -- 注文単価
                 quantity INTEGER,              -- 注文点数
                 amount_jpy REAL,               -- 注文金額
-                asin TEXT                      -- asin_jan_map経由で手動リンク(未リンクならNULL)
+                asin TEXT,                     -- asin_jan_map経由で手動リンク(未リンクならNULL)
+                shipping_cost_jpy REAL         -- この行(商品)に配分された送料(円)。
+                                                -- allocate_order_shipping()が、同じ
+                                                -- supplier_name+order_dateの行に数量按分で
+                                                -- 書き込む(CEO: 「送料は商品ごとに配分して」)。
             );
             CREATE INDEX IF NOT EXISTS idx_jp_purchase_records_jan_code ON jp_purchase_records(jan_code);
             CREATE INDEX IF NOT EXISTS idx_jp_purchase_records_asin ON jp_purchase_records(asin);
@@ -361,6 +365,10 @@ def init_ops_tables():
         keyword_pool_columns = {row[1] for row in conn.execute('PRAGMA table_info(keyword_pool)').fetchall()}
         if 'price_min' not in keyword_pool_columns:
             conn.execute('ALTER TABLE keyword_pool ADD COLUMN price_min INTEGER')
+
+        jp_purchase_records_columns = {row[1] for row in conn.execute('PRAGMA table_info(jp_purchase_records)').fetchall()}
+        if 'shipping_cost_jpy' not in jp_purchase_records_columns:
+            conn.execute('ALTER TABLE jp_purchase_records ADD COLUMN shipping_cost_jpy REAL')
 
         # seller_poolの一度きりの自動バックフィル: 既にsource_type='seller'の
         # 実績がagent_candidatesにある(過去のセラーマイニング結果)場合、
@@ -1939,6 +1947,42 @@ def upsert_jp_purchase_record(record: dict) -> bool:
     return True
 
 
+def allocate_order_shipping(supplier_name: str, order_date: str, total_shipping_jpy: float) -> list:
+    """1回の発注(同じsupplier_name + order_date)にかかった送料(国内送料・
+    分かっていれば国際送料も合算した額)を、その発注内の各商品行に数量按分で
+    書き込む(CEO: 「送料は商品ごとに配分して」)。按分は数量ベース
+    (同発注内の商品は小型文具で単価も近く、重量按分より単純な数量按分で
+    実用上十分と判断)。
+
+    複数回呼ぶと直近の呼び出しで上書きされる(例: 国内送料だけで一度配分した後、
+    TNKの国際送料が確定したら合計額で再度呼べば良い)。
+
+    Returns: 更新した jp_purchase_records の行(id・quantity・配分後shipping_cost_jpy)のリスト。
+    """
+    init_ops_tables()
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            '''
+            SELECT id, quantity FROM jp_purchase_records
+            WHERE supplier_name = ? AND order_date = ?
+            ''',
+            (supplier_name, order_date),
+        ).fetchall()
+        total_quantity = sum(qty or 0 for _, qty in rows)
+        if total_quantity <= 0:
+            return []
+        per_unit_shipping = total_shipping_jpy / total_quantity
+        updated = []
+        for row_id, quantity in rows:
+            allocated = round(per_unit_shipping * (quantity or 0), 2)
+            conn.execute(
+                'UPDATE jp_purchase_records SET shipping_cost_jpy = ? WHERE id = ?',
+                (allocated, row_id),
+            )
+            updated.append({'id': row_id, 'quantity': quantity, 'shippingCostJpy': allocated})
+    return updated
+
+
 def set_asin_jan_map(asin: str, jan_code: str) -> None:
     """出品確定時に1回手動で呼ぶ。以後のjp_purchase_records取り込みでASINが自動で埋まる。"""
     init_ops_tables()
@@ -2002,16 +2046,20 @@ def compute_finance_summary(days: int = 30, usd_to_jpy: float = 150.0) -> dict:
             (since,),
         ):
             fees_by_order[row['order_id']] = row['total'] or 0.0
+        # 着地原価(landed cost) = 商品単価 + その行に配分された送料/数量
+        # (CEO: 「送料は商品ごとに配分して」— allocate_order_shipping()が
+        # shipping_cost_jpyに書き込む。未配分(NULL)ならCOALESCEで0扱い)。
         cost_by_asin = {}
         for row in conn.execute(
             '''
-            SELECT asin, unit_price_jpy
+            SELECT asin, unit_price_jpy, quantity, COALESCE(shipping_cost_jpy, 0) AS shipping_cost_jpy
             FROM jp_purchase_records
             WHERE asin IS NOT NULL
             ORDER BY order_date ASC
             '''
         ):
-            cost_by_asin[row['asin']] = row['unit_price_jpy']  # 後勝ちで直近単価が残る
+            shipping_per_unit = (row['shipping_cost_jpy'] / row['quantity']) if row['quantity'] else 0
+            cost_by_asin[row['asin']] = (row['unit_price_jpy'] or 0) + shipping_per_unit  # 後勝ちで直近単価が残る
         fixed_cost_rows = list_fixed_costs()
         monthly_fixed_jpy = sum(r['monthlyAmountJpy'] for r in fixed_cost_rows)
 
