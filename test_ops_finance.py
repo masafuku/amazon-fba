@@ -288,6 +288,19 @@ class TestIsSearchableKeyword(unittest.TestCase):
         ):
             self.assertFalse(_is_searchable_keyword(keyword), keyword)
 
+    def test_tcg_product_titles_without_the_word_card_are_excluded(self):
+        # CEO: 「ポケモンカードなどのコレクタブルが残ってる」— 実際の商品
+        # タイトルは「trading card」ではなく製品形態名(Booster Pack/Box等)や
+        # ブランド名そのもので検索結果に紛れ込んでいたため、それらも追加。
+        for keyword in (
+            'Pokemon Scarlet & Violet Booster Box',
+            'Pokemon TCG Elite Trainer Box',
+            'Yu-Gi-Oh! Legendary Duelists Booster Pack',
+            'Pokemon Cards Bulk Lot 100 Cards',
+            'Magic The Gathering Commander Deck',
+        ):
+            self.assertFalse(_is_searchable_keyword(keyword), keyword)
+
 
 class TestEvaluateMcpCandidatesFigureFilter(unittest.TestCase):
     """商品タイトル段階でのフィギュア/コレクタブル除外。ブランド名("Sanrio"等)

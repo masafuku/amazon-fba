@@ -1515,6 +1515,15 @@ _FIGURE_AND_COLLECTIBLE_KEYWORDS = (
     'gunpla', 'garage kit', 'garage kits', 'trading card', 'trading cards',
     'tcg', 'blind box', 'blind boxes', 'gacha', 'capsule toy', 'capsule toys',
     'collectible', 'collectibles', 'diorama', 'dioramas',
+    # トレーディングカードゲームの実際の商品タイトルは「trading card」と
+    # 書かず「Booster Pack/Box」「Elite Trainer Box」等の製品形態名や
+    # ブランド名そのものを名乗ることが大半(CEO: 「ポケモンカードなどの
+    # コレクタブルが残ってる」— 上のtrading card系だけでは取りこぼした)。
+    'booster pack', 'booster packs', 'booster box', 'booster boxes',
+    'elite trainer box', 'card game', 'playing card', 'playing cards',
+    'sports card', 'sports cards', 'graded card', 'graded cards', 'psa 10',
+    'pokemon card', 'pokemon cards', 'pokémon card', 'pokémon cards',
+    'yugioh', 'yu-gi-oh', 'magic the gathering', 'mtg card', 'mtg cards',
 )
 
 
