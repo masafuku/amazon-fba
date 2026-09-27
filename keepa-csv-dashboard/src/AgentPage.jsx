@@ -24,6 +24,41 @@ const TIER_STYLES = {
 };
 const resolveTier = (candidate) => candidate.tier ?? (candidate.qualified ? 'pass' : 'reject');
 
+// 発注の優先度Tier(S/A/B+/B-/C)。上の「判定」(利益による合格判定)とは別物で、米国の実売
+// (先月の購入・BSR)とROI・粗利から自動で付ける(定義: _shared/fba-sourcing-candidates.md の
+// 「Tier 確定版」)。競合(出品者)数は判定に入れず、「セラー数」列と絞り込みで見る。
+// 完全除外カテゴリ(食品・医薬品/化粧品・包丁類)はAPI側で返さないので、ここには出てこない。
+const PRIORITY_TIERS = ['S', 'A', 'B+', 'B-', 'C'];
+// Amazon.comでの出品可否(scripts/check_candidate_restrictions.py がSP-APIで照会して保存)。
+// null/未定義 = 未確認。
+const LISTING_STATUS_STYLES = {
+    ok: { label: '出品可', className: 'bg-emerald-900/60 text-emerald-200' },
+    approval_required: { label: '要承認', className: 'bg-amber-900/60 text-amber-200' },
+    // この商品(ASIN)単位の承認が必要(ブランドの承認の理由は無い)
+    product_approval_required: { label: '商品承認', className: 'bg-amber-900/60 text-amber-200' },
+    // ブランドの承認に加えて、この商品単位の承認も必要。ブランド承認を取っても出品できない
+    brand_and_product_approval_required: { label: 'ブランド＋商品承認', className: 'bg-rose-900/60 text-rose-200' },
+    not_eligible: { label: '出品不可', className: 'bg-rose-900/60 text-rose-200' },
+    restricted: { label: '制限あり', className: 'bg-rose-900/60 text-rose-200' },
+};
+// CEO: 「ブランド申請は出品にはほぼ全てあるので、隠す設定は不要。要承認・出品不可を隠す、
+// ボタンは理由で細かく分ける」(2026-09-27) - approval_required(ブランドの承認のみ)は、
+// ほぼ全商品に該当するため、隠す対象から完全に外す(どちらの配列にも含めない=常に表示)。
+const PRODUCT_APPROVAL_STATUSES = ['product_approval_required', 'brand_and_product_approval_required'];
+const NOT_ELIGIBLE_STATUSES = ['not_eligible', 'restricted'];
+const PRIORITY_TIER_STYLES = {
+    S: 'bg-fuchsia-900/60 text-fuchsia-200',
+    A: 'bg-emerald-900/60 text-emerald-200',
+    'B+': 'bg-sky-900/60 text-sky-200',
+    'B-': 'bg-slate-700/60 text-slate-300',
+    C: 'bg-slate-800 text-slate-400',
+};
+// 「優先度」列のソート用: 降順(▼)でS→A→B+→B-→C→未判定の順に並ぶ数値にする
+const prioritySortValue = (tier) => {
+    const index = PRIORITY_TIERS.indexOf(tier);
+    return index === -1 ? 0 : PRIORITY_TIERS.length - index;
+};
+
 // CEO: 「候補が増えてきてソートだけでは見にくくなってきました」— フィルター/ソート条件を
 // localStorageに記憶し、リロード後も直前の絞り込み状態を復元する。プライベートブラウジング
 // 等でlocalStorageが例外を投げるケースはtry/catchで握りつぶし、素の初期値にフォールバックする。
@@ -62,6 +97,22 @@ export default function AgentPage() {
     // ようにしてデフォルメでは見えないようにして」)。他のhide*トグルと違い
     // 既定値がtrue = 「隠す」がデフォルト。
     const [hideFigures, setHideFigures] = useState(storedAgentFilters.hideFigures ?? true);
+    // 優先度Tierの絞り込み(選んだTierだけ表示。空 = すべて)と、競合(出品者)数の上限
+    // (空 = 絞らない。セラー数が未取得の候補は、上限があっても常に表示する)。
+    // 出品制限(ゲーティング)でAmazon.comに新規出品できないと確認したブランド(HARIO・タカラトミー等。
+    // 定義は sqlite_api_server.py の GATED_BRAND_TERMS)。Tierは付くが発注しても売れないので、
+    // 既定で隠す(フィギュアと同じ既定オンのトグル)。
+    const [hideGatedBrands, setHideGatedBrands] = useState(storedAgentFilters.hideGatedBrands ?? true);
+    // 本・DVD/BD・CD(メディア)。ランキングがカテゴリ内の順位で、雑貨と同じ基準では実売を判断
+    // できないため、既定で隠す(優先度Tierもメディア用の厳しい基準で付けている)。
+    const [hideMedia, setHideMedia] = useState(storedAgentFilters.hideMedia ?? true);
+    // Amazon.comでの出品可否(SP-APIのListings Restrictions APIで照会した結果)。ブランドの
+    // 承認のみ(approval_required)はほぼ全商品に該当するため隠す対象にしない(常に表示)。
+    // 商品単位の承認(Transparency等)と、出品不可は、それぞれ既定で隠す(未確認・出品可は表示する)。
+    const [hideProductApproval, setHideProductApproval] = useState(storedAgentFilters.hideProductApproval ?? true);
+    const [hideNotEligible, setHideNotEligible] = useState(storedAgentFilters.hideNotEligible ?? true);
+    const [priorityFilter, setPriorityFilter] = useState(storedAgentFilters.priorityFilter ?? []);
+    const [maxCompetitors, setMaxCompetitors] = useState(storedAgentFilters.maxCompetitors ?? '');
     const [scanLoopStatus, setScanLoopStatus] = useState(null);
     const [scanLoopBusy, setScanLoopBusy] = useState(false);
     const [lookupAsinInput, setLookupAsinInput] = useState('');
@@ -167,13 +218,14 @@ export default function AgentPage() {
                 AGENT_FILTERS_STORAGE_KEY,
                 JSON.stringify({
                     searchText, categoryFilter, hideNoSalesSignal, hideNegativeRoi, hideFigures, sortKey, sortOrder,
-                    days, showRejected,
+                    days, showRejected, priorityFilter, maxCompetitors, hideGatedBrands, hideMedia,
+                    hideProductApproval, hideNotEligible,
                 })
             );
         } catch {
             // プライベートブラウジング等でlocalStorageが使えない場合は無視(記憶できないだけ)
         }
-    }, [searchText, categoryFilter, hideNoSalesSignal, hideNegativeRoi, hideFigures, sortKey, sortOrder, days, showRejected]);
+    }, [searchText, categoryFilter, hideNoSalesSignal, hideNegativeRoi, hideFigures, sortKey, sortOrder, days, showRejected, priorityFilter, maxCompetitors, hideGatedBrands, hideMedia, hideProductApproval, hideNotEligible]);
 
     // 実行中の検索があれば状態表示に使う(バナー・実行履歴の「実行中」
     // バッジ)。自動ポーリングはしない(CEOの希望) - 最新状況を見たい
@@ -238,14 +290,22 @@ export default function AgentPage() {
 
     const visibleCandidates = useMemo(() => {
         const byQualified = showRejected ? candidates : candidates.filter((item) => item.qualified);
-        // フィギュア/コレクタブル(evaluate_mcp_candidates()側でreason=
-        // 'figure_or_collectible'として却下済み)は、showRejectedがオンでも
-        // 別トグルで独立に隠せるようにする(showRejectedは「利益率で
-        // 落ちた候補も見たい」用途で、こちらは「そもそも出品できない
-        // カテゴリを視界から消したい」という別の目的のため)。
-        const filtered = hideFigures
-            ? byQualified.filter((item) => item.reason !== 'figure_or_collectible')
+        // フィギュア/コレクタブルは、優先度Tierを付けたうえで、表示だけをオン/オフできる
+        // (CEO指示 2026-09-26)。isFigureはevaluate_mcp_candidates()/バックフィルが付ける
+        // フラグ。以前のreason='figure_or_collectible'の行も、引き続き隠す。
+        // showRejectedがオンでも別トグルで独立に隠せる(showRejectedは「利益率で落ちた候補も
+        // 見たい」用途で、こちらは「出品しづらいカテゴリを視界から消したい」という別の目的)。
+        const withoutFigures = hideFigures
+            ? byQualified.filter((item) => !(item.isFigure || item.reason === 'figure_or_collectible'))
             : byQualified;
+        const withoutGated = hideGatedBrands ? withoutFigures.filter((item) => !item.gatedBrand) : withoutFigures;
+        const withoutMedia = hideMedia ? withoutGated.filter((item) => !item.isMedia) : withoutGated;
+        const withoutProductApproval = hideProductApproval
+            ? withoutMedia.filter((item) => !PRODUCT_APPROVAL_STATUSES.includes(item.listingStatus))
+            : withoutMedia;
+        const filtered = hideNotEligible
+            ? withoutProductApproval.filter((item) => !NOT_ELIGIBLE_STATUSES.includes(item.listingStatus))
+            : withoutProductApproval;
         // 表面利益/表面利益率/手数料/輸送費はAPIの生フィールドではなくcandidate.dataから算出する値。
         // 既存の汎用ソート比較関数(candidate[sortKey]を直接参照する)にそのまま乗せられるよう、
         // ソート前に候補オブジェクトへ事前計算して付与する(SellerMiningPage.jsxのpassRateと同じパターン)。
@@ -271,16 +331,33 @@ export default function AgentPage() {
             // 仕入れ先(NETSEA等の卸売り業者)は「セラー」(Amazon側の競合出品者、
             // セラーマイニング由来)とは別概念(CEO: 「仕入れ先とセラーは別に
             // して欲しい」)。
-            const sourcingSupplierName = item.data?.netsea_shop_name ?? null;
-            const sourcingSupplierUrl = item.data?.netsea_product_url ?? null;
+            // CEO(2026-09-27): 「SDなど、複数の仕入れ先が見つかった場合、表示方法は？」
+            // →「全社を並べて表示」。NETSEA自動連携(netsea_shop_name等、単一)と、
+            // 手動追加(manual_suppliers、複数、scripts/add_manual_supplier.py経由で
+            // Claudeが記録)を、1つのリストにまとめて安い順に並べる。
+            const netseaSupplier = item.data?.netsea_shop_name
+                ? {
+                      source: 'netsea', shopName: item.data.netsea_shop_name, url: item.data?.netsea_product_url ?? null,
+                      priceJpy: item.data?.wholesale_cost_jpy ?? null, minQty: item.data?.netsea_set_num ?? null,
+                  }
+                : null;
+            const manualSuppliers = (item.data?.manual_suppliers ?? []).map((s) => ({
+                source: s.source, shopName: s.shop_name, url: s.url ?? null, priceJpy: s.price_jpy ?? null, minQty: s.min_qty ?? null,
+            }));
+            const allSuppliers = [netseaSupplier, ...manualSuppliers]
+                .filter((s) => s && s.priceJpy != null)
+                .sort((a, b) => a.priceJpy - b.priceJpy);
+            const sourcingSupplierName = allSuppliers[0]?.shopName ?? null;
+            const sourcingSupplierUrl = allSuppliers[0]?.url ?? null;
             // CEO: 「卸売りの仕入れ価格がわかったら、Amazonとは別の列に価格を
             // 追加してください。利益等は安い方で計算してください。」— jpCostJpy
             // (実質利益計算に使った原価)は既に安い方だが、内訳としてAmazon JP価格と
             // 卸価格を別々に見せる。どちらか一方しか無い候補が大半(卸経路は
             // Amazon JP価格を必ずしも取得しない)だが、両方揃った候補では安い方が
             // jpCostJpyと一致するので、どちらが採用されたか列を見比べればわかる。
+            // wholesaleCostJpy(ソート・表示用)は、NETSEA・手動追加すべてを通じた最安値。
             const jpAmazonCostJpy = item.data?.jp_amazon_cost_jpy ?? null;
-            const wholesaleCostJpy = item.data?.wholesale_cost_jpy ?? null;
+            const wholesaleCostJpy = allSuppliers[0]?.priceJpy ?? null;
             // CEO: 「候補商品に対して、セラーの数、在庫...を取得できますか？」
             // セラー数(v2): stats.totalOfferCountから無料で取得済み、全候補に付く
             // (以前はoffers配列の水増しバグで誤った値だった - 詳細ページの
@@ -288,9 +365,10 @@ export default function AgentPage() {
             // なので、古い候補・不合格候補ではnullのまま。
             const competitorSellerCount = item.data?.competitor_seller_count ?? null;
             const competitorStockTotal = item.data?.competitor_stock_total ?? null;
+            const prioritySort = prioritySortValue(item.priorityTier);
             return {
-                ...item, grossProfitUsd, grossMarginPct, feesUsd, shippingCostUsd, importDutyUsd, roiPct,
-                salesRankDrops30, monthlySoldOrDrops, sourcingSupplierName, sourcingSupplierUrl,
+                ...item, prioritySort, grossProfitUsd, grossMarginPct, feesUsd, shippingCostUsd, importDutyUsd, roiPct,
+                salesRankDrops30, monthlySoldOrDrops, sourcingSupplierName, sourcingSupplierUrl, allSuppliers,
                 jpAmazonCostJpy, wholesaleCostJpy, competitorSellerCount, competitorStockTotal,
             };
         });
@@ -307,12 +385,20 @@ export default function AgentPage() {
 
         const categorized = categoryFilter === 'all' ? searched : searched.filter((item) => item.category === categoryFilter);
 
+        const withPriority = priorityFilter.length === 0
+            ? categorized
+            : categorized.filter((item) => priorityFilter.includes(item.priorityTier));
+        const competitorLimit = maxCompetitors === '' ? null : Number(maxCompetitors);
+        const withCompetitors = competitorLimit == null || Number.isNaN(competitorLimit)
+            ? withPriority
+            : withPriority.filter((item) => item.competitorSellerCount == null || item.competitorSellerCount <= competitorLimit);
+
         // 「販売数字ゼロを隠す」: 先月の販売個数(monthlySold)が無く、代替のランク変動
         // (sales_rank_drops_30)も無い/0回の候補 - 実需の裏付けがない候補を除外する
         // (CEO: 「販売数字ゼロや、roiマイナスはフィルターしたくなる」)
         const withSalesSignal = hideNoSalesSignal
-            ? categorized.filter((item) => item.monthlySold != null || (item.salesRankDrops30 != null && item.salesRankDrops30 > 0))
-            : categorized;
+            ? withCompetitors.filter((item) => item.monthlySold != null || (item.salesRankDrops30 != null && item.salesRankDrops30 > 0))
+            : withCompetitors;
 
         // 「ROIマイナスを隠す」: roi_pct未計算(null)のものは「不明」として残し、
         // マイナス確定のものだけ除外する
@@ -350,9 +436,30 @@ export default function AgentPage() {
             }
             return rightRoi - leftRoi;
         });
-    }, [candidates, showRejected, hideFigures, sortKey, sortOrder, searchText, categoryFilter, hideNoSalesSignal, hideNegativeRoi]);
+    }, [candidates, showRejected, hideFigures, hideGatedBrands, hideMedia, hideProductApproval, hideNotEligible, sortKey, sortOrder, searchText, categoryFilter, hideNoSalesSignal, hideNegativeRoi, priorityFilter, maxCompetitors]);
 
     const qualifiedCount = useMemo(() => candidates.filter((item) => item.qualified).length, [candidates]);
+
+    // 優先度Tier別の件数(見出しのチップ用)。「不合格候補も表示」「フィギュアを隠す」の
+    // 状態には合わせるが、検索・カテゴリなどの他の絞り込みには影響されない
+    // (選択肢が絞り込みで減っていくのを避けるため)。
+    const priorityTierCounts = useMemo(() => {
+        const counts = Object.fromEntries(PRIORITY_TIERS.map((tier) => [tier, 0]));
+        candidates.forEach((item) => {
+            if (!showRejected && !item.qualified) return;
+            if (hideFigures && (item.isFigure || item.reason === 'figure_or_collectible')) return;
+            if (hideGatedBrands && item.gatedBrand) return;
+            if (hideMedia && item.isMedia) return;
+            if (hideProductApproval && PRODUCT_APPROVAL_STATUSES.includes(item.listingStatus)) return;
+            if (hideNotEligible && NOT_ELIGIBLE_STATUSES.includes(item.listingStatus)) return;
+            if (item.priorityTier in counts) counts[item.priorityTier] += 1;
+        });
+        return counts;
+    }, [candidates, showRejected, hideFigures, hideGatedBrands, hideMedia, hideProductApproval, hideNotEligible]);
+
+    const togglePriorityTier = (tier) => {
+        setPriorityFilter((current) => (current.includes(tier) ? current.filter((value) => value !== tier) : [...current, tier]));
+    };
 
     return (
         <main className="space-y-6">
@@ -580,15 +687,72 @@ export default function AgentPage() {
                     >
                         ROIマイナスを隠す
                     </button>
+                    <span className="flex items-center gap-1" title="発注の優先度Tier(自動判定)。複数選択できる">
+                        <span className="text-sm text-slate-400">優先度</span>
+                        {PRIORITY_TIERS.map((tier) => (
+                            <button
+                                key={tier}
+                                type="button"
+                                onClick={() => togglePriorityTier(tier)}
+                                className={`rounded-xl px-2.5 py-1 text-sm font-semibold ${priorityFilter.includes(tier) ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-300'}`}
+                            >
+                                {tier} <span className="text-xs opacity-70">{priorityTierCounts[tier]}</span>
+                            </button>
+                        ))}
+                    </span>
+                    <label className="flex items-center gap-1 text-sm text-slate-400" title="出品者数が未取得の候補は、上限を指定しても表示する">
+                        競合
+                        <input
+                            type="number"
+                            min="0"
+                            value={maxCompetitors}
+                            onChange={(event) => setMaxCompetitors(event.target.value)}
+                            placeholder="-"
+                            className="w-16 rounded-xl border border-slate-700 bg-slate-900 px-2 py-1 text-sm text-white outline-none focus:border-cyan-400"
+                        />
+                        社以下
+                    </label>
                     <button
                         type="button"
                         onClick={() => setHideFigures((current) => !current)}
                         className={`rounded-2xl px-4 py-1.5 text-sm font-semibold ${hideFigures ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-300'}`}
-                        title="フィギュア/キャラクターコレクタブル(出品が難しいカテゴリ)を隠す。既定でオン"
+                        title="フィギュア/キャラクターコレクタブルを隠す。優先度Tierは付いているので、オフにすると一覧に出る。既定でオン"
                     >
                         フィギュアを隠す
                     </button>
-                    {searchText || categoryFilter !== 'all' || hideNoSalesSignal || hideNegativeRoi || !hideFigures ? (
+                    <button
+                        type="button"
+                        onClick={() => setHideGatedBrands((current) => !current)}
+                        className={`rounded-2xl px-4 py-1.5 text-sm font-semibold ${hideGatedBrands ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-300'}`}
+                        title="Amazon.comで出品制限がかかっているブランド(HARIO・タカラトミー等)を隠す。既定でオン"
+                    >
+                        出品制限ブランドを隠す
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => setHideMedia((current) => !current)}
+                        className={`rounded-2xl px-4 py-1.5 text-sm font-semibold ${hideMedia ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-300'}`}
+                        title="本・DVD/Blu-ray・CD(推定)を隠す。ランキングがカテゴリ内の順位で実売を判断しにくいため。既定でオン"
+                    >
+                        本・DVD・CDを隠す
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => setHideProductApproval((current) => !current)}
+                        className={`rounded-2xl px-4 py-1.5 text-sm font-semibold ${hideProductApproval ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-300'}`}
+                        title="商品(ASIN)単位の承認が必要な商品(Transparency等、ブランド承認だけでは出せない)を隠す。未確認の商品は表示。既定でオン"
+                    >
+                        商品単位の承認(Transparency等)を隠す
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => setHideNotEligible((current) => !current)}
+                        className={`rounded-2xl px-4 py-1.5 text-sm font-semibold ${hideNotEligible ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-300'}`}
+                        title="Amazon.comで出品できない商品(SP-APIで照会済み)を隠す。未確認の商品は表示。既定でオン"
+                    >
+                        出品不可を隠す
+                    </button>
+                    {searchText || categoryFilter !== 'all' || hideNoSalesSignal || hideNegativeRoi || !hideFigures || !hideGatedBrands || !hideMedia || !hideProductApproval || !hideNotEligible || priorityFilter.length > 0 || maxCompetitors !== '' ? (
                         <button
                             type="button"
                             onClick={() => {
@@ -597,6 +761,12 @@ export default function AgentPage() {
                                 setHideNoSalesSignal(false);
                                 setHideNegativeRoi(false);
                                 setHideFigures(true);
+                                setHideGatedBrands(true);
+                                setHideMedia(true);
+                                setHideProductApproval(true);
+                                setHideNotEligible(true);
+                                setPriorityFilter([]);
+                                setMaxCompetitors('');
                             }}
                             className="rounded-2xl px-4 py-1.5 text-sm font-semibold text-slate-400 hover:text-slate-200"
                         >
@@ -620,6 +790,7 @@ export default function AgentPage() {
                                 <tr>
                                     <th className="px-4 py-3 font-medium text-slate-400">画像</th>
                                     {renderSortHeader('判定', 'qualified')}
+                                    {renderSortHeader('優先度(自動)', 'prioritySort')}
                                     {renderSortHeader('カテゴリ', 'category')}
                                     {renderSortHeader('セラー', 'sellerName')}
                                     {renderSortHeader('仕入れ先', 'sourcingSupplierName')}
@@ -681,6 +852,41 @@ export default function AgentPage() {
                                                 );
                                             })()}
                                         </td>
+                                        <td className="px-4 py-3">
+                                            {candidate.priorityTier ? (
+                                                <span
+                                                    className={`rounded-lg px-2 py-1 text-xs font-semibold ${PRIORITY_TIER_STYLES[candidate.priorityTier] || PRIORITY_TIER_STYLES.C}`}
+                                                    title="発注の優先度(自動判定)。米国の実売とROI・粗利から付与。競合数は判定に入れていません"
+                                                >
+                                                    {candidate.priorityTier}
+                                                </span>
+                                            ) : (
+                                                <span className="text-slate-500">-</span>
+                                            )}
+                                            {candidate.listingStatus ? (
+                                                <span
+                                                    className={`ml-1 rounded-lg px-1.5 py-1 text-xs ${(LISTING_STATUS_STYLES[candidate.listingStatus] || LISTING_STATUS_STYLES.restricted).className}`}
+                                                    title={`Amazon.comでの出品可否(SP-API照会${candidate.listingCheckedAt ? ' ' + candidate.listingCheckedAt.slice(0, 10) : ''})`}
+                                                >
+                                                    {(LISTING_STATUS_STYLES[candidate.listingStatus] || LISTING_STATUS_STYLES.restricted).label}
+                                                </span>
+                                            ) : null}
+                                            {candidate.isMedia ? (
+                                                <span className="ml-1 rounded-lg bg-amber-900/60 px-1.5 py-1 text-xs text-amber-200" title="本・DVD/Blu-ray・CD(推定)">
+                                                    メディア
+                                                </span>
+                                            ) : null}
+                                            {candidate.gatedBrand ? (
+                                                <span className="ml-1 rounded-lg bg-rose-900/60 px-1.5 py-1 text-xs text-rose-200" title={`出品制限ブランド: ${candidate.gatedBrand}`}>
+                                                    制限
+                                                </span>
+                                            ) : null}
+                                            {candidate.isFigure ? (
+                                                <span className="ml-1 rounded-lg bg-violet-900/60 px-1.5 py-1 text-xs text-violet-200" title="フィギュア/コレクタブル">
+                                                    F
+                                                </span>
+                                            ) : null}
+                                        </td>
                                         <td className="px-4 py-3 text-slate-300">{candidate.category || '-'}</td>
                                         <td className="px-4 py-3 text-slate-300">
                                             {candidate.sellerId ? (
@@ -695,19 +901,34 @@ export default function AgentPage() {
                                             )}
                                         </td>
                                         <td className="px-4 py-3 text-slate-300">
-                                            {candidate.sourcingSupplierName ? (
-                                                candidate.sourcingSupplierUrl ? (
-                                                    <a
-                                                        href={candidate.sourcingSupplierUrl}
-                                                        target="_blank"
-                                                        rel="noreferrer"
-                                                        className="text-cyan-300 underline decoration-cyan-700 underline-offset-2 hover:text-cyan-200"
-                                                    >
-                                                        {candidate.sourcingSupplierName}
-                                                    </a>
-                                                ) : (
-                                                    candidate.sourcingSupplierName
-                                                )
+                                            {candidate.allSuppliers && candidate.allSuppliers.length > 0 ? (
+                                                <div className="flex flex-col gap-0.5">
+                                                    {candidate.allSuppliers.map((supplier, index) => {
+                                                        const label = `${supplier.shopName}${
+                                                            supplier.minQty ? `(${supplier.minQty}個〜)` : ''
+                                                        } ¥${Number(supplier.priceJpy).toFixed(0)}`;
+                                                        const isCheapest = index === 0;
+                                                        return (
+                                                            <span
+                                                                key={`${supplier.source}-${supplier.shopName}`}
+                                                                className={isCheapest ? 'font-semibold text-emerald-300' : 'text-slate-400'}
+                                                            >
+                                                                {supplier.url ? (
+                                                                    <a
+                                                                        href={supplier.url}
+                                                                        target="_blank"
+                                                                        rel="noreferrer"
+                                                                        className="underline decoration-cyan-700 underline-offset-2 hover:text-cyan-200"
+                                                                    >
+                                                                        {label}
+                                                                    </a>
+                                                                ) : (
+                                                                    label
+                                                                )}
+                                                            </span>
+                                                        );
+                                                    })}
+                                                </div>
                                             ) : (
                                                 '-'
                                             )}

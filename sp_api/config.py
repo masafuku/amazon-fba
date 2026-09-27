@@ -39,6 +39,7 @@ class Settings:
     refresh_token: str
     region: str  # na / eu / fe
     marketplace_id: str
+    seller_id: str = ""  # 販売者ID(Merchant Token)。出品制限の照会(Listings Restrictions API)で必要
 
     @property
     def configured(self) -> bool:
@@ -58,6 +59,7 @@ class Settings:
             refresh_token=os.getenv("SP_API_REFRESH_TOKEN", ""),
             region=os.getenv("SP_API_REGION", "na"),
             marketplace_id=os.getenv("SP_API_MARKETPLACE_ID", "ATVPDKIKX0DER"),  # US
+            seller_id=os.getenv("SP_API_SELLER_ID", ""),
         )
 
 

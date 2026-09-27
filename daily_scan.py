@@ -15,13 +15,15 @@ daily_scan.py — 毎朝1回実行するだけで完結するスクリプト。
      がまとめて1通ずつ通知する(スケジュール設定は send_daily_digest.py の
      docstring参照)。
   5. プールから選んだキーワードだった場合、使用実績(times_used等)を記録
-  6. セラーマイニング(CEOのアイデア): 合格候補が出た場合、実質利益率が
-     最も高い1件について、そのASINを出品しているセラーを
-     (Amazonの「他のセラー」欄相当、最大MAX_SELLERS_PER_CANDIDATE件)
-     特定し、それぞれのセラーの他の出品も同じパイプラインで評価する
-     (keepa_mcp.server.find_other_sellers_for_candidate /
-     expand_from_seller)。「よく売れている日本のものを売っているセラーは、
-     他にも同じようなものを売っていることが多い」という考え方に基づく。
+
+  セラーマイニング(CEOのアイデア: 「よく売れている日本のものを売っている
+  セラーは、他にも同じようなものを売っていることが多い」)は、この日中の
+  サイクルでは行わない(CEO: 「優良が見つかってもその場では検索せず。
+  セラーサーチは夜間だけにする」2026-09-27)。夜間のセラーマイニング枠
+  (--seller-mining、run_seller_mining_cycle)が、この日中のサイクルで
+  見つかった合格候補を後追いで拾い、セラーの発見(discover_sellers_for_
+  pending_candidates)とマイニング(keepa_mcp.server.find_other_sellers_
+  for_candidate / expand_from_seller)の両方を行う。
 
   Keepaのトークンは低レート帯のプランだと1分に1トークン程度しか回復しない。
   デフォルトでは wait_for_tokens=True で実行するため、予算が足りない場面では
@@ -74,9 +76,10 @@ Sellerエージェント(セラープールの管理・定期セラーマイニ�
 from __future__ import annotations
 
 import argparse
+import sqlite3
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from keepa_mcp.keepa_client import KeepaError
 from keepa_mcp.server import (
@@ -88,6 +91,7 @@ from keepa_mcp.server import (
     search_category,
 )
 from ops_finance import (
+    DB_PATH,
     add_keywords,
     add_sellers,
     evaluate_mcp_candidates,
@@ -153,9 +157,20 @@ def resolve_category_id(category_name: str) -> int | None:
 SELLER_EXPANSION_MAX_CANDIDATES = 10
 
 
-# 1件の合格候補から芋づる式に調べるセラー数の上限(「Other sellers on
-# Amazon」全員を追うとコストが膨らむため)。
-MAX_SELLERS_PER_CANDIDATE = 3
+# 1件の合格候補から芋づる式に「登録」するセラー数の上限。
+# 実質、無制限にする値(offers取得は1候補につき1回のKeepa呼び出しで完結し、
+# そこから何件のセラーIDを取り出すかはPython側のリスト切り詰めでしかない
+# ため、上限を上げても追加のトークンは一切かからない - CEO: 「候補セラーを
+# 全て検討候補にいれるのはどう？」2026-09-27。トークンを消費するのは
+# 「マイニング」(_expand_from_one_seller)の方なので、そちらの回数は別途絞る)。
+DISCOVER_SELLERS_PER_CANDIDATE = 50
+
+# 1回の夜間サイクルで、「まだセラーを発見していない、日中に見つかった
+# 合格候補」の発見処理を行う件数の上限(discover_sellers_for_pending_candidates)。
+NIGHTLY_SELLER_DISCOVERY_LIMIT = 5
+
+# discover_sellers_for_pending_candidates が対象にする、候補の新しさの上限。
+NIGHTLY_SELLER_DISCOVERY_MAX_AGE_HOURS = 48
 
 
 # 同じセラーをこの回数以上マイニング済みなら「深掘り」する(通常の
@@ -172,17 +187,18 @@ SELLER_DEEP_REMINE_MAX_CANDIDATES = 30
 def discover_and_register_sellers(
     asin: str, source: str, seed_asin: str = None, seed_keyword: str = None,
 ) -> list[str]:
-    """指定ASINの出品セラー一覧(Amazonの「他のセラー」欄相当、最大
-    MAX_SELLERS_PER_CANDIDATE件)を取得し、seller_poolに登録する
+    """指定ASINの出品セラー一覧(Amazonの「他のセラー」欄相当、実質全員
+    = DISCOVER_SELLERS_PER_CANDIDATE件まで)を取得し、seller_poolに登録する
     (この場では即座にマイニングしない - 呼び出し元が必要に応じて行う)。
-    トークン消費は約7(offers取得)のみで済むため、広さ優先(CEO: 「多くの
-    ものを輸出してる優秀なセラー候補を探したいので広さ優先の方が良い」)で
+    トークン消費は約7(offers取得)のみで済み、登録件数を増やしても追加費用は
+    かからないため、広さ優先(CEO: 「多くのものを輸出してる優秀なセラー候補を
+    探したいので広さ優先の方が良い」「候補セラーを全て検討候補にいれる」)で
     プールを育てるのに向いている。
     戻り値: 発見できたセラーID一覧(0件の場合は空リスト)。
     """
     print(f"[INFO] {asin} の出品セラーを調べています...")
     try:
-        sellers_lookup = find_other_sellers_for_candidate(asin=asin, max_sellers=MAX_SELLERS_PER_CANDIDATE)
+        sellers_lookup = find_other_sellers_for_candidate(asin=asin, max_sellers=DISCOVER_SELLERS_PER_CANDIDATE)
     except KeepaError as exc:
         print(f"[WARN] セラー一覧の取得に失敗しました: {exc}")
         return []
@@ -288,45 +304,75 @@ def _best_discovery_candidates(evaluation: dict, limit: int = 1) -> list[dict]:
     return picks
 
 
-def expand_from_top_seller(evaluation: dict, source_label: str, keyword: str, wait_for_tokens: bool) -> None:
-    """実質利益率が最も高い候補(合格優先、無ければ要検討で代替)について、
-    そのASINを出品しているセラー(buyboxの1人だけでなく、Amazonの「他の
-    セラー」欄に相当する全員、最大MAX_SELLERS_PER_CANDIDATE件)それぞれに
-    ついて、他の出品も同じパイプラインで評価する(セラーマイニング、
-    CEOのアイデア)。
-    追加でもう1件、次点の要検討候補があれば、そちらはセラーの発見・登録のみ
-    行う(即時マイニングはしない - 広さ優先、次回以降のLRUサイクルに委ねる。
-    CEO: 「要検討候補もセラー発見の対象に」)。
-    keyword: このセラーを見つけるきっかけになった検索キーワード(source_labelは
-    カテゴリ付きの表示用ラベルなので別に受け取る) - seller_pool.seed_keywordに
-    記録し、ダッシュボードの「セラー別統計」でキーワード列として表示する。
-    """
-    top_picks = _best_discovery_candidates(evaluation, limit=1)
-    if top_picks:
-        top = top_picks[0]
-        asin = top["asin"]
-        print(f"[INFO] セラーマイニング: 候補 {asin}(tier={top.get('tier')})の出品セラーを調べています...")
-        seller_ids = discover_and_register_sellers(asin, source="keyword_expansion", seed_keyword=keyword)
-        for seller_id in seller_ids:
-            _expand_from_one_seller(seller_id, source_label, wait_for_tokens, seed_asin=asin)
+def discover_sellers_for_pending_candidates(
+    limit: int = NIGHTLY_SELLER_DISCOVERY_LIMIT,
+    max_age_hours: int = NIGHTLY_SELLER_DISCOVERY_MAX_AGE_HOURS,
+) -> int:
+    """夜間のセラーマイニング枠の冒頭で呼ぶ: 日中のキーワード検索で見つかった
+    合格候補(無ければ要検討候補)のうち、まだセラーを発見していないものを
+    見つけて、discover_and_register_sellers()で登録する(即時マイニングは
+    しない)。
 
-    considering = sorted(
-        (e for e in evaluation.get("rejected") or [] if e.get("tier") == "consider"),
-        key=lambda e: e.get("margin_pct") or 0, reverse=True,
-    )
-    extra = [c for c in considering if not top_picks or c["asin"] != top_picks[0]["asin"]][:1]
-    for candidate in extra:
-        asin = candidate["asin"]
-        print(f"[INFO] セラー発見(要検討候補 {asin}, 実質利益率{candidate.get('margin_pct', 0):.1%})を登録のみ行います...")
-        discover_and_register_sellers(asin, source="keyword_expansion", seed_keyword=keyword)
+    CEO: 「優良が見つかってもその場では検索せず。セラーサーチは夜間だけに
+    する」(2026-09-27) - 以前はrun_daily_scan()が合格候補を見つけたその場で
+    セラーの発見・マイニングを行っていた(旧expand_from_top_seller)が、日中の
+    キーワード検索サイクルからセラー関連の処理を完全に切り離し、発見・
+    マイニングともに夜間のセラーマイニング枠(run_seller_mining_cycle)に
+    一本化した。
+
+    「まだ発見していない」の判定は、そのASINがseller_pool.seed_asinとして
+    一度でも登録済みかどうかで行う(登録済みなら、既にこの関数か旧来の
+    処理で発見済み)。対象はsource_type='keyword'(セラーマイニング由来の
+    候補は対象外 - そちらはrun_seller_mining_cycle内のチェーンで別途処理
+    される)。
+
+    戻り値: セラーを発見できた候補の件数。
+    """
+    init_ops_tables()
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            '''
+            WITH ranked AS (
+                SELECT asin, category, qualified, tier, margin_pct, created_at,
+                    ROW_NUMBER() OVER (PARTITION BY asin ORDER BY created_at DESC) AS rn
+                FROM agent_candidates
+                WHERE source_type = 'keyword' AND created_at >= ?
+            )
+            SELECT asin, category FROM ranked
+            WHERE rn = 1 AND (qualified = 1 OR tier = 'consider')
+              AND asin NOT IN (SELECT DISTINCT seed_asin FROM seller_pool WHERE seed_asin IS NOT NULL)
+            ORDER BY qualified DESC, margin_pct DESC
+            LIMIT ?
+            ''',
+            (cutoff, limit),
+        ).fetchall()
+
+    if not rows:
+        print("[INFO] セラー未発見の合格候補はありません。")
+        return 0
+
+    found = 0
+    for asin, category in rows:
+        print(f"[INFO] 夜間セラー発見: 候補 {asin}({category}) の出品セラーを調べています...")
+        seller_ids = discover_and_register_sellers(asin, source="keyword_expansion")
+        if seller_ids:
+            found += 1
+    return found
 
 
 def run_seller_mining_cycle(max_candidates: int, wait_for_tokens: bool) -> bool:
     """Sellerエージェント: セラープールから次に調べるべき1件を選び、マイニングする。
     深夜のセラーマイニング時間帯(run_all_day.sh)に、キーワード検索の代わりに
     呼ばれる想定。プールが空なら何もせずFalseを返す(トークン消費なし)。
+
+    冒頭で discover_sellers_for_pending_candidates() を呼び、日中に見つかった
+    合格候補のうちセラー未発見のものを登録する(CEO: 「セラーサーチは夜間
+    だけにする」2026-09-27)。マイニング本体(トークン消費の主体)は、
+    これまで通りLRUで1セラーずつ処理する。
     """
     init_ops_tables()
+    discover_sellers_for_pending_candidates()
     seller_id, times_mined = pick_next_seller()
     if not seller_id:
         print("[INFO] セラープールが空のため、定期セラーマイニングをスキップしました。")
@@ -482,14 +528,12 @@ def run_daily_scan(
         notify_status="deferred_to_digest", notify_error=None,
     )
 
-    # Keyword/Categoryエージェント: セラーマイニング。CEOのアイデア -
-    # 「よく売れている日本のものを売っているセラーは、他にも同じような
-    # ものを売っていることが多い」。合格候補があればそれを、無ければ
-    # 要検討候補で代替する(_best_discovery_candidates)。そのASINの出品
-    # セラー(最大MAX_SELLERS_PER_CANDIDATE件)を特定して、それぞれの
-    # 出品の残りも同じパイプラインで評価する。関数内部で「合格も要検討も
-    # 無ければ何もしない」を自然にハンドルするため、呼び出し条件は不要。
-    expand_from_top_seller(evaluation, label, keyword, wait_for_tokens)
+    # セラーマイニング(セラーの発見・調査)は、ここでは行わない。CEO:
+    # 「優良が見つかってもその場では検索せず。セラーサーチは夜間だけに
+    # する」(2026-09-27) - 日中のこのサイクルは、キーワード検索と評価・
+    # 保存だけに専念する。この候補のセラー発見は、夜間枠
+    # (run_seller_mining_cycle -> discover_sellers_for_pending_candidates)
+    # が、agent_candidatesを見て後追いで行う。
 
 
 def cmd_seed_from_favorites() -> None:

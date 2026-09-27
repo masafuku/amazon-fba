@@ -34,3 +34,4 @@ logs/
 .dropbox.attr
 **/.~*
 **/~$*
+.netsea_catalog_synced_at

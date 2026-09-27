@@ -164,3 +164,30 @@ def get_inventory_summaries(next_token: Optional[str] = None) -> Dict[str, Any]:
             "details": "true",
         }
     return _request("/fba/inventory/v1/summaries", params)
+
+
+def get_listings_restrictions(
+    asin: str,
+    condition_type: str = "new_new",
+    seller_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Listings Restrictions API: getListingsRestrictions - このアカウントが、そのASINを
+    指定の状態(既定: 新品)で出品できるかを照会する。出品は行わない(照会のみ)。
+
+    返り値の "restrictions" が空なら出品可。要承認なら reasonCode="APPROVAL_REQUIRED"
+    (links に承認申請のURL)、出品不可なら reasonCode="NOT_ELIGIBLE" などが入る。
+    販売者ID(SP_API_SELLER_ID)が必要。
+    """
+    seller = seller_id or settings.seller_id
+    if not seller:
+        raise SpApiError("販売者ID(SP_API_SELLER_ID)が未設定です。Seller Central の「設定 > アカウント情報」で確認して .env に設定してください。")
+    return _request(
+        "/listings/2021-08-01/restrictions",
+        {
+            "asin": asin,
+            "sellerId": seller,
+            "marketplaceIds": settings.marketplace_id,
+            "conditionType": condition_type,
+            "reasonLocale": "ja_JP",
+        },
+    )

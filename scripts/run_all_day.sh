@@ -161,6 +161,18 @@ while [ "$running" -eq 1 ]; do
 
   if "$VENV_PYTHON" "${cycle_args[@]}" >> "$LOG_FILE" 2>&1; then
     log "[INFO] サイクル $cycle 完了 (${cycle_label})。"
+    # 新しく見つかった優先度Tier S/A/B+ の候補の出品可否をSP-APIで照会する(照会のみ。出品はしない)。
+    # 認証情報が無い環境では何もしない。失敗してもスキャンのループは止めない。
+    "$VENV_PYTHON" scripts/check_candidate_restrictions.py --limit 20 >> "$LOG_FILE" 2>&1 || \
+      log "[WARN] 出品可否の照会でエラーが出ました(スキャンは継続)。詳細は $LOG_FILE を確認してください。"
+    # NETSEAの卸価格: 承認済みサプライヤーのカタログは、全件の同期に1時間前後かかるため、前回の成功から
+    # 72時間以上たっていれば、バックグラウンドで同期する(同時に2つは走らせない)。同期が一度でも完了
+    # していれば、候補のJANでカタログを突き合わせて、卸価格・利益・ROI・優先度Tierを更新する(DBの照会のみ)。
+    if ! pgrep -f scripts/sync_netsea_catalog.py > /dev/null 2>&1; then
+      nohup "$VENV_PYTHON" scripts/sync_netsea_catalog.py --if-older-than-hours 72 >> "$LOG_FILE" 2>&1 &
+    fi
+    "$VENV_PYTHON" scripts/check_candidate_wholesale.py --limit 20 >> "$LOG_FILE" 2>&1 || \
+      log "[WARN] NETSEAの卸価格の照会でエラーが出ました(スキャンは継続)。詳細は $LOG_FILE を確認してください。"
     consecutive_errors=0
     sleep_seconds="$NORMAL_SLEEP_SECONDS"
   else

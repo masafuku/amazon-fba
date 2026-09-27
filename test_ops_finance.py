@@ -1,13 +1,28 @@
+import sqlite3
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
+import ops_finance
 from ops_finance import (
+    _apply_priority_fields,
+    _classify_priority_tier,
     _classify_tier,
+    _excluded_kind,
+    _gated_brand,
+    _is_media,
     _has_minimum_demand_evidence,
     _is_searchable_keyword,
     _shipping_cost_jpy_for_weight,
     calc_unit_profit,
     evaluate_mcp_candidates,
     normalize_jp_cost_for_tax,
+    build_daily_digest_message,
+    load_asins_needing_listing_check,
+    load_digest_window,
+    save_listing_status,
+    pick_next_keyword,
 )
 
 
@@ -20,41 +35,11 @@ class TestCalcUnitProfitShipping(unittest.TestCase):
     EMS料金表ベース(実見積もりでスケール済み)に当てはめて計算する。
     """
 
-    def test_shipping_scales_with_total_shipment_weight_not_flat(self):
-        # 重量が大きく違えば(JP原価が同じでも)送料も変わる - 固定モデルとは逆の性質
-        light = calc_unit_profit(us_price_usd=50.0, jp_cost_jpy=1000.0, weight_kg=0.01)
-        heavy = calc_unit_profit(us_price_usd=50.0, jp_cost_jpy=1000.0, weight_kg=2.0)
-        self.assertLess(light['shipping_cost_usd'], heavy['shipping_cost_usd'])
-
-    def test_cheap_item_splits_shipping_across_many_units(self):
-        # JP原価¥300 -> 50000 // 300 = 166個まとめ買い、合計16.6kg分の送料を
-        # 166個で按分
-        result = calc_unit_profit(us_price_usd=50.0, jp_cost_jpy=300.0, weight_kg=0.1)
-        expected_usd = _shipping_cost_jpy_for_weight(166 * 0.1) / 166 / 150.0
-        self.assertAlmostEqual(result['shipping_cost_usd'], round(expected_usd, 2), places=2)
-
-    def test_expensive_item_bears_full_shipment_weight_alone(self):
-        # JP原価¥60,000は予算¥50,000を超えるため、まとめ買い個数は最低1個 ->
-        # その1個(2kg)分の送料を丸ごと負担する
-        result = calc_unit_profit(us_price_usd=200.0, jp_cost_jpy=60000.0, weight_kg=2.0)
-        expected_usd = _shipping_cost_jpy_for_weight(2.0) / 150.0
-        self.assertAlmostEqual(result['shipping_cost_usd'], round(expected_usd, 2), places=2)
-
-    def test_boundary_cost_equals_budget(self):
-        # JP原価がちょうど予算(¥50,000)と一致する場合も、まとめ買い個数は1個
-        result = calc_unit_profit(us_price_usd=200.0, jp_cost_jpy=50000.0, weight_kg=2.0)
-        expected_usd = _shipping_cost_jpy_for_weight(2.0) / 150.0
-        self.assertAlmostEqual(result['shipping_cost_usd'], round(expected_usd, 2), places=2)
-
-    def test_custom_shipment_budget_is_honored(self):
-        # shipment_budget_jpyを明示的に上書きできること
-        result = calc_unit_profit(
-            us_price_usd=50.0, jp_cost_jpy=5000.0, weight_kg=0.5,
-            shipment_budget_jpy=30_000.0,
-        )
-        # 30000 // 5000 = 6個まとめ買い -> 合計3.0kg分の送料を6個で按分
-        expected_usd = _shipping_cost_jpy_for_weight(6 * 0.5) / 6 / 150.0
-        self.assertAlmostEqual(result['shipping_cost_usd'], round(expected_usd, 2), places=2)
+    def test_shipping_cost_is_zero(self):
+        # CEO指示(2026-09-22): 想定輸送費は妥当でないため0円として扱う
+        for price, cost, weight in [(50.0, 300.0, 0.1), (200.0, 60000.0, 2.0), (50.0, 1000.0, 0.01)]:
+            result = calc_unit_profit(us_price_usd=price, jp_cost_jpy=cost, weight_kg=weight)
+            self.assertEqual(result['shipping_cost_usd'], 0.0)
 
     def test_forwarder_quote_calibration_point_is_exact(self):
         # 実見積もり(容積重量7.20kg -> ¥13,034)そのものを回帰テストとして固定する
@@ -242,8 +227,8 @@ class TestIsSearchableKeyword(unittest.TestCase):
     """
 
     def test_ordinary_brand_keyword_is_searchable(self):
-        self.assertTrue(_is_searchable_keyword('HARIO V60'))
-        self.assertTrue(_is_searchable_keyword('S.H.Figuarts'))
+        self.assertTrue(_is_searchable_keyword('Tiger thermos'))  # HARIOは出品制限ブランドのため対象外(TestGatedBrand)
+        self.assertTrue(_is_searchable_keyword('Zebra Sarasa'))
 
     def test_food_keywords_are_excluded(self):
         for keyword in ('matcha powder', 'miso paste', 'shio koji', 'Japan snacks', 'onigiri mold'):
@@ -302,37 +287,497 @@ class TestIsSearchableKeyword(unittest.TestCase):
             self.assertFalse(_is_searchable_keyword(keyword), keyword)
 
 
-class TestEvaluateMcpCandidatesFigureFilter(unittest.TestCase):
-    """商品タイトル段階でのフィギュア/コレクタブル除外。ブランド名("Sanrio"等)
-    のような広いキーワードで検索した結果に、そのブランドのフィギュア/
-    コレクタブル商品が紛れ込むケースに対応する(キーワード自体は問題なくても
-    タイトルで弾く)。"""
+class TestEvaluateMcpCandidatesExclusions(unittest.TestCase):
+    """商品タイトル段階の除外。食品・医薬品/化粧品・包丁類(輸出に課題があるため
+    完全除外)は評価の前に弾く。フィギュア/コレクタブルは、CEO指示(2026-09-26)で
+    優先度Tierを付けるようになったため、弾かずに評価し is_figure の印だけを付ける。
+    ブランド名("Sanrio"等)のような広いキーワードで検索した結果に紛れ込むケースに
+    対応する(キーワード自体は問題なくてもタイトルで判定)。"""
 
-    def _candidate(self, title, asin='B0TEST0001'):
+    def _candidate(self, title, asin='B0TEST0001', **sell_overrides):
+        sell = {
+            'asin': asin, 'title': title, 'price': 20.0, 'weight_kg': 0.1,
+            'referral_fee_percent': 15.0, 'fba_pickpack_fee': 3.0,
+            'monthly_sold': 100, 'sales_rank': 5000,
+        }
+        sell.update(sell_overrides)
         return {
-            'sell': {
-                'asin': asin, 'title': title, 'price': 20.0, 'weight_kg': 0.1,
-                'referral_fee_percent': 15.0, 'fba_pickpack_fee': 3.0,
-            },
+            'sell': sell,
             'cost': {'price': 1000, 'asin': 'JP123'},
             'price_diff_rate': 0.5,
         }
 
-    def test_figure_titled_candidate_is_rejected_before_profit_calc(self):
+    def test_figure_titled_candidate_is_evaluated_and_flagged(self):
         result = evaluate_mcp_candidates({
             'candidates': [self._candidate('Sanrio Hello Kitty Nendoroid Figure')],
         })
-        self.assertEqual(result['qualified'], [])
-        self.assertEqual(len(result['rejected']), 1)
-        self.assertEqual(result['rejected'][0]['reason'], 'figure_or_collectible')
+        entries = result['qualified'] + result['rejected']
+        self.assertEqual(len(entries), 1)
+        entry = entries[0]
+        self.assertTrue(entry['is_figure'])
+        self.assertIsNone(entry['excluded_kind'])
+        self.assertIn(entry['priority_tier'], ('S', 'A', 'B+', 'B-', 'C'))
+        self.assertNotEqual(entry.get('reason'), 'figure_or_collectible')
 
-    def test_ordinary_stationery_candidate_is_not_rejected_as_figure(self):
+    def test_ordinary_stationery_candidate_is_not_flagged(self):
         result = evaluate_mcp_candidates({
             'candidates': [self._candidate('Sanrio Hello Kitty Ruler 15cm')],
         })
-        figure_rejections = [r for r in result['rejected'] if r.get('reason') == 'figure_or_collectible']
-        self.assertEqual(figure_rejections, [])
+        entry = (result['qualified'] + result['rejected'])[0]
+        self.assertFalse(entry['is_figure'])
+        self.assertIsNone(entry['excluded_kind'])
+        self.assertIsNotNone(entry['priority_tier'])
+
+    def test_excluded_categories_are_rejected_before_profit_calc(self):
+        for title, kind in (
+            ('Shun Classic 7" Santoku Knife', 'knife'),
+            ('DHC Deep Cleansing Oil Makeup Remover', 'drug_cosmetic'),
+            ('Japanese Matcha Green Tea Powder 100g', 'food'),
+        ):
+            result = evaluate_mcp_candidates({'candidates': [self._candidate(title)]})
+            self.assertEqual(result['qualified'], [], title)
+            self.assertEqual(len(result['rejected']), 1, title)
+            entry = result['rejected'][0]
+            self.assertEqual(entry['excluded_kind'], kind, title)
+            self.assertEqual(entry['reason'], f'excluded_{kind}', title)
+            self.assertIsNone(entry['priority_tier'], title)
+
+
+class TestClassifyPriorityTier(unittest.TestCase):
+    """発注の優先度Tier。期待値は _shared/fba-sourcing-candidates.md の
+    「Tier 確定版」(2026-09-21)にある実例に合わせている。"""
+
+    def test_s_strong_demand_high_profit_high_roi(self):
+        # 万能分別はさみ B0014IP9L2 (先月100、粗利$33、ROI 656%)
+        self.assertEqual(_classify_priority_tier(33.2, 6.56, 100, 52527), 'S')
+        # クリップ ダークフォグ B0C7Z94VS4 (先月100、$3.64、ROI 157%)
+        self.assertEqual(_classify_priority_tier(3.64, 1.57, 100, None), 'S')
+
+    def test_strong_demand_but_profit_under_3_dollars_is_a(self):
+        # レターセット589152 キティ (先月100、$2.09、ROI 100%)
+        self.assertEqual(_classify_priority_tier(2.09, 1.00, 100, None), 'A')
+
+    def test_a_moderate_demand_high_roi(self):
+        # シール&ケース マイメロディ (先月50、$3.59、ROI 234%)
+        self.assertEqual(_classify_priority_tier(3.59, 2.34, 50, None), 'A')
+
+    def test_a_via_sales_rank_when_monthly_sold_missing(self):
+        # B7リングノート キティ B0D1KSNXKV (先月空欄、BSR#13,301・単独、$3.88、ROI 257%)
+        self.assertEqual(_classify_priority_tier(3.88, 2.57, None, 13301), 'A')
+
+    def test_b_plus_and_b_minus_split_at_roi_50_percent(self):
+        # ペンスタンド B09LRPK9CX (先月100、$3.81、ROI 76%) / 着物キーホルダー (ROI 64%)
+        self.assertEqual(_classify_priority_tier(3.81, 0.76, 100, None), 'B+')
+        self.assertEqual(_classify_priority_tier(2.94, 0.64, 100, None), 'B+')
+        self.assertEqual(_classify_priority_tier(2.0, 0.50, 50, None), 'B+')
+        self.assertEqual(_classify_priority_tier(2.0, 0.4999, 50, None), 'B-')
+        self.assertEqual(_classify_priority_tier(0.5, 0.10, 100, None), 'B-')
+
+    def test_boundary_roi_100_percent_is_a_not_b_plus(self):
+        self.assertEqual(_classify_priority_tier(2.0, 1.0, 50, None), 'A')
+        self.assertEqual(_classify_priority_tier(2.0, 0.9999, 50, None), 'B+')
+
+    def test_no_demand_evidence_is_c(self):
+        # 先月の購入が空欄でBSRも60,000位より下(または無し)
+        self.assertEqual(_classify_priority_tier(5.0, 3.0, None, 250000), 'C')
+        self.assertEqual(_classify_priority_tier(5.0, 3.0, None, None), 'C')
+        # monthly_soldがあるが50未満のときは需要ありとみなさない
+        self.assertEqual(_classify_priority_tier(5.0, 3.0, 20, 10000), 'C')
+
+    def test_sales_rank_boundary_is_60000(self):
+        self.assertEqual(_classify_priority_tier(3.0, 2.0, None, 60000), 'A')
+        self.assertEqual(_classify_priority_tier(3.0, 2.0, None, 60001), 'C')
+
+    def test_missing_or_non_positive_profit_is_c(self):
+        self.assertEqual(_classify_priority_tier(None, None, 100, 1000), 'C')
+        self.assertEqual(_classify_priority_tier(0.0, 0.0, 100, 1000), 'C')
+        self.assertEqual(_classify_priority_tier(-1.0, -0.2, 100, 1000), 'C')
+
+
+class TestClassifyPriorityTierForMedia(unittest.TestCase):
+    """メディア(本・DVD/BD・CD)は、BSRの近似を使わず、先月の購入かランク変動(10回以上)が必要。"""
+
+    def test_media_rank_alone_is_not_demand(self):
+        # 雑貨ならBSR 6万位以内で「需要あり」(A)だが、メディアはC
+        self.assertEqual(_classify_priority_tier(8.0, 2.7, None, 5000), 'A')
+        self.assertEqual(_classify_priority_tier(8.0, 2.7, None, 5000, is_media=True), 'C')
+
+    def test_media_with_monthly_sold_or_rank_drops_has_demand(self):
+        self.assertEqual(_classify_priority_tier(8.0, 2.7, 50, 5000, is_media=True), 'A')
+        self.assertEqual(_classify_priority_tier(8.0, 2.7, None, 5000, is_media=True, sales_rank_drops_30=10), 'A')
+        self.assertEqual(_classify_priority_tier(8.0, 2.7, None, 5000, is_media=True, sales_rank_drops_30=9), 'C')
+        self.assertEqual(_classify_priority_tier(8.0, 2.7, 100, 5000, is_media=True), 'S')
+
+    def test_apply_priority_fields_detects_media(self):
+        entry = {'asin': '4088737687', 'title': 'One Piece Vol 36 (Japanese Edition)', 'unit_profit_usd': 8.9,
+                 'roi_pct': 2.77, 'monthly_sold': None, 'sales_rank': 30000, 'sales_rank_drops_30': 0}
+        _apply_priority_fields(entry)
+        self.assertEqual(entry['priority_tier'], 'C')
+
+
+class TestExcludedKind(unittest.TestCase):
+    """食品・医薬品/化粧品・包丁類(CEO: 「食品、医薬品、刃物は輸出に課題が
+    あるので完全除外」)。はさみ・カッターは除外しない。"""
+
+    def test_knives_are_excluded(self):
+        for title in ('Shun Premier Grey 8" Chef\'s Knife', 'Global G-2 Santoku Knife 18cm', 'Kitchen Knife Set 3 Pieces'):
+            self.assertEqual(_excluded_kind(title, is_title=True), 'knife', title)
+
+    def test_scissors_are_not_excluded(self):
+        # 発注済みの万能分別はさみ(Tier S)など、はさみ・文房具のカッターは除外しない
+        for title in (
+            '万能分別はさみ(サンスター文具)', 'Sun-Star Stationery All-Purpose Sorting Scissors',
+            'Kokuyo Campus Scissors', 'OLFA Cutter Blade Refill',
+        ):
+            self.assertIsNone(_excluded_kind(title, is_title=True), title)
+
+    def test_utility_knives_and_cutters_are_not_excluded(self):
+        # CEO: 刃物は包丁・ナイフ類のみ。カッター(OLFA/NT等)は除外しない。
+        for title in (
+            'OLFA 25mm Extra Heavy-Duty Utility Knife (H-1)', 'NT Cutter Heavy Duty Cartridge Knife',
+            'KAI 18mm Snap-off Utility Knife Blades, 20-Pack', 'Craft Knife Precision Hobby Set',
+            'Yoshikawa Butter Knife Fine Butter Sharping',
+        ):
+            self.assertIsNone(_excluded_kind(title, is_title=True), title)
+
+    def test_knife_block_alone_is_not_excluded_but_a_knife_block_set_is(self):
+        self.assertIsNone(_excluded_kind('Shun Bamboo Knife Block, 22-Slot', is_title=True))
+        self.assertEqual(_excluded_kind('Shun Classic 6-Piece Knife Block Set | Chef\'s, Paring', is_title=True), 'knife')
+        self.assertIsNone(_excluded_kind('Shun Knife Care Kit', is_title=True))
+
+    def test_hazmat_flammable_products_are_excluded(self):
+        # CEO確認 2026-09-27: SOFT99 ガラコ ロールオンはSDSで引火性液体(H225)。
+        self.assertEqual(
+            _excluded_kind('SOFT99 Glaco Roll On Large - Water-Beading Glass Sealant - 120 ml', is_title=True),
+            'hazmat',
+        )
+        self.assertEqual(_excluded_kind('SOFT99 Glaco'), 'hazmat')   # 検索キーワード側でも弾く
+
+    def test_quasi_drug_bath_products_are_excluded_as_drug_cosmetic(self):
+        # CEO確認 2026-09-27: 花王バブは医薬部外品。
+        self.assertEqual(
+            _excluded_kind('Kao Babu Bath - BAB Piece Full herb 12 Tablets Input', is_title=True),
+            'drug_cosmetic',
+        )
+
+    def test_ordinary_liquid_detergent_is_not_excluded(self):
+        # サラサーティは非危険物・医薬部外品でもない(危険物の類別: 非危険物と確認済み)。
+        self.assertIsNone(
+            _excluded_kind('Sarasaty Lingerie Detergent (1) , 4.05 Fl Oz (Pack of 1)', is_title=True)
+        )
+
+    def test_figures_named_after_food_are_not_excluded(self):
+        # 本番のドライランで、食品語を含むフィギュアが完全除外に入っていた誤検知
+        for title in (
+            'Furyu Hatsune Miku Noodle Stopper Figure -Vintage Doll Style-',
+            'Sonny Angel Snack Series - 1 Sealed Blind Box - Original Limited Edition Mini Figure',
+        ):
+            self.assertIsNone(_excluded_kind(title, is_title=True), title)
+
+    def test_non_consumables_with_consumable_words_are_not_excluded(self):
+        for title in (
+            'Eye Up Sushi Stacking Game - Ages 3+', 'Kaneshotouki Pokemon Ramen Bowl 15 cm',
+            'Luminara Candy Heart Kiss Me Fresh Mint Candle', 'Face Reading in Chinese Medicine',
+            'LayLax ARMOR FACE GUARD Polycarbonate Hard Face Mask for Survival Game',
+            'Sanrio Hello Kitty Hair Bang Clips, Pink ABS Resin, Makeup Hair Clip',
+            'THE BREATHER Natural Breathing Exerciser Trainer For Drug-Free Respiratory Therapy',
+        ):
+            self.assertIsNone(_excluded_kind(title, is_title=True), title)
+
+    def test_knife_accessories_are_not_excluded(self):
+        for title in ('Knife Sharpener Whetstone 1000/3000', 'Knife Holder Magnetic Strip', 'Chef Knife Sheath Cover'):
+            self.assertIsNone(_excluded_kind(title, is_title=True), title)
+
+    def test_drug_and_cosmetic_are_excluded(self):
+        for title in (
+            'DHC Deep Cleansing Oil, Makeup Remover', 'Muji Sensitive Skin Lotion 400ml',
+            'Sangi APAGARD Toothpaste for Sensitive Teeth', 'Milbon Smoothing Shampoo 6.8 oz',
+            'DHC Vitamin C Supplement 60 Days',
+        ):
+            self.assertEqual(_excluded_kind(title, is_title=True), 'drug_cosmetic', title)
+
+    def test_food_is_excluded(self):
+        for title in ('Kikkoman Soy Sauce 1L', 'Meiji Chocolate Assorted Snack Pack', 'Uji Matcha Powder 100g'):
+            self.assertEqual(_excluded_kind(title, is_title=True), 'food', title)
+
+    def test_utensils_named_after_food_or_cosmetics_are_not_excluded(self):
+        # 現在の広い語のリストをそのままタイトルに当てると誤検知していた実例
+        for title in (
+            'Puozult Digital Kitchen Scale 30kg Large Food Scale', 'RETTBERG Tea Kettle for Stovetop Induction',
+            'Acrylic Floating Shelves Shower Shelf Shampoo Conditioner Holder', 'Yamazen Rice Cooker 0.5-1.5 go',
+            'Kureha Seaguar Fluorocarbon Fishing Line',
+        ):
+            self.assertIsNone(_excluded_kind(title, is_title=True), title)
+
+    def test_keyword_mode_uses_broad_food_list(self):
+        self.assertEqual(_excluded_kind('Japan snacks'), 'food')
+        self.assertEqual(_excluded_kind('Japanese kitchen knife'), 'knife')
+        self.assertEqual(_excluded_kind('Shun knife'), 'knife')
+        self.assertEqual(_excluded_kind('Japanese skincare'), 'drug_cosmetic')
+        self.assertIsNone(_excluded_kind('Zebra Sarasa'))
+
+    def test_cosmetic_brand_keywords_are_excluded_from_search_but_not_from_titles(self):
+        for keyword in ('DHC', 'Biore', 'CANMAKE', 'Hada Labo', 'Kanebo', 'Kose', 'SK-II', 'Bihada Ichizoku'):
+            self.assertEqual(_excluded_kind(keyword), 'drug_cosmetic', keyword)
+        # タイトルではブランド名だけで除外しない(例: 「KOSE」名義の非化粧品を巻き込まない)
+        self.assertIsNone(_excluded_kind('Kose Ceramic Storage Jar', is_title=True))
+
+    def test_empty_text_is_not_excluded(self):
+        self.assertIsNone(_excluded_kind(None))
+        self.assertIsNone(_excluded_kind(''))
+
+
+class TestGatedBrand(unittest.TestCase):
+    """出品制限ブランド(CEOがSeller Centralで確認: タカラトミー 2026-09-26、HARIO 2026-09-27)。"""
+
+    def test_hario_and_takara_tomy_are_detected(self):
+        self.assertEqual(_gated_brand('Hario V60 "Buono" Drip Kettle Stovetop Gooseneck'), 'HARIO')
+        self.assertEqual(_gated_brand('ハリオ V60 ドリッパー'), 'HARIO')
+        self.assertEqual(_gated_brand('Takara Tomy Beyblade X UX-21 Hell Nether Deck Set'), 'タカラトミー')
+        self.assertEqual(_gated_brand('some title', 'タカラトミー(TAKARA TOMY)'), 'タカラトミー')
+        self.assertEqual(_gated_brand('MUJI Smooth Gel Ink Pen 0.5mm'), '無印良品(MUJI)')
+        self.assertEqual(_gated_brand('無印良品 ステンレスユニットシェルフ'), '無印良品(MUJI)')
+
+    def test_similar_words_are_not_detected(self):
+        self.assertIsNone(_gated_brand('Super Mario Kitchen Timer'))
+        self.assertIsNone(_gated_brand('Zebra Sarasa 0.5mm'))
+        self.assertIsNone(_gated_brand('Mujigae Rainbow Notebook'))
+        self.assertIsNone(_gated_brand(None, ''))
+
+    def test_gated_brand_keywords_are_not_searchable(self):
+        for keyword in ('HARIO', 'Hario V60', 'Hario dripper', 'Takara Tomy', 'Beyblade X', 'MUJI', '無印良品'):
+            self.assertFalse(_is_searchable_keyword(keyword), keyword)
+        self.assertTrue(_is_searchable_keyword('Zojirushi'))
+
+
+class TestIsMedia(unittest.TestCase):
+    def test_isbn_asin_is_a_book(self):
+        self.assertTrue(_is_media('4088737687', 'One Piece Vol 36 (Japanese Edition)'))
+        self.assertTrue(_is_media('456789012X', None))
+
+    def test_dvd_cd_bluray_titles_are_media(self):
+        for asin, title in (
+            ('B00439G0SA', 'Lethal Weapon 3 Blu-ray'), ('B0002DCQZW', 'ロード・オブ・ザ・リング [DVD]'),
+            ('B07177NDKC', 'Way It Is (Bonus Track)'), ('B06XCLTQVQ', 'Collection (Shm)'),
+            ('B008YPK7LK', 'Movie - Happy Feet Two [Japan DVD]'),
+        ):
+            self.assertTrue(_is_media(asin, title), title)
+
+    def test_ordinary_goods_are_not_media(self):
+        for asin, title in (
+            ('B09KTQ28X5', 'Shimomura ASC-733 Sharp Cabbage Peeler'), ('B07MDFFCZ3', 'Smooth Gel Ink Ballpoint Pen 0.5mm'),
+            ('B0CNKCK41P', 'Sanrio Hello Kitty Ruler 15cm'), ('B004O7GLL2', "Holbein Artists' Watercolor 15ml Titanium White"),
+            ('B0FQC3YVP7', 'Manga Drawing Pen Set G-Pen'),
+        ):
+            self.assertFalse(_is_media(asin, title), title)
+
+
+class TestLoadDigestWindow(unittest.TestCase):
+    """朝/夜のLINE通知: 優先度Tier S/A/B+ だけを、メディア・出品制限ブランド・フィギュア・
+    完全除外を除いて、Tier順に並べる(CEO指示 2026-09-27)。"""
+
+    def _insert(self, conn, asin, title, priority_tier, roi, tier='pass', is_figure=0, excluded_kind=None, brand=None):
+        conn.execute(
+            "INSERT INTO agent_candidates (run_id, category, asin, title, qualified, tier, priority_tier, "
+            "excluded_kind, is_figure, margin_pct, unit_profit_usd, data_json, created_at) "
+            "VALUES ('r1', 'kw', ?, ?, 1, ?, ?, ?, ?, 0.3, 3.0, ?, '2026-09-27T00:00:00+00:00')",
+            (asin, title, tier, priority_tier, excluded_kind, is_figure, __import__('json').dumps({'roi_pct': roi, 'brand': brand})),
+        )
+
+    def test_filters_and_orders_candidates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / 'test.sqlite3'
+            with mock.patch.object(ops_finance, 'DB_PATH', db_path):
+                ops_finance.init_ops_tables()
+                with sqlite3.connect(db_path) as conn:
+                    self._insert(conn, 'B0AAAAAAA1', 'Stationery Pen', 'B+', 0.8)
+                    self._insert(conn, 'B0AAAAAAA2', 'Kitchen Peeler', 'S', 1.5)
+                    self._insert(conn, 'B0AAAAAAA3', 'Desk Ruler', 'A', 2.0)
+                    self._insert(conn, 'B0AAAAAAA4', 'Desk Tape', 'A', 1.2)
+                    self._insert(conn, 'B0AAAAAAA5', 'Some CD (Bonus Track)', 'A', 3.0)            # メディア
+                    self._insert(conn, '4088737687', 'One Piece Vol 36', 'A', 2.7)                  # 本(ISBN)
+                    self._insert(conn, 'B0AAAAAAA6', 'Hario V60 Kettle', 'S', 2.0, brand='HARIO')  # 出品制限ブランド
+                    self._insert(conn, 'B0AAAAAAA7', 'Anime Figure', 'A', 2.0, is_figure=1)         # フィギュア
+                    self._insert(conn, 'B0AAAAAAA8', 'Kitchen Knife', 'A', 2.0, excluded_kind='knife')  # 完全除外
+                    self._insert(conn, 'B0AAAAAAA9', 'Low Tier Thing', 'B-', 0.2)                   # 対象Tier外
+                    self._insert(conn, 'B0AAAAAA10', 'C Tier Thing', 'C', 9.0)                      # 対象Tier外
+                candidates, _keywords, _since = load_digest_window('2026-09-26T00:00:00+00:00')
+        self.assertEqual([c['asin'] for c in candidates], ['B0AAAAAAA2', 'B0AAAAAAA3', 'B0AAAAAAA4', 'B0AAAAAAA1'])
+        self.assertEqual([c['priority_tier'] for c in candidates], ['S', 'A', 'A', 'B+'])
+
+
+class TestListingStatus(unittest.TestCase):
+    """SP-APIで照会した出品可否の保存・照会対象の選定・通知への反映。"""
+
+    def _insert(self, conn, asin, title, priority_tier, listing_status=None, checked_at=None, brand=None):
+        conn.execute(
+            "INSERT INTO agent_candidates (run_id, category, asin, title, qualified, tier, priority_tier, "
+            "margin_pct, unit_profit_usd, listing_status, listing_checked_at, data_json, created_at) "
+            "VALUES ('r1', 'kw', ?, ?, 1, 'pass', ?, 0.3, 3.0, ?, ?, ?, '2026-09-27T00:00:00+00:00')",
+            (asin, title, priority_tier, listing_status, checked_at, __import__('json').dumps({'roi_pct': 1.5, 'brand': brand})),
+        )
+
+    def test_selects_unchecked_and_stale_top_tier_asins_only(self):
+        fresh = __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()
+        stale = '2026-09-01T00:00:00+00:00'
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / 'test.sqlite3'
+            with mock.patch.object(ops_finance, 'DB_PATH', db_path):
+                ops_finance.init_ops_tables()
+                with sqlite3.connect(db_path) as conn:
+                    self._insert(conn, 'B0AAAAAAA1', 'Pen', 'A')                                 # 未確認 -> 対象
+                    self._insert(conn, 'B0AAAAAAA2', 'Ruler', 'S', 'ok', stale)                  # 古い -> 対象
+                    self._insert(conn, 'B0AAAAAAA3', 'Tape', 'A', 'ok', fresh)                   # 新しい -> 対象外
+                    self._insert(conn, 'B0AAAAAAA4', 'Low', 'B-')                                # Tier対象外
+                    self._insert(conn, '4088737687', 'Book', 'A')                                # メディア
+                    self._insert(conn, 'B0AAAAAAA5', 'Hario Kettle', 'S', brand='HARIO')        # 出品制限ブランド
+                asins = load_asins_needing_listing_check(limit=10, max_age_days=7)
+        self.assertEqual(asins, ['B0AAAAAAA2', 'B0AAAAAAA1'])   # S が先
+
+    def test_all_tiers_includes_every_non_excluded_asin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / 'test.sqlite3'
+            with mock.patch.object(ops_finance, 'DB_PATH', db_path):
+                ops_finance.init_ops_tables()
+                with sqlite3.connect(db_path) as conn:
+                    self._insert(conn, 'B0AAAAAAA1', 'Pen', 'A')
+                    self._insert(conn, 'B0AAAAAAA2', 'Low', 'B-')
+                    self._insert(conn, 'B0AAAAAAA3', 'Low C', 'C')
+                    self._insert(conn, '4088737687', 'Book', 'C')                                # メディア: 全件では含める
+                    self._insert(conn, 'B0AAAAAAA5', 'Hario Kettle', 'S', brand='HARIO')        # 出品制限ブランド: 含める
+                    self._insert(conn, 'B0AAAAAAA8', 'Kitchen Knife', 'A')
+                    conn.execute("UPDATE agent_candidates SET excluded_kind='knife' WHERE asin='B0AAAAAAA8'")
+                asins = load_asins_needing_listing_check(limit=100, max_age_days=7, all_tiers=True)
+        self.assertEqual(sorted(asins), sorted(['B0AAAAAAA1', 'B0AAAAAAA2', 'B0AAAAAAA3', '4088737687', 'B0AAAAAAA5']))
+        self.assertEqual(asins[0], 'B0AAAAAAA5')   # S が先
+
+    def test_save_listing_status_updates_all_rows_of_the_asin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / 'test.sqlite3'
+            with mock.patch.object(ops_finance, 'DB_PATH', db_path):
+                ops_finance.init_ops_tables()
+                with sqlite3.connect(db_path) as conn:
+                    self._insert(conn, 'B0AAAAAAA1', 'Pen', 'A')
+                    self._insert(conn, 'B0AAAAAAA1', 'Pen', 'A')
+                self.assertEqual(save_listing_status('B0AAAAAAA1', 'approval_required'), 2)
+                with sqlite3.connect(db_path) as conn:
+                    rows = conn.execute("SELECT listing_status, listing_checked_at FROM agent_candidates").fetchall()
+        self.assertTrue(all(status == 'approval_required' and checked for status, checked in rows))
+
+    def test_digest_skips_product_approval_and_not_eligible_but_keeps_brand_only(self):
+        # CEO: 「ブランド申請は出品にはほぼ全てあるので、隠す設定は不要」(2026-09-27) -
+        # approval_required(ブランドの承認のみ)は、通知から除外しない。
+        # product_approval_required / brand_and_product_approval_required(Transparency等)・
+        # not_eligibleは、引き続き除外する。
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / 'test.sqlite3'
+            with mock.patch.object(ops_finance, 'DB_PATH', db_path):
+                ops_finance.init_ops_tables()
+                with sqlite3.connect(db_path) as conn:
+                    self._insert(conn, 'B0AAAAAAA1', 'Listable Pen', 'A', 'ok')
+                    self._insert(conn, 'B0AAAAAAA2', 'Unchecked Ruler', 'A')
+                    self._insert(conn, 'B0AAAAAAA3', 'Brand Approval Only', 'S', 'approval_required')
+                    self._insert(conn, 'B0AAAAAAA4', 'Not Eligible', 'S', 'not_eligible')
+                    self._insert(conn, 'B0AAAAAAA5', 'Needs Transparency', 'S', 'product_approval_required')
+                    self._insert(conn, 'B0AAAAAAA6', 'Needs Both', 'S', 'brand_and_product_approval_required')
+                candidates, _k, _s = load_digest_window('2026-09-26T00:00:00+00:00')
+        self.assertEqual(
+            sorted(c['asin'] for c in candidates), ['B0AAAAAAA1', 'B0AAAAAAA2', 'B0AAAAAAA3'],
+        )
+        message = build_daily_digest_message(candidates, [], '朝の')
+        self.assertIn('出品: 可', message)
+        self.assertIn('出品: 未確認', message)
+        self.assertIn('出品: 要承認(ブランド)', message)
+
+
+class TestBuildDailyDigestMessage(unittest.TestCase):
+    def test_message_shows_tier_and_demand_fields(self):
+        item = {
+            'asin': 'B09KTQ28X5', 'title': 'Shimomura ASC-733 Sharp Cabbage Peeler', 'us_url': 'https://www.amazon.com/dp/B09KTQ28X5',
+            'jp_url': None, 'us_price_usd': 21.38, 'jp_cost_jpy': 1001.0, 'sales_rank': 69765, 'review_count': 9,
+            'margin_pct': 0.333, 'unit_profit_usd': 7.13, 'weight_estimated': False, 'category': 'kw', 'tier': 'pass',
+            'priority_tier': 'A', 'monthly_sold': 50, 'roi_pct': 1.07, 'competitor_seller_count': 34,
+        }
+        message = build_daily_digest_message([item], ['Muji pen case'], '朝の')
+        self.assertIn('【Tier A】', message)
+        self.assertIn('ROI: 107%', message)
+        self.assertIn('先月の購入: 50 / 競合(出品者): 34', message)
+        self.assertIn('S: 0件 / A: 1件 / B+: 0件', message)
+        self.assertNotIn('【合格】', message)
+
+    def test_empty_message(self):
+        self.assertIn('優先度Tier S/A/B+ の候補はありませんでした', build_daily_digest_message([], [], '朝の'))
+
+
+class TestApplyPriorityFields(unittest.TestCase):
+    def test_excluded_entry_gets_no_priority_tier(self):
+        entry = {'title': 'Shun Classic Santoku Knife', 'unit_profit_usd': 50.0, 'roi_pct': 3.0,
+                 'monthly_sold': 100, 'sales_rank': 100}
+        _apply_priority_fields(entry)
+        self.assertEqual(entry['excluded_kind'], 'knife')
+        self.assertIsNone(entry['priority_tier'])
+        self.assertFalse(entry['is_figure'])
+
+    def test_figure_entry_keeps_its_priority_tier(self):
+        entry = {'title': 'Good Smile Nendoroid Hatsune Miku', 'unit_profit_usd': 10.0, 'roi_pct': 2.0,
+                 'monthly_sold': 100, 'sales_rank': 100}
+        _apply_priority_fields(entry)
+        self.assertTrue(entry['is_figure'])
+        self.assertIsNone(entry['excluded_kind'])
+        self.assertEqual(entry['priority_tier'], 'S')
+
+
+class TestPickNextKeywordSkipsExcluded(unittest.TestCase):
+    def test_skips_figure_food_and_knife_keywords_already_in_the_pool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / 'test.sqlite3'
+            with mock.patch.object(ops_finance, 'DB_PATH', db_path):
+                ops_finance.init_ops_tables()
+                with sqlite3.connect(db_path) as conn:
+                    pool = [
+                        ('Sofubi figure', 0), ('Kaiyodo Revoltech', 0), ('Japanese kitchen knife', 0),
+                        ('Japan snacks', 0), ('Tamashii Nations', 0), ('Kokuyo notebook', 1),
+                    ]
+                    for keyword, times_used in pool:
+                        conn.execute(
+                            "INSERT INTO keyword_pool (keyword, source, added_at, times_used, status) "
+                            "VALUES (?, 'manual', '2026-09-01T00:00:00+00:00', ?, 'active')",
+                            (keyword, times_used),
+                        )
+                keyword, _price_min = pick_next_keyword()
+        self.assertEqual(keyword, 'Kokuyo notebook')
+
+    def test_returns_none_when_every_active_keyword_is_excluded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / 'test.sqlite3'
+            with mock.patch.object(ops_finance, 'DB_PATH', db_path):
+                ops_finance.init_ops_tables()
+                with sqlite3.connect(db_path) as conn:
+                    conn.execute(
+                        "INSERT INTO keyword_pool (keyword, source, added_at, times_used, status) "
+                        "VALUES ('Banpresto', 'manual', '2026-09-01T00:00:00+00:00', 0, 'active')"
+                    )
+                self.assertEqual(pick_next_keyword(), (None, None))
 
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestTnkShippingEstimate(unittest.TestCase):
+    """依頼があったときだけ使うTNK実運賃の試算(calc_unit_profitの自動判定には使わない)。"""
+
+    def test_cheapest_bracket_uses_the_30kg_per_kg_rate(self):
+        result = ops_finance.estimate_tnk_shipping_cost_jpy_per_unit(0.17)
+        self.assertAlmostEqual(result['rate_jpy_per_kg'], 938.3, places=1)
+        self.assertAlmostEqual(result['per_unit_jpy'], 0.17 * 938.3, places=1)
+
+    def test_standalone_mode_interpolates_the_real_table(self):
+        result = ops_finance.estimate_tnk_shipping_cost_jpy_per_unit(1.0, use_cheapest_bracket=False)
+        self.assertEqual(result['per_unit_jpy'], 4409)   # 表の1.0kgの実測値そのもの
+        mid = ops_finance.estimate_tnk_shipping_cost_jpy_per_unit(0.75, use_cheapest_bracket=False)
+        self.assertAlmostEqual(mid['per_unit_jpy'], (4080 + 4409) / 2, places=1)   # 0.5と1.0の中点
+
+    def test_standalone_mode_extrapolates_beyond_the_table(self):
+        result = ops_finance.estimate_tnk_shipping_cost_jpy_per_unit(40.0, use_cheapest_bracket=False)
+        self.assertGreater(result['per_unit_jpy'], 28149)   # 30kgの実測値より高い

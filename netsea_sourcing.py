@@ -36,6 +36,7 @@ from ops_finance import (
     DEFAULT_WEIGHT_KG_FALLBACK,
     MIN_MARGIN_PCT,
     MIN_ROI_PCT,
+    _apply_priority_fields,
     _classify_tier,
     calc_unit_profit,
     init_ops_tables,
@@ -356,6 +357,7 @@ def find_jan_matched_candidates(
             min_margin_pct, min_roi_pct, entry["demand_signal"],
         )
         entry["category"] = f"NETSEA卸仕入れ({meta['category_label']})"
+        _apply_priority_fields(entry)
 
         if entry["tier"] == "pass":
             # 合格候補のみ在庫情報を追加取得(トークンコストがあるため合格分のみ、

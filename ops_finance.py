@@ -294,6 +294,28 @@ def init_ops_tables():
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 last_parsed_at TEXT
             );
+
+            -- NETSEA(Buyer API)の全カタログのうち、JANコード付きのもの(セット単位)。
+            -- scripts/sync_netsea_catalog.py が定期的に入れ替える。/items にJAN検索が無いため、
+            -- 候補のJANとの突き合わせ(scripts/check_candidate_wholesale.py)はこの表に対して行う。
+            CREATE TABLE IF NOT EXISTS netsea_catalog (
+                supplier_id TEXT NOT NULL,
+                product_id TEXT NOT NULL,
+                direct_item_id TEXT NOT NULL,
+                jan_code TEXT NOT NULL,
+                shop_name TEXT,
+                product_name TEXT,
+                product_url TEXT,
+                set_num INTEGER,                -- 1セットの個数(最小ロット)
+                unit_price_jpy REAL,            -- 1個あたりの卸価格(税抜)
+                set_price_jpy REAL,             -- 1セットの価格(税抜)
+                sold_out INTEGER NOT NULL DEFAULT 0,
+                image_copy_flag TEXT,
+                direct_send_flag TEXT,
+                fetched_at TEXT NOT NULL,
+                PRIMARY KEY (supplier_id, product_id, direct_item_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_netsea_catalog_jan ON netsea_catalog(jan_code);
             '''
         )
         # 既存DBに対する後方互換マイグレーション(CREATE TABLE IF NOT EXISTSは
@@ -319,6 +341,23 @@ def init_ops_tables():
             conn.execute('ALTER TABLE agent_candidates ADD COLUMN seller_name TEXT')
         if 'seed_asin' not in agent_candidates_columns:
             conn.execute('ALTER TABLE agent_candidates ADD COLUMN seed_asin TEXT')  # このセラーを見つけたきっかけのASIN
+        # 発注の優先度Tier(S/A/B+/B-/C)・完全除外の種別(food/drug_cosmetic/knife)・
+        # フィギュアのフラグ。既存行は NULL/0 のまま(一括の再分類は
+        # scripts/backfill_priority_tier.py で明示的に行う)。
+        # keepa-csv-dashboard/sqlite_api_server.py にも同じマイグレーションがある。
+        if 'priority_tier' not in agent_candidates_columns:
+            conn.execute('ALTER TABLE agent_candidates ADD COLUMN priority_tier TEXT')
+        if 'excluded_kind' not in agent_candidates_columns:
+            conn.execute('ALTER TABLE agent_candidates ADD COLUMN excluded_kind TEXT')
+        if 'is_figure' not in agent_candidates_columns:
+            conn.execute('ALTER TABLE agent_candidates ADD COLUMN is_figure INTEGER NOT NULL DEFAULT 0')
+        # Amazon.comでの出品可否(SP-APIのListings Restrictions APIで照会した結果:
+        # ok / approval_required / not_eligible / restricted。NULL=未確認)と、その照会日時。
+        # keepa-csv-dashboard/sqlite_api_server.py にも同じマイグレーションがある。
+        if 'listing_status' not in agent_candidates_columns:
+            conn.execute('ALTER TABLE agent_candidates ADD COLUMN listing_status TEXT')
+        if 'listing_checked_at' not in agent_candidates_columns:
+            conn.execute('ALTER TABLE agent_candidates ADD COLUMN listing_checked_at TEXT')
         if 'tier' not in agent_candidates_columns:
             conn.execute('ALTER TABLE agent_candidates ADD COLUMN tier TEXT')
             # 一度きりのバックフィル: 既存行はmargin_pct/us_price_usd/jp_cost_jpyから
@@ -342,6 +381,9 @@ def init_ops_tables():
         conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_seller_id ON agent_candidates(seller_id)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_source_type ON agent_candidates(source_type)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_tier ON agent_candidates(tier)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_priority_tier ON agent_candidates(priority_tier)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_excluded_kind ON agent_candidates(excluded_kind)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_listing_status ON agent_candidates(listing_status)')
 
         agent_runs_columns = {row[1] for row in conn.execute('PRAGMA table_info(agent_runs)').fetchall()}
         if 'status' not in agent_runs_columns:
@@ -465,6 +507,76 @@ def _shipping_cost_jpy_for_weight(total_weight_kg: float) -> float:
     return raw_jpy * _SHIPPING_COST_SCALE_FACTOR
 
 
+# ---------------------------------------------------------------------------
+# TNKの実際の運賃表(依頼があったときだけ送料を試算する用。calc_unit_profit()の
+# 自動判定には使わない — CEO: 「重量は考えるのが難しいのでゼロのままでよい」
+# 「送料は依頼したときに計算してください。計算の際には、TNKで一番お得になる
+# 金額帯で計算して」2026-09-27)。
+#
+# 出典: 【2026年】TNK Logistics配送料金(Googleスプレッドシート、TNKから共有)
+# https://docs.google.com/spreadsheets/d/1tFWiBODxykXF83-yTJQECioZk4gPvtklSAce8nbAHPU
+# シート「[2026/6/1〜] TNK STANDARD」・主要エリア「アメリカ」。上のEMS表ベースの
+# 見積もり(_shipping_cost_jpy_for_weight、単一の見積もりメールをスケールしたもの)
+# より、TNKと直接契約した実際の運賃のほうが正確。表は0.5kg刻みで30kgまで
+# (それ以降は未収録)。1kgあたりの単価は、重いほど下がり続け、収録範囲内で
+# 最安なのは表の上限の30kg(¥938/kg)。
+_TNK_STANDARD_US_RATE_TABLE_JPY: list[tuple[float, float]] = [
+    (0.5, 4080), (1.0, 4409), (1.5, 4739), (2.0, 5066), (2.5, 5420),
+    (3.0, 5880), (3.5, 6084), (4.0, 6535), (4.5, 6994), (5.0, 7465),
+    (5.5, 9317), (6.0, 9688), (6.5, 10084), (7.0, 10456), (7.5, 10780),
+    (8.0, 11031), (8.5, 11322), (9.0, 11577), (9.5, 12286), (10.0, 12586),
+    (10.5, 13020), (11.0, 13318), (11.5, 13593), (12.0, 13863), (12.5, 14188),
+    (13.0, 14229), (13.5, 14617), (14.0, 14872), (14.5, 15197), (15.0, 15554),
+    (15.5, 15958), (16.0, 16156), (16.5, 16399), (17.0, 16815), (17.5, 17065),
+    (18.0, 17259), (18.5, 17666), (19.0, 18059), (19.5, 18400), (20.0, 18818),
+    (20.5, 20544), (21.0, 20867), (21.5, 21244), (22.0, 22167), (22.5, 22539),
+    (23.0, 22862), (23.5, 23247), (24.0, 23667), (24.5, 24000), (25.0, 24436),
+    (25.5, 24798), (26.0, 25231), (26.5, 25557), (27.0, 25938), (27.5, 26292),
+    (28.0, 26699), (28.5, 27025), (29.0, 27409), (29.5, 27794), (30.0, 28149),
+]
+_TNK_CHEAPEST_RATE_JPY_PER_KG = (
+    _TNK_STANDARD_US_RATE_TABLE_JPY[-1][1] / _TNK_STANDARD_US_RATE_TABLE_JPY[-1][0]
+)  # 表の最安帯(30kg)のキロ単価。「一番お得になる金額帯」の基準値。
+TNK_SHIPPING_QUOTE_DATE = '2026-06-01'   # この運賃表が適用される日付(それ以前は別表)
+
+
+def estimate_tnk_shipping_cost_jpy_per_unit(weight_kg: float, use_cheapest_bracket: bool = True) -> dict:
+    """依頼があったときに、TNKの実際の運賃表から、1個あたりの国際送料(円)を試算する。
+    calc_unit_profit()には使わない(自動判定は送料ゼロのまま、CEO 2026-09-27)。
+
+    use_cheapest_bracket=True(既定): 「TNKで一番お得になる金額帯」(表の最安、30kgの
+    キロ単価¥938/kg)を使う想定 — 他の商品と一緒に発送してまとめて30kg以上にする前提。
+    False: この商品だけを、その重量ぴったりで送る前提(表を線形補間、30kg超は末尾の
+    傾きで延長)。
+
+    戻り値: {'per_unit_jpy', 'rate_jpy_per_kg', 'basis'}"""
+    if use_cheapest_bracket:
+        return {
+            'per_unit_jpy': round(weight_kg * _TNK_CHEAPEST_RATE_JPY_PER_KG, 1),
+            'rate_jpy_per_kg': round(_TNK_CHEAPEST_RATE_JPY_PER_KG, 1),
+            'basis': f'TNK STANDARD({TNK_SHIPPING_QUOTE_DATE}〜)の最安帯(30kg、¥{_TNK_CHEAPEST_RATE_JPY_PER_KG:.0f}/kg)',
+        }
+    table = _TNK_STANDARD_US_RATE_TABLE_JPY
+    if weight_kg <= table[0][0]:
+        total_jpy = table[0][1]
+    elif weight_kg >= table[-1][0]:
+        (w1, c1), (w2, c2) = table[-2], table[-1]
+        slope = (c2 - c1) / (w2 - w1)
+        total_jpy = c2 + slope * (weight_kg - w2)
+    else:
+        total_jpy = table[-1][1]
+        for (w1, c1), (w2, c2) in zip(table, table[1:]):
+            if w1 <= weight_kg <= w2:
+                ratio = (weight_kg - w1) / (w2 - w1)
+                total_jpy = c1 + ratio * (c2 - c1)
+                break
+    return {
+        'per_unit_jpy': round(total_jpy, 1),
+        'rate_jpy_per_kg': round(total_jpy / weight_kg, 1) if weight_kg else None,
+        'basis': f'TNK STANDARD({TNK_SHIPPING_QUOTE_DATE}〜)、この商品単独の重量({weight_kg}kg)で按分',
+    }
+
+
 def calc_unit_profit(
     us_price_usd: float,
     jp_cost_jpy: float,
@@ -495,11 +607,9 @@ def calc_unit_profit(
     """
     jp_cost_usd = jp_cost_jpy / exchange_rate
     amazon_fee_usd = us_price_usd * amazon_fee_rate
-    units_per_shipment = max(1, int(shipment_budget_jpy // jp_cost_jpy)) if jp_cost_jpy > 0 else 1
-    total_shipment_weight_kg = weight_kg * units_per_shipment
-    shipping_cost_usd = (
-        _shipping_cost_jpy_for_weight(total_shipment_weight_kg) / units_per_shipment
-    ) / exchange_rate
+    # CEO指示(2026-09-22): 想定輸送費が妥当でないため0円とする。重量連動モデル
+    # (_shipping_cost_jpy_for_weight)は残してあるが、利益計算では使わない。
+    shipping_cost_usd = 0.0
     import_duty_usd = jp_cost_usd * import_duty_rate
 
     unit_profit_usd = (
@@ -797,6 +907,269 @@ def _classify_tier(
     return TIER_REJECT
 
 
+# 発注の優先度Tier(S/A/B+/B-/C)。上の`tier`(利益による合格判定: pass/consider/...)
+# とは別物で、こちらは「米国での実売の裏付け」と「ROI・粗利」から発注の優先順を
+# 付けるもの。定義は _shared/fba-sourcing-candidates.md の「Tier 確定版」
+# (2026-09-21)に合わせている: 米国の実売(Keepaの「先月の購入」=monthly_sold、
+# 空欄は50点未満/なし)を根拠にし、monthly_soldが無いときは単独ASINのBSR
+# 上位(目安 #60,000以内)を実売ありとみなす。競合(出品者)数は判定に入れない
+# (メモ欄扱い。CEO確認済み)。日本の実売は使わない。
+PRIORITY_S = 'S'
+PRIORITY_A = 'A'
+PRIORITY_B_PLUS = 'B+'
+PRIORITY_B_MINUS = 'B-'
+PRIORITY_C = 'C'
+PRIORITY_STRONG_MONTHLY_SOLD = 100   # 先月100点以上 = 需要が強い
+PRIORITY_MIN_MONTHLY_SOLD = 50       # 先月50点以上 = 実売あり
+PRIORITY_MAX_SALES_RANK = 60_000     # monthly_sold無しのとき、BSRがこれ以内なら実売あり
+PRIORITY_S_MIN_PROFIT_USD = 3.0      # Sの粗利下限($/個)
+PRIORITY_A_MIN_ROI = 1.0             # S/AのROI下限(100%)
+PRIORITY_B_SPLIT_ROI = MIN_ROI_PCT   # B+/B-の境目(CEO指定: ROI 50% = 利益面の合格ライン)
+# メディア(本・DVD/BD・CD)は、ランキングが「そのカテゴリ内の順位」で雑貨と同じ基準では実売を
+# 判断できない(CEO指示 2026-09-27)ため、BSRの近似は使わず、「先月の購入」か、30日の
+# ランク変動(実売の近似)が一定回数以上ある場合だけ需要ありとみなす。
+PRIORITY_MEDIA_MIN_RANK_DROPS_30 = 10
+
+
+def _classify_priority_tier(
+    unit_profit_usd: float | None,
+    roi_pct: float | None,
+    monthly_sold: int | None,
+    sales_rank: int | None,
+    is_media: bool = False,
+    sales_rank_drops_30: int | None = None,
+) -> str:
+    """発注の優先度Tier(S/A/B+/B-/C)を返す。
+
+    需要: monthly_sold >= 100 は「強い」、>= 50 は「あり」。monthly_soldが無い
+    (Keepaに値が無い=50点未満、またはデータ欠落)ときは、sales_rankが
+    60,000位以内なら「あり」とみなす。それ以外は「なし」。
+    - S : 需要が強い かつ 粗利 >= $3 かつ ROI >= 100%
+    - A : 需要あり かつ ROI >= 100%(Sを除く)
+    - B+: 需要あり かつ 50% <= ROI < 100%
+    - B-: 需要あり かつ ROI < 50%(粗利はプラス)
+    - C : 需要なし、または粗利がゼロ以下・価格データ無し
+    """
+    if unit_profit_usd is None or roi_pct is None or unit_profit_usd <= 0:
+        return PRIORITY_C
+    strong = monthly_sold is not None and monthly_sold >= PRIORITY_STRONG_MONTHLY_SOLD
+    if is_media:
+        # メディア: BSRの近似は使わない。先月の購入(50以上)か、30日のランク変動(10回以上)が必要。
+        has_demand = (
+            strong
+            or (monthly_sold is not None and monthly_sold >= PRIORITY_MIN_MONTHLY_SOLD)
+            or (sales_rank_drops_30 is not None and sales_rank_drops_30 >= PRIORITY_MEDIA_MIN_RANK_DROPS_30)
+        )
+    else:
+        has_demand = (
+            strong
+            or (monthly_sold is not None and monthly_sold >= PRIORITY_MIN_MONTHLY_SOLD)
+            or (monthly_sold is None and sales_rank is not None and sales_rank <= PRIORITY_MAX_SALES_RANK)
+        )
+    if not has_demand:
+        return PRIORITY_C
+    if strong and unit_profit_usd >= PRIORITY_S_MIN_PROFIT_USD and roi_pct >= PRIORITY_A_MIN_ROI:
+        return PRIORITY_S
+    if roi_pct >= PRIORITY_A_MIN_ROI:
+        return PRIORITY_A
+    if roi_pct >= PRIORITY_B_SPLIT_ROI:
+        return PRIORITY_B_PLUS
+    return PRIORITY_B_MINUS
+
+
+# 完全除外カテゴリ(輸出に課題があるため。CEO: 「食品、医薬品、刃物は輸出に課題が
+# あるので完全除外」)。刃物は包丁・ナイフ類のみ(はさみ・カッターは除外しない)。
+# キーワード検索では広い語(既存の_FOOD_AND_UNSUITABLE_KEYWORDSなど)で弾くが、
+# 商品タイトルにそのまま当てると「rice cooker」「food scale」のような器具まで
+# 誤検知するため、タイトル用は誤検知の少ない語に絞り、さらに器具・容器を示す語
+# (_NON_CONSUMABLE_HINTS)を含むタイトルは除外しない。
+EXCLUDED_FOOD = 'food'
+EXCLUDED_DRUG_COSMETIC = 'drug_cosmetic'
+EXCLUDED_KNIFE = 'knife'
+EXCLUDED_HAZMAT = 'hazmat'   # 危険物(引火性液体等)。国際輸送・FBAの審査を通せないため完全除外
+                             # (CEO確認 2026-09-27: SOFT99 ガラコ ロールオンのSDSで引火性液体H225を確認)
+
+_FOOD_TITLE_KEYWORDS = (
+    'snack', 'snacks', 'candy', 'candies', 'chocolate', 'chocolates', 'cracker', 'crackers',
+    'green tea', 'black tea', 'oolong tea', 'tea bag', 'tea bags', 'tea leaves', 'loose tea',
+    'matcha', 'cocoa', 'coffee beans', 'ground coffee', 'instant coffee',
+    'noodle', 'noodles', 'ramen', 'udon', 'soba', 'soy sauce', 'seasoning', 'seasonings',
+    'furikake', 'dashi', 'mochi', 'senbei', 'pocky', 'wagyu', 'seafood', 'onigiri', 'sushi',
+    'gourmet food', 'grocery', 'groceries', 'liquor', 'whisky', 'whiskey', 'sake bottle',
+)
+# 医薬部外品(quasi-drug)の入浴剤等。日本の薬機法上の分類で、成分表示・承認のハードルが
+# 化粧品と同様にあるため、_DRUG_COSMETIC_KEYWORDSに合流させる(CEO確認 2026-09-27:
+# 花王バブは医薬部外品)。
+_QUASI_DRUG_KEYWORDS = (
+    'bath tablet', 'bath tablets', 'bath salt', 'bath salts', 'medicated bath', 'bath bomb',
+    'kao babu', 'babu bath',   # 花王バブ(医薬部外品の入浴剤)。実例のAmazonタイトルは
+                                # 機械翻訳で語順が崩れており「bath tablet」に一致しないため個別に追加。
+)
+_DRUG_COSMETIC_KEYWORDS = _QUASI_DRUG_KEYWORDS + (
+    'supplement', 'supplements', 'vitamin', 'vitamins', 'medicine', 'medicines', 'medicated',
+    'drug', 'drugs', 'pharmaceutical', 'cosmetic', 'cosmetics', 'makeup', 'skincare', 'skin care',
+    'shampoo', 'conditioner', 'toothpaste', 'mouthwash', 'lotion', 'serum', 'sunscreen',
+    'face mask', 'facial mask', 'moisturizer', 'moisturizing cream', 'cleansing oil',
+    'cleansing foam', 'eye drops', 'hair dye', 'hair color', 'lip balm', 'lipstick',
+)
+_KNIFE_KEYWORDS = (
+    'knife', 'knives', 'santoku', 'gyuto', 'nakiri', 'deba', 'yanagiba', 'kiritsuke',
+    'kitchen knife', 'chef knife', "chef's knife", 'paring knife', 'bread knife',
+)
+# 危険物(引火性液体・エアゾール等)。国際輸送で航空便に載せられない、またはFBAの
+# 危険物審査が必要になる製品群。ロールオン式のガラスコーティング剤(引火性溶剤入り)を
+# 実例として確認したので、その系統の商品名をタイトル・キーワードの両方で弾く。
+_HAZMAT_KEYWORDS = (
+    'glaco', 'glass sealant', 'glass coating', 'rain repellent', 'windshield sealant',
+    'lighter fluid', 'contact cement', 'spray paint', 'rust preventive spray',
+)
+_NON_CONSUMABLE_HINTS = (
+    'holder', 'shelf', 'shelves', 'rack', 'dispenser', 'container', 'containers', 'storage',
+    'organizer', 'kettle', 'kettles', 'scale', 'scales', 'cooker', 'maker', 'mold', 'molds',
+    'grinder', 'mug', 'cup', 'cups', 'glass', 'glasses', 'sharpener', 'sharpening', 'case',
+    'bottle', 'tray', 'stand', 'pouch', 'bag', 'brush', 'towel', 'mat', 'toy', 'sticker',
+    # 本番データのドライラン(2026-09-26)で見つかった誤検知: ゲーム・食器・工具・書籍・
+    # マスク・ヘアクリップなど、語を含むだけで消費物ではない商品。
+    'game', 'bowl', 'bowls', 'blade', 'blades', 'colander', 'candle', 'candles', 'face guard', 'clip', 'clips',
+    'thread', 'handbook', 'philosophy', 'reading', 'trainer', 'exerciser', 'keychain', 'stopper',
+)
+# 包丁類の除外から外す語。器具・付属品(砥石・ホルダー・鞘・ケア用品)、および
+# 「カッター」(CEO: 刃物は包丁・ナイフ類のみ。はさみ・カッターは除外しない)
+# ―― utility knife / cutter knife / snap-off / craft・hobby knife、バターナイフ(食卓用)。
+_KNIFE_ACCESSORY_PATTERN = re.compile(
+    r'\b(?:sharpener|sharpening|holder|sheath|guard|case|stand|rack|cover|care kit|'
+    r'utility|cutter|snap-off|craft|hobby|butter knife)\b|knife block(?!\s+set)'
+)
+
+
+def _build_word_pattern(terms) -> 're.Pattern':
+    return re.compile(
+        r'\b(?:' + '|'.join(re.escape(t) for t in sorted(set(terms), key=len, reverse=True)) + r')\b'
+    )
+
+
+_FOOD_TITLE_PATTERN = _build_word_pattern(_FOOD_TITLE_KEYWORDS)
+_DRUG_COSMETIC_PATTERN = _build_word_pattern(_DRUG_COSMETIC_KEYWORDS)
+_KNIFE_PATTERN = _build_word_pattern(_KNIFE_KEYWORDS)
+_HAZMAT_PATTERN = _build_word_pattern(_HAZMAT_KEYWORDS)
+# 化粧品・ヘアケアのブランド名。検索キーワードに使うと、結果は全件が化粧品(完全除外)で
+# 弾かれ、Keepaのトークンを無駄にするため、キーワード判定(is_title=False)でだけ使う。
+# (タイトル判定には使わない: ブランド名だけでは化粧品と限らない商品が混ざるため)
+_COSMETIC_BRAND_KEYWORDS = (
+    'dhc', 'biore', 'canmake', 'hada labo', 'kanebo', 'kose', 'sk-ii', 'sk ii', 'skii',
+    'bihada ichizoku', 'shiseido', 'kracie', 'lululun', 'milbon', 'senka', 'rohto',
+)
+_COSMETIC_BRAND_PATTERN = _build_word_pattern(_COSMETIC_BRAND_KEYWORDS)
+_NON_CONSUMABLE_PATTERN = _build_word_pattern(_NON_CONSUMABLE_HINTS)
+
+
+def _excluded_kind(text: str | None, is_title: bool = False) -> str | None:
+    """食品・医薬品/化粧品・刃物(包丁・ナイフ類)・危険物のいずれかに当たれば、その種別
+    ('food'/'drug_cosmetic'/'knife'/'hazmat')を返す。当たらなければNone。
+    is_title=True は商品タイトルに使う(誤検知を減らすため、狭い語だけを使い、
+    器具・容器を示す語を含むタイトルは除外しない)。False は検索キーワード用
+    (既存の広い食品リストも使う)。危険物(_HAZMAT_PATTERN)は器具語による除外の
+    対象にしない(輸送上の危険性はタイトルの器具語と無関係なため)。"""
+    if not text:
+        return None
+    lowered = text.strip().lower()
+    if is_title:
+        # フィギュア/コレクタブルは、優先度Tierを付けて表示のオン/オフで扱う(完全除外にしない)。
+        # 「Noodle Stopper Figure」「Snack Series Blind Box」のような、食品語を含む
+        # フィギュアの誤検知を避ける。
+        if _is_figure_or_collectible_keyword(lowered):
+            return None
+        if _HAZMAT_PATTERN.search(lowered):
+            return EXCLUDED_HAZMAT
+        if _NON_CONSUMABLE_PATTERN.search(lowered):
+            # 例: 「Food Scale」「Tea Kettle」「Shampoo Holder」「Knife Sharpener」。
+            # ただし包丁そのもの(「Chef's Knife Set」等)は器具語を含まないので除外される。
+            pass
+        else:
+            if _FOOD_TITLE_PATTERN.search(lowered):
+                return EXCLUDED_FOOD
+            if _DRUG_COSMETIC_PATTERN.search(lowered):
+                return EXCLUDED_DRUG_COSMETIC
+        if _KNIFE_PATTERN.search(lowered) and not _KNIFE_ACCESSORY_PATTERN.search(lowered):
+            return EXCLUDED_KNIFE
+        return None
+    if _HAZMAT_PATTERN.search(lowered):
+        return EXCLUDED_HAZMAT
+    if _is_food_or_unsuitable_keyword(lowered):
+        return EXCLUDED_FOOD
+    if _DRUG_COSMETIC_PATTERN.search(lowered) or _COSMETIC_BRAND_PATTERN.search(lowered):
+        return EXCLUDED_DRUG_COSMETIC
+    if _KNIFE_PATTERN.search(lowered):
+        return EXCLUDED_KNIFE
+    return None
+
+
+# 出品制限(ゲーティング)で、Amazon.comに新規出品できないと確認したブランド。
+# CEOがSeller Centralで確認したものだけを入れる(推測で増やさない)。
+#   - タカラトミー(ベイブレードX等): 2026-09-26、ブランドの出品許可が無く出品申請が受理されない
+#   - HARIO: 2026-09-27、「現在、この商品の新しい出品情報は受け付けておりません」
+# 該当する商品は、評価・優先度Tierは通常どおり付けるが、ダッシュボードでは
+# 「出品制限ブランドを隠す」(既定オン)で隠し、検索キーワードからは外す。
+# keepa-csv-dashboard/sqlite_api_server.py にも同じリストがある(2ファイルの並行管理)。
+GATED_BRAND_TERMS = {
+    'HARIO': ('hario', 'ハリオ'),
+    'タカラトミー': ('takara tomy', 'takaratomy', 'タカラトミー', 'beyblade', 'ベイブレード'),
+    # MUJI: 卸ルートが無く、ネットストアの規約が転売目的の購入を禁止(2026-09-27、CEO判断で見送り)。
+    '無印良品(MUJI)': ('muji', '無印良品', '良品計画'),
+}
+
+
+def _gated_brand(*texts) -> str | None:
+    """タイトル・ブランド名などのテキストが、出品制限ブランドに当たれば、そのブランドの
+    表示名を返す(当たらなければNone)。英字の語は前後が英数字でないときだけ一致
+    (例: 'hario' が 'mario' に誤マッチしない)。"""
+    haystack = ' '.join(t for t in texts if t).lower()
+    if not haystack:
+        return None
+    for label, terms in GATED_BRAND_TERMS.items():
+        for term in terms:
+            if term.isascii():
+                if re.search(r'(?<![a-z0-9])' + re.escape(term) + r'(?![a-z0-9])', haystack):
+                    return label
+            elif term in haystack:
+                return label
+    return None
+
+
+_MEDIA_TITLE_PATTERN = re.compile(
+    r'\bdvd\b|blu-?ray|\bcd\b|\bsoundtrack\b|bonus track|\bost\b|\balbum\b|\bshm\b|'
+    r'\bremaster(?:ed)?\b|japanese edition|\(vo japonais\)',
+    re.IGNORECASE,
+)
+
+
+def _is_media(asin: str | None, title: str | None) -> bool:
+    """本・DVD/Blu-ray・CD(メディア)らしい商品かどうか。ASINが10桁の数字(ISBN-10)なら本。
+    タイトルに DVD/Blu-ray/CD/サウンドトラック/Japanese Edition などを含むものも該当。
+    メディアのランキングは「そのカテゴリ内の順位」で、雑貨と同じ基準では実売を判断できない
+    ため、朝のLINE通知などから外す(CEO指示 2026-09-27)。推定なので誤検知はあり得る。"""
+    if asin and re.fullmatch(r'\d{9}[\dX]', asin.strip().upper()):
+        return True
+    return bool(title and _MEDIA_TITLE_PATTERN.search(title))
+
+
+def _apply_priority_fields(entry: dict) -> dict:
+    """候補entryに、優先度Tier(priority_tier)・完全除外の種別(excluded_kind)・
+    フィギュアのフラグ(is_figure)を付ける(in-place。entryを返す)。
+    完全除外に当たる候補は priority_tier を付けない。"""
+    title = entry.get('title') or ''
+    kind = _excluded_kind(title, is_title=True)
+    entry['excluded_kind'] = kind
+    entry['is_figure'] = bool(_is_figure_or_collectible_keyword(title))
+    entry['priority_tier'] = None if kind else _classify_priority_tier(
+        entry.get('unit_profit_usd'), entry.get('roi_pct'),
+        entry.get('monthly_sold'), entry.get('sales_rank'),
+        is_media=_is_media(entry.get('asin'), title),
+        sales_rank_drops_30=entry.get('sales_rank_drops_30'),
+    )
+    return entry
+
+
 def evaluate_mcp_candidates(
     mcp_result: dict,
     min_margin_pct: float = MIN_MARGIN_PCT,
@@ -829,18 +1202,17 @@ def evaluate_mcp_candidates(
         cost = candidate['cost']
         asin = sell['asin']
 
-        # ブランド名等の広いキーワード("Sanrio"等)で検索すると、そのブランドが
-        # 展開しているフィギュア/コレクタブルもヒットしてしまう。これらは
-        # 出品時にブランドゲーティング・Transparency・ライセンス許諾で
-        # 行き止まりになることが繰り返し確認されている(CEOメモリ
-        # 「Excluded sourcing categories」)ため、キーワード自体が問題ない
-        # 場合でも商品タイトル段階でここで弾く。
+        # ブランド名等の広いキーワード("Sanrio"等)で検索すると、食品・医薬品/
+        # 化粧品・包丁類(輸出に課題があり、CEOが完全除外と決めたカテゴリ)も
+        # ヒットしてしまうため、キーワード自体が問題ない場合でも商品タイトル
+        # 段階でここで弾く(価格計算もせず、優先度Tierも付けない。ダッシュボード
+        # には出さない)。フィギュア/コレクタブルは、以前はここで弾いていたが、
+        # CEO指示(2026-09-26)で優先度Tierを付けるようになったため、弾かずに
+        # 通常どおり評価し、is_figureの印だけを付ける(ダッシュボードの
+        # 「フィギュアを隠す」で表示をオン/オフする)。
         title = sell.get('title') or ''
-        if _is_figure_or_collectible_keyword(title):
-            # ダッシュボードの「エージェント」ページでフィルタ・表示できるよう、
-            # 却下理由(reason)に加えて画像・価格など一覧表示に要る最低限の
-            # フィールドも持たせておく(qualified候補ほど詳細ではないが、
-            # 一覧上でどの商品か判別できる程度)。
+        excluded_kind = _excluded_kind(title, is_title=True)
+        if excluded_kind:
             rejected.append({
                 'asin': asin,
                 'title': title,
@@ -848,7 +1220,10 @@ def evaluate_mcp_candidates(
                 'image_url': sell.get('image_url'),
                 'us_price_usd': sell.get('price'),
                 'jp_cost_jpy': cost.get('price'),
-                'reason': 'figure_or_collectible',
+                'reason': f'excluded_{excluded_kind}',
+                'excluded_kind': excluded_kind,
+                'is_figure': False,
+                'priority_tier': None,
             })
             continue
 
@@ -926,6 +1301,7 @@ def evaluate_mcp_candidates(
             profit['margin_pct'], profit['roi_pct'], profit['us_price_usd'], profit['jp_cost_usd'],
             min_margin_pct, min_roi_pct, entry['demand_signal'],
         )
+        _apply_priority_fields(entry)
 
         if entry['tier'] == TIER_PASS:
             qualified.append(entry)
@@ -1025,6 +1401,7 @@ def evaluate_mcp_candidates(
                 min_margin_pct, min_roi_pct, entry['demand_signal'],
             )
 
+        _apply_priority_fields(entry)
         rejected.append(entry)
 
     return {
@@ -1109,32 +1486,404 @@ def set_last_digest_sent_at(sent_at: str) -> None:
         )
 
 
+LISTING_CHECK_TIERS = ('S', 'A', 'B+')   # 出品可否を照会する優先度Tier(照会の件数を抑えるため上位だけ)
+
+
+def load_asins_needing_listing_check(limit: int = 30, max_age_days: int = 7, all_tiers: bool = False) -> list:
+    """出品可否を照会すべきASINを返す: 優先度Tier S/A/B+ で、完全除外・フィギュア・メディア・
+    出品制限ブランドではなく、未確認、または前回の照会から max_age_days 日以上たったもの。
+    Tierの高い順、同じTierでは新しい順。
+
+    all_tiers=True のときは、優先度Tierに関係なく、また、メディア・フィギュア・出品制限ブランドも
+    含めて、完全除外(食品・医薬品/化粧品・刃物)以外の全ASINを対象にする(全件の一括照会用)。"""
+    init_ops_tables()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+    placeholders = ', '.join('?' for _ in LISTING_CHECK_TIERS)
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            f'''
+            WITH ranked AS (
+                SELECT asin, title, priority_tier, listing_status, listing_checked_at, created_at, data_json,
+                    ROW_NUMBER() OVER (PARTITION BY asin ORDER BY created_at DESC) AS rn
+                FROM agent_candidates
+                WHERE excluded_kind IS NULL {'' if all_tiers else 'AND COALESCE(is_figure, 0) = 0'}
+            )
+            SELECT asin, title, priority_tier, data_json FROM ranked
+            WHERE rn = 1 {'' if all_tiers else f'AND priority_tier IN ({placeholders})'}
+              AND (listing_checked_at IS NULL OR listing_checked_at < ?)
+            ORDER BY CASE priority_tier WHEN 'S' THEN 0 WHEN 'A' THEN 1 WHEN 'B+' THEN 2 WHEN 'B-' THEN 3 ELSE 4 END, created_at DESC
+            ''',
+            (cutoff,) if all_tiers else (*LISTING_CHECK_TIERS, cutoff),
+        ).fetchall()
+    asins = []
+    for asin, title, _tier, data_json in rows:
+        try:
+            brand = (json.loads(data_json) if data_json else {}).get('brand')
+        except Exception:
+            brand = None
+        if not all_tiers and (_is_media(asin, title) or _gated_brand(title, brand)):
+            continue
+        asins.append(asin)
+        if len(asins) >= limit:
+            break
+    return asins
+
+
+def save_listing_status(asin: str, status: str) -> int:
+    """そのASINの全行に、出品可否(listing_status)と照会日時を保存する。更新した行数を返す。"""
+    init_ops_tables()
+    now = datetime.now(timezone.utc).isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute(
+            'UPDATE agent_candidates SET listing_status = ?, listing_checked_at = ? WHERE asin = ?',
+            (status, now, asin),
+        )
+        return cursor.rowcount
+
+
+# ---------------------------------------------------------------------------
+# NETSEAの卸価格の付与(カタログ同期 -> 候補のJANで突き合わせ)
+# ---------------------------------------------------------------------------
+
+WHOLESALE_CHECK_TIERS = ('S', 'A', 'B+')
+
+
+def netsea_rows_from_items(items: list, fetched_at: str) -> list:
+    """NETSEA /items の商品(dict)の一覧を、netsea_catalog の行(タプル)にする。
+    JANコードの無いセットは対象外。JANは商品直下より、セット(バリエーション)側を優先する。
+    1個あたりの卸価格は set_price_without_tax / set_num(なければ price)。"""
+    rows = []
+    for item in items:
+        for variant in item.get('set') or []:
+            jan = str(variant.get('jan_code') or item.get('jan_code') or '').strip()
+            if not jan:
+                continue
+            set_num = variant.get('set_num') or 1
+            set_price = variant.get('set_price_without_tax')
+            if set_price is None:
+                set_price = (variant.get('price') or 0) * set_num if variant.get('price') is not None else None
+            if set_price is None:
+                continue
+            rows.append((
+                str(item.get('supplier_id')), str(item.get('product_id')), str(variant.get('direct_item_id')),
+                jan, item.get('shop_name'), item.get('product_name'), item.get('product_url'),
+                int(set_num), float(set_price) / int(set_num), float(set_price),
+                1 if variant.get('sold_out_flag') == 'Y' else 0,
+                item.get('image_copy_flag'), item.get('direct_send_flag'), fetched_at,
+            ))
+    return rows
+
+
+def replace_netsea_catalog(supplier_ids: list, rows: list) -> int:
+    """指定サプライヤーの商品を、rowsで置き換える(1トランザクション)。挿入した行数を返す。"""
+    init_ops_tables()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.executemany('DELETE FROM netsea_catalog WHERE supplier_id = ?', [(str(sid),) for sid in supplier_ids])
+        conn.executemany(
+            '''
+            INSERT OR REPLACE INTO netsea_catalog
+                (supplier_id, product_id, direct_item_id, jan_code, shop_name, product_name, product_url,
+                 set_num, unit_price_jpy, set_price_jpy, sold_out, image_copy_flag, direct_send_flag, fetched_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''',
+            rows,
+        )
+    return len(rows)
+
+
+def upsert_netsea_rows(rows: list) -> int:
+    """netsea_catalog の行を追加・更新する(削除はしない)。ページ単位の書き込み用。"""
+    init_ops_tables()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.executemany(
+            '''
+            INSERT OR REPLACE INTO netsea_catalog
+                (supplier_id, product_id, direct_item_id, jan_code, shop_name, product_name, product_url,
+                 set_num, unit_price_jpy, set_price_jpy, sold_out, image_copy_flag, direct_send_flag, fetched_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''',
+            rows,
+        )
+    return len(rows)
+
+
+def delete_stale_netsea_rows(supplier_ids: list, before_iso: str) -> int:
+    """指定サプライヤーの行のうち、before_iso より前に取得したもの(今回の同期で見つからなかった
+    =出品終了した商品)を削除する。削除した行数を返す。"""
+    init_ops_tables()
+    with sqlite3.connect(DB_PATH) as conn:
+        deleted = 0
+        for sid in supplier_ids:
+            deleted += conn.execute(
+                'DELETE FROM netsea_catalog WHERE supplier_id = ? AND fetched_at < ?', (str(sid), before_iso)
+            ).rowcount
+    return deleted
+
+
+def _normalize_jan(value) -> str | None:
+    """13桁の数字ならJANとして返す(それ以外はNone)。"""
+    digits = re.sub(r'\D', '', str(value or ''))
+    return digits if len(digits) == 13 else None
+
+
+def find_netsea_match(jans: list) -> dict | None:
+    """JANのどれかに一致する在庫ありのNETSEA商品のうち、1個あたりの卸価格が最安のものを返す。"""
+    codes = [j for j in (_normalize_jan(x) for x in jans) if j]
+    if not codes:
+        return None
+    init_ops_tables()
+    placeholders = ', '.join('?' for _ in codes)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            f'''
+            SELECT * FROM netsea_catalog
+            WHERE jan_code IN ({placeholders}) AND sold_out = 0
+            ORDER BY unit_price_jpy ASC LIMIT 1
+            ''',
+            codes,
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def load_candidates_needing_wholesale(limit: int = 20, max_age_days: int = 7) -> list:
+    """NETSEAの卸価格を照会すべき候補(ASINごとの最新行)を返す: 優先度Tier S/A/B+ で出品可
+    (listing_status='ok')、完全除外・フィギュア・NETSEA由来ではなく、未照会または
+    max_age_days日以上前のもの。Tierの高い順。戻り値: [{'id', 'asin', 'jans'}]"""
+    init_ops_tables()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+    placeholders = ', '.join('?' for _ in WHOLESALE_CHECK_TIERS)
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            f'''
+            WITH ranked AS (
+                SELECT id, asin, title, priority_tier, data_json, created_at,
+                    ROW_NUMBER() OVER (PARTITION BY asin ORDER BY created_at DESC, id DESC) AS rn
+                FROM agent_candidates
+                WHERE excluded_kind IS NULL AND COALESCE(is_figure, 0) = 0 AND listing_status = 'ok'
+            )
+            SELECT id, asin, title, data_json FROM ranked
+            WHERE rn = 1 AND priority_tier IN ({placeholders})
+              AND json_extract(data_json, '$.netsea_jan') IS NULL
+              AND (json_extract(data_json, '$.wholesale_checked_at') IS NULL
+                   OR json_extract(data_json, '$.wholesale_checked_at') < ?)
+            ORDER BY CASE priority_tier WHEN 'S' THEN 0 WHEN 'A' THEN 1 ELSE 2 END, created_at DESC
+            ''',
+            (*WHOLESALE_CHECK_TIERS, cutoff),
+        ).fetchall()
+        candidates = []
+        for row_id, asin, title, data_json in rows:
+            try:
+                data = json.loads(data_json) if data_json else {}
+            except Exception:
+                data = {}
+            if _is_media(asin, title) or _gated_brand(title, data.get('brand')):
+                continue
+            jans = [data.get('ean')]
+            mapped = conn.execute('SELECT jan_code FROM asin_jan_map WHERE asin = ?', (asin,)).fetchone()
+            if mapped:
+                jans.append(mapped[0])
+            jans = list(dict.fromkeys(j for j in (_normalize_jan(x) for x in jans) if j))
+            if not jans:
+                continue   # JANが無い候補は突き合わせられない
+            candidates.append({'id': row_id, 'asin': asin, 'jans': jans})
+            if len(candidates) >= limit:
+                break
+    return candidates
+
+
+def _recompute_cost_and_tier(
+    data: dict, title: str | None, monthly_sold, sales_rank, tier: str | None, excluded_kind: str | None,
+    old_cost_jpy: float | None, new_cost_jpy: float | None,
+) -> tuple[dict, dict]:
+    """新しい原価候補(new_cost_jpy、税基準は揃え済み)が、今の原価(old_cost_jpy)より
+    安ければ、利益・ROI・優先度Tierを再計算する(手数料・為替・重量は、dataに保存済みの
+    値をそのまま使う)。安くなければ、dataは変更せず、DB更新の必要な列もない。
+
+    apply_wholesale_result(NETSEA自動連携)とadd_manual_supplier(手動追加)の、
+    どちらから呼ばれても同じ判定・同じ計算になるよう共通化したもの(抽出前と挙動は
+    変えていない - test_netsea_wholesale.pyがそのまま通ることで担保)。
+
+    戻り値: (更新後のdata, {'recalculated': bool, 'roi_before', 'roi_after', 'tier_before',
+    'tier_after', 'db_updates': {jp_cost_jpy/unit_profit_usd/margin_pct/priority_tier}})。
+    再計算しなかった場合、'db_updates'は空dict。
+    """
+    result = {'recalculated': False}
+    usable = all(data.get(k) for k in ('us_price_usd', 'jp_cost_usd')) and data.get('fba_fee_usd') is not None \
+        and data.get('amazon_fee_usd') is not None and data.get('weight_kg') is not None and old_cost_jpy
+    if not (usable and new_cost_jpy is not None and new_cost_jpy < old_cost_jpy - 0.5):
+        return data, result
+
+    exchange_rate = old_cost_jpy / data['jp_cost_usd']
+    profit = calc_unit_profit(
+        us_price_usd=data['us_price_usd'], jp_cost_jpy=new_cost_jpy, weight_kg=data['weight_kg'],
+        exchange_rate=exchange_rate,
+        amazon_fee_rate=data['amazon_fee_usd'] / data['us_price_usd'],
+        fba_fee_usd=data['fba_fee_usd'],
+    )
+    result.update({'recalculated': True, 'roi_before': data.get('roi_pct'), 'tier_before': tier})
+    data = dict(data)
+    data['jp_cost_jpy_before_wholesale'] = old_cost_jpy
+    data.update(profit)
+    data['jp_cost_jpy'] = new_cost_jpy
+    entry = {**data, 'title': title, 'monthly_sold': monthly_sold, 'sales_rank': sales_rank}
+    _apply_priority_fields(entry)
+    new_tier = entry['priority_tier']
+    db_updates = {
+        'jp_cost_jpy': new_cost_jpy, 'unit_profit_usd': profit['unit_profit_usd'],
+        'margin_pct': profit['margin_pct'], 'priority_tier': None if excluded_kind else new_tier,
+    }
+    result.update({'roi_after': profit['roi_pct'], 'tier_after': db_updates['priority_tier'], 'db_updates': db_updates})
+    return data, result
+
+
+def apply_wholesale_result(row_id: int, match: dict | None) -> dict:
+    """候補の行(agent_candidates.id)に、NETSEAの照会結果を保存する。matchがNone(該当なし)でも
+    照会日時(wholesale_checked_at)は保存する。卸価格の方が今の原価より安ければ、原価・利益・
+    ROI・優先度Tierを再計算する(手数料・為替・重量は、保存済みの値をそのまま使う)。
+    戻り値: {'matched': bool, 'recalculated': bool, 'roi_before': ..., 'roi_after': ..., 'tier_before': ..., 'tier_after': ...}"""
+    init_ops_tables()
+    now = datetime.now(timezone.utc).isoformat()
+    result = {'matched': match is not None, 'recalculated': False}
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            'SELECT asin, title, monthly_sold, sales_rank, jp_cost_jpy, unit_profit_usd, margin_pct, '
+            'priority_tier, excluded_kind, data_json FROM agent_candidates WHERE id = ?',
+            (row_id,),
+        ).fetchone()
+        if row is None:
+            return result
+        asin, title, monthly_sold, sales_rank, jp_cost_jpy, unit_profit_usd, margin_pct, tier, excluded_kind, data_json = row
+        data = json.loads(data_json) if data_json else {}
+        data['wholesale_checked_at'] = now
+        db_updates = {}
+        if match is not None:
+            wholesale = float(match['unit_price_jpy'])
+            data.update({
+                'wholesale_cost_jpy': wholesale,
+                'netsea_shop_name': match.get('shop_name'),
+                'netsea_product_url': match.get('product_url'),
+                'netsea_set_num': match.get('set_num'),
+                'netsea_matched_jan': match.get('jan_code'),
+            })
+            new_cost = normalize_jp_cost_for_tax(wholesale, None)
+            old_cost = jp_cost_jpy if jp_cost_jpy is not None else data.get('jp_cost_jpy')
+            data, recompute_result = _recompute_cost_and_tier(
+                data, title, monthly_sold, sales_rank, tier, excluded_kind, old_cost, new_cost,
+            )
+            db_updates = recompute_result.pop('db_updates', {})
+            result.update(recompute_result)
+        assignments = ', '.join(f'{k} = ?' for k in ('data_json', *db_updates))
+        conn.execute(
+            f'UPDATE agent_candidates SET {assignments} WHERE id = ?',
+            (json.dumps(data, ensure_ascii=False), *db_updates.values(), row_id),
+        )
+    return result
+
+
+def add_manual_supplier(
+    asin: str, source: str, shop_name: str, price_jpy: float,
+    url: str | None = None, min_qty: int | None = None, note: str | None = None,
+) -> dict:
+    """手動(Claudeがブラウザ等で調べた結果)で見つけた仕入れ先を、指定ASINの全行の
+    data_json['manual_suppliers']に追加する(NETSEA自動連携=wholesale_cost_jpy等の
+    既存フィールドとは別のリストで、上書きしない)。同じsource+shop_nameの既存エントリが
+    あれば置き換える(重複させない)。
+
+    price_jpy(税抜想定)は、NETSEAと同じくnormalize_jp_cost_for_taxで税基準を揃えたうえで、
+    現在のjp_cost_jpy(=「今分かっている中で一番安い原価」を常に表す列)より安ければ、
+    _recompute_cost_and_tier()で利益・ROI・優先度Tierを再計算する(CEO: 「手動で仕入れ先を
+    追加したとき、利益・ROIも自動で再計算する」2026-09-27)。この基準列を介するため、
+    NETSEA自動連携が先でも後でも、常に両方のうち安い方が採用される。
+
+    戻り値: apply_wholesale_result()と同じ形({'matched': True, 'recalculated', 'roi_before',
+    'roi_after', 'tier_before', 'tier_after'})に加えて'rows_updated'(対象になった行数)。
+    最新行(created_at最大)の再計算結果を代表として返す。ASINが1件も無ければ
+    {'matched': False, 'recalculated': False, 'rows_updated': 0}。
+    """
+    init_ops_tables()
+    now = datetime.now(timezone.utc).isoformat()
+    supplier_entry = {
+        'source': source, 'shop_name': shop_name, 'url': url,
+        'price_jpy': float(price_jpy), 'min_qty': min_qty, 'note': note, 'checked_at': now,
+    }
+    new_cost = normalize_jp_cost_for_tax(float(price_jpy), None)
+    result = {'matched': False, 'recalculated': False, 'rows_updated': 0}
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            'SELECT id, title, monthly_sold, sales_rank, jp_cost_jpy, priority_tier, excluded_kind, data_json, created_at '
+            'FROM agent_candidates WHERE asin = ? ORDER BY created_at DESC',
+            (asin,),
+        ).fetchall()
+        if not rows:
+            return result
+        result['matched'] = True
+        for index, (row_id, title, monthly_sold, sales_rank, jp_cost_jpy, tier, excluded_kind, data_json, _created_at) in enumerate(rows):
+            data = json.loads(data_json) if data_json else {}
+            suppliers = [
+                s for s in (data.get('manual_suppliers') or [])
+                if not (s.get('source') == source and s.get('shop_name') == shop_name)
+            ]
+            suppliers.append(supplier_entry)
+            data['manual_suppliers'] = suppliers
+            old_cost = jp_cost_jpy if jp_cost_jpy is not None else data.get('jp_cost_jpy')
+            data, recompute_result = _recompute_cost_and_tier(
+                data, title, monthly_sold, sales_rank, tier, excluded_kind, old_cost, new_cost,
+            )
+            db_updates = recompute_result.pop('db_updates', {})
+            if index == 0:   # 最新行の結果を代表として返す
+                result.update(recompute_result)
+            assignments = ', '.join(f'{k} = ?' for k in ('data_json', *db_updates))
+            conn.execute(
+                f'UPDATE agent_candidates SET {assignments} WHERE id = ?',
+                (json.dumps(data, ensure_ascii=False), *db_updates.values(), row_id),
+            )
+            result['rows_updated'] += 1
+    return result
+
+
+DIGEST_PRIORITY_TIERS = ('S', 'A', 'B+')   # LINEの朝/夜の通知に載せる優先度Tier(CEO指示 2026-09-27)
+_DIGEST_TIER_ORDER = {tier: index for index, tier in enumerate(DIGEST_PRIORITY_TIERS)}
+
+
 def load_digest_window(since_iso: str | None):
     """前回ダイジェスト送信以降(初回はsince_iso=None、直近24時間扱い)の
-    データをまとめて返す: 合格候補(ASIN重複除去・複数回見つかった場合は
-    最新のものを採用)と、その間に検索したキーワード一覧。
+    データをまとめて返す: 優先度Tier S/A/B+ の候補(ASIN重複除去・複数回見つかった
+    場合は最新のものを採用)と、その間に検索したキーワード一覧。
+
+    完全除外(食品・医薬品/化粧品・刃物)・フィギュア・メディア(本/DVD/CD)・
+    出品制限ブランド(HARIO・タカラトミー等)・SP-APIで商品単位の承認(Transparency等)が
+    必要、または出品不可と確認できたものは載せない。**ブランドの承認のみ
+    (approval_required)は除外しない**(CEO: 「ブランド申請は出品にはほぼ全てあるので、
+    隠す設定は不要」2026-09-27) - ほぼ全商品に該当するため、通知には載せたうえで
+    「要承認(ブランド)」と表示する(build_daily_digest_message参照)。出品可否が
+    未確認のものも載せて、通知に「未確認」と出す。並びは Tier 順(S→A→B+)、
+    同じTierではROIの高い順。
     """
     init_ops_tables()
     if since_iso is None:
         since_iso = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
 
+    placeholders = ', '.join('?' for _ in DIGEST_PRIORITY_TIERS)
     with sqlite3.connect(DB_PATH) as conn:
         candidate_rows = conn.execute(
-            '''
+            f'''
             WITH ranked AS (
                 SELECT *,
                     ROW_NUMBER() OVER (PARTITION BY asin ORDER BY created_at DESC) AS rn
                 FROM agent_candidates
-                WHERE tier IN ('pass', 'consider') AND created_at > ?
+                WHERE created_at > ?
+                  AND excluded_kind IS NULL AND COALESCE(is_figure, 0) = 0
             )
             SELECT asin, title, us_url, jp_url, us_price_usd, jp_cost_jpy,
                    sales_rank, review_count, margin_pct, unit_profit_usd,
-                   weight_estimated, category, created_at, tier
+                   weight_estimated, category, created_at, tier,
+                   priority_tier, monthly_sold, data_json, listing_status
             FROM ranked
-            WHERE rn = 1
-            ORDER BY CASE tier WHEN 'pass' THEN 0 ELSE 1 END, margin_pct DESC
+            WHERE rn = 1 AND priority_tier IN ({placeholders})
+              AND COALESCE(listing_status, 'unknown') NOT IN ('product_approval_required', 'brand_and_product_approval_required', 'not_eligible', 'restricted')
             ''',
-            (since_iso,),
+            (since_iso, *DIGEST_PRIORITY_TIERS),
         ).fetchall()
 
         keyword_rows = conn.execute(
@@ -1142,18 +1891,29 @@ def load_digest_window(since_iso: str | None):
             (since_iso,),
         ).fetchall()
 
-    candidates = [
-        {
+    candidates = []
+    for (asin, title, us_url, jp_url, us_price_usd, jp_cost_jpy, sales_rank, review_count,
+         margin_pct, unit_profit_usd, weight_estimated, category, created_at, tier,
+         priority_tier, monthly_sold, data_json, listing_status) in candidate_rows:
+        try:
+            data = json.loads(data_json) if data_json else {}
+        except Exception:
+            data = {}
+        if _is_media(asin, title) or _gated_brand(title, data.get('brand')):
+            continue
+        candidates.append({
             'asin': asin, 'title': title, 'us_url': us_url, 'jp_url': jp_url,
             'us_price_usd': us_price_usd, 'jp_cost_jpy': jp_cost_jpy,
             'sales_rank': sales_rank, 'review_count': review_count,
             'margin_pct': margin_pct, 'unit_profit_usd': unit_profit_usd,
             'weight_estimated': bool(weight_estimated), 'category': category,
             'created_at': created_at, 'tier': tier,
-        }
-        for asin, title, us_url, jp_url, us_price_usd, jp_cost_jpy, sales_rank, review_count,
-            margin_pct, unit_profit_usd, weight_estimated, category, created_at, tier in candidate_rows
-    ]
+            'priority_tier': priority_tier, 'monthly_sold': monthly_sold,
+            'listing_status': listing_status,
+            'roi_pct': data.get('roi_pct'),
+            'competitor_seller_count': data.get('competitor_seller_count'),
+        })
+    candidates.sort(key=lambda c: (_DIGEST_TIER_ORDER.get(c['priority_tier'], 99), -(c['roi_pct'] if c['roi_pct'] is not None else -9)))
     keywords = [row[0] for row in keyword_rows]
     return candidates, keywords, since_iso
 
@@ -1176,20 +1936,42 @@ def build_daily_digest_message(
         lines.append("検索は行われませんでした。")
 
     if not candidates:
-        lines.append("合格・要検討の候補はありませんでした。")
+        lines.append("優先度Tier S/A/B+ の候補はありませんでした。")
     else:
-        pass_count = sum(1 for c in candidates if c.get('tier') == 'pass')
-        consider_count = len(candidates) - pass_count
-        lines.append(f"合格(利益率20%以上): {pass_count}件 / 要検討(0〜20%): {consider_count}件(重複除く)")
+        tier_counts = ' / '.join(
+            f"{tier}: {sum(1 for c in candidates if c.get('priority_tier') == tier)}件"
+            for tier in DIGEST_PRIORITY_TIERS
+        )
+        lines.append(f"優先度Tier {tier_counts}(重複除く。本・DVD/CD・フィギュア・出品制限ブランドは除外)")
         for item in candidates[:max_items]:
             weight_note = '(重量は仮値)' if item['weight_estimated'] else ''
-            tier_label = '【合格】' if item.get('tier') == 'pass' else '【要検討】'
+            tier_label = f"【Tier {item.get('priority_tier') or '-'}】"
             lines.append('---')
             lines.append(f"{tier_label} ASIN: {item['asin']}")
             lines.append(f"{item['title'] or ''}")
             profit_jpy = round((item['unit_profit_usd'] or 0) * exchange_rate)
             margin = item['margin_pct']
-            lines.append(f"利益率: {margin:.1%} / 1個あたり利益: ¥{profit_jpy:,}" if margin is not None else "利益率: -")
+            roi = item.get('roi_pct')
+            roi_str = f" / ROI: {roi:.0%}" if roi is not None else ''
+            lines.append(
+                f"利益率: {margin:.1%}{roi_str} / 1個あたり利益: ¥{profit_jpy:,}" if margin is not None else "利益率: -"
+            )
+            sold = item.get('monthly_sold')
+            comp = item.get('competitor_seller_count')
+            listing_status = item.get('listing_status')
+            # CEO: 「ブランド申請は出品にはほぼ全てあるので、隠す設定は不要」(2026-09-27) -
+            # approval_required(ブランドの承認のみ)は、この時点でwhere句から除外していない
+            # (下のload_digest_window()参照)ため、「未確認」と紛れないよう専用の表示にする。
+            if listing_status == 'ok':
+                listing_str = '可'
+            elif listing_status == 'approval_required':
+                listing_str = '要承認(ブランド)'
+            else:
+                listing_str = '未確認'
+            lines.append(
+                f"先月の購入: {sold if sold is not None else '-'} / 競合(出品者): {comp if comp is not None else '-'}"
+                f" / 出品: {listing_str}"
+            )
             us_price = item['us_price_usd']
             jp_price = item['jp_cost_jpy']
             us_price_str = f"${us_price:.2f}" if us_price is not None else '-'
@@ -1279,6 +2061,9 @@ def persist_agent_run(
                 seller_id,
                 seller_name,
                 seed_asin,
+                item.get('priority_tier'),
+                item.get('excluded_kind'),
+                1 if item.get('is_figure') else 0,
             ))
 
     if rows:
@@ -1291,8 +2076,9 @@ def persist_agent_run(
                     weight_kg, weight_estimated, fee_estimated,
                     price_diff_rate_gross, unit_profit_usd, margin_pct,
                     qualified, tier, reason, data_json, created_at,
-                    source_type, seller_id, seller_name, seed_asin
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    source_type, seller_id, seller_name, seed_asin,
+                    priority_tier, excluded_kind, is_figure
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''',
                 rows,
             )
@@ -1532,6 +2318,12 @@ _FIGURE_AND_COLLECTIBLE_KEYWORDS = (
     'sports card', 'sports cards', 'graded card', 'graded cards', 'psa 10',
     'pokemon card', 'pokemon cards', 'pokémon card', 'pokémon cards',
     'yugioh', 'yu-gi-oh', 'magic the gathering', 'mtg card', 'mtg cards',
+    # フィギュア系のメーカー/ブランド/シリーズ名(「figure」を名乗らないため上の語で
+    # 取りこぼしていた。本番のキーワードプールに残っていた: Sofubi figure以外の
+    # Kaiyodo Revoltech / Tamashii Nations / S.H.Figuarts / Ichiban Kuji /
+    # Good Smile Company / Banpresto)。
+    'sofubi', 'revoltech', 'kaiyodo', 'tamashii nations', 'figuarts', 'banpresto',
+    'good smile', 'ichiban kuji', 'kuji', 'sonny angel', 'pokemon japanese card',
 )
 
 
@@ -1557,6 +2349,13 @@ def _is_searchable_keyword(candidate: str) -> bool:
     if _is_food_or_unsuitable_keyword(stripped):
         return False
     if _is_figure_or_collectible_keyword(stripped):
+        return False
+    # 食品・医薬品/化粧品・包丁類は、輸出に課題があるため完全除外(CEO指示
+    # 2026-09-26)。上の_is_food_or_unsuitable_keywordと重なる分は同じ結果になる。
+    if _excluded_kind(stripped):
+        return False
+    # 出品制限ブランド(HARIO・タカラトミーなど)は、検索しても出品できないので外す。
+    if _gated_brand(stripped):
         return False
     return True
 
@@ -1607,15 +2406,20 @@ def pick_next_keyword() -> tuple[str, int | None] | tuple[None, None]:
     """
     init_ops_tables()
     with sqlite3.connect(DB_PATH) as conn:
-        row = conn.execute(
+        rows = conn.execute(
             '''
             SELECT keyword, price_min FROM keyword_pool
             WHERE status = 'active'
             ORDER BY times_used ASC, COALESCE(last_used_at, '') ASC
-            LIMIT 1
             '''
-        ).fetchone()
-    return (row[0], row[1]) if row else (None, None)
+        ).fetchall()
+    # キーワードの除外判定(_is_searchable_keyword)は追加時にしか効かないため、
+    # 判定が厳しくなる前にプールへ入ったキーワード(フィギュア・食品・医薬品・
+    # 包丁類など)は、ここでも弾く(プールの行自体は変更しない)。
+    for keyword, price_min in rows:
+        if _is_searchable_keyword(keyword):
+            return (keyword, price_min)
+    return (None, None)
 
 
 def record_keyword_used(keyword: str, qualified_count: int = 0) -> None:

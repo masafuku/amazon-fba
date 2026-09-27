@@ -2,6 +2,13 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## 法人・資金に関わる判断をする前に
+
+この事業は株式会社ポチワールド（法人）名義で運営中だが、**オリックス銀行での不動産購入が確定次第、個人（福地菜央）の個人事業主へ移管する方針**（融資審査上、法人を不動産賃貸業専業に保つため）。移管のトリガー・実務チェックリスト、法人の財務状況に関わる判断をする際は、必ず以下を参照すること：
+
+- `/Users/masaki/local/github/_shared/entity-policy.md`
+- `/Users/masaki/local/github/_shared/corporate-finance.md`
+
 ## What this is
 
 A Japan→North America Amazon arbitrage research tool: find products cheap on Amazon.co.jp that
@@ -109,6 +116,20 @@ and turns `keepa_mcp` output into decisions:
   notification itself; `send_daily_digest.py` (cron, twice daily) sends everything accumulated
   since the last digest in one LINE message. This split was an explicit decision — don't
   reintroduce per-run notifications.
+- Seller mining (`seller_pool` table, `daily_scan.py`): "a seller selling one good Japan-sourced
+  product often sells several" — when a candidate qualifies, its other marketplace sellers
+  (`keepa_mcp.server.find_other_sellers_for_candidate`, offers-based, ~7 tokens) are registered
+  into `seller_pool`, and a pooled seller's own storefront (`expand_from_seller`, 1 token/seller)
+  gets run through the same qualify pipeline (`source_type='seller'` in `agent_candidates`).
+  **Seller discovery and mining both run only in the nightly window** (`--seller-mining`, JST
+  1–6am by default via `scripts/run_all_day.sh`), never inline during a daytime keyword-search
+  cycle — `run_daily_scan()` only searches/evaluates/persists, full stop. Each night,
+  `run_seller_mining_cycle()` first calls `discover_sellers_for_pending_candidates()` (finds
+  daytime candidates not yet seller-registered, `seller_pool.seed_asin` marks "already handled"),
+  then mines one pooled seller LRU-style (`pick_next_seller()`), then chains: registers (but
+  doesn't immediately mine) that seller's own top candidate's sellers. Registration has no per-seller
+  token cost beyond the one offers call, so it registers every live seller found, not just a few —
+  only the mining step (which does cost tokens) is throttled to one seller per night cycle.
 
 ### `keepa-csv-dashboard/` — React dashboard, stdlib Python backend
 Frontend (`src/*.jsx`) talks only to `sqlite_api_server.py`'s `/api/*` routes (`src/db.js`), never

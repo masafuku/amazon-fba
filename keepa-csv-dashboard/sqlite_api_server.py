@@ -1026,6 +1026,19 @@ def init_db() -> None:
             conn.execute('ALTER TABLE agent_candidates ADD COLUMN seller_name TEXT')
         if 'seed_asin' not in agent_candidates_columns:
             conn.execute('ALTER TABLE agent_candidates ADD COLUMN seed_asin TEXT')
+        # 発注の優先度Tier・完全除外の種別・フィギュアのフラグ(ops_finance.py側と同じ定義。
+        # この2ファイルの並行スキーマ管理という既存の規約通り)。
+        if 'priority_tier' not in agent_candidates_columns:
+            conn.execute('ALTER TABLE agent_candidates ADD COLUMN priority_tier TEXT')
+        if 'excluded_kind' not in agent_candidates_columns:
+            conn.execute('ALTER TABLE agent_candidates ADD COLUMN excluded_kind TEXT')
+        if 'is_figure' not in agent_candidates_columns:
+            conn.execute('ALTER TABLE agent_candidates ADD COLUMN is_figure INTEGER NOT NULL DEFAULT 0')
+        # SP-APIで照会したAmazon.comでの出品可否と照会日時(ops_finance.py側と同じ定義)。
+        if 'listing_status' not in agent_candidates_columns:
+            conn.execute('ALTER TABLE agent_candidates ADD COLUMN listing_status TEXT')
+        if 'listing_checked_at' not in agent_candidates_columns:
+            conn.execute('ALTER TABLE agent_candidates ADD COLUMN listing_checked_at TEXT')
         if 'tier' not in agent_candidates_columns:
             conn.execute('ALTER TABLE agent_candidates ADD COLUMN tier TEXT')
             # ops_finance.py側と同じ一度きりのバックフィル(この2ファイルの並行
@@ -1048,6 +1061,9 @@ def init_db() -> None:
         conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_run_id ON agent_candidates(run_id)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_created_at ON agent_candidates(created_at)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_tier ON agent_candidates(tier)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_priority_tier ON agent_candidates(priority_tier)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_excluded_kind ON agent_candidates(excluded_kind)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_listing_status ON agent_candidates(listing_status)')
         # ops_finance.py (daily_scan.py) が書き込む実行履歴。定義元はops_finance.py
         # 側だが、agent_candidates と同じ理由でここにも同じ定義を用意しておく。
         conn.execute(
@@ -1572,6 +1588,46 @@ def load_sp_orders(days: int = 30, limit: int = 100):
     ]
 
 
+# 出品制限(ゲーティング)で、Amazon.comに新規出品できないと確認したブランド。定義元は
+# ops_finance.py の GATED_BRAND_TERMS(この2ファイルの並行管理という既存の規約通り、
+# ここにも同じリストを持つ)。ダッシュボードの「出品制限ブランドを隠す」用。
+GATED_BRAND_TERMS = {
+    'HARIO': ('hario', 'ハリオ'),
+    'タカラトミー': ('takara tomy', 'takaratomy', 'タカラトミー', 'beyblade', 'ベイブレード'),
+    # MUJI: 卸ルートが無く、ネットストアの規約が転売目的の購入を禁止(2026-09-27、CEO判断で見送り)。
+    '無印良品(MUJI)': ('muji', '無印良品', '良品計画'),
+}
+
+
+def gated_brand(*texts):
+    haystack = ' '.join(t for t in texts if t).lower()
+    if not haystack:
+        return None
+    for label, terms in GATED_BRAND_TERMS.items():
+        for term in terms:
+            if term.isascii():
+                if re.search(r'(?<![a-z0-9])' + re.escape(term) + r'(?![a-z0-9])', haystack):
+                    return label
+            elif term in haystack:
+                return label
+    return None
+
+
+# 本・DVD/BD・CD(メディア)らしい商品。定義元は ops_finance.py の _is_media(この2ファイルの
+# 並行管理という既存の規約通り、ここにも同じ判定を持つ)。ダッシュボードの「メディアを隠す」用。
+_MEDIA_TITLE_PATTERN = re.compile(
+    r'\bdvd\b|blu-?ray|\bcd\b|\bsoundtrack\b|bonus track|\bost\b|\balbum\b|\bshm\b|'
+    r'\bremaster(?:ed)?\b|japanese edition|\(vo japonais\)',
+    re.IGNORECASE,
+)
+
+
+def is_media(asin, title):
+    if asin and re.fullmatch(r'\d{9}[\dX]', asin.strip().upper()):
+        return True
+    return bool(title and _MEDIA_TITLE_PATTERN.search(title))
+
+
 def load_agent_candidates(days: int = 7):
     """Researchエージェントが調べた候補一覧(直近 days 日分)を、
     favoritesに既に追加済みかどうかのフラグ付きで返す。
@@ -1602,10 +1658,11 @@ def load_agent_candidates(days: int = 7):
                 r.price_diff_rate_gross, r.unit_profit_usd, r.margin_pct,
                 r.qualified, r.tier, r.reason, r.data_json, r.created_at, r.times_seen,
                 r.source_type, r.seller_id, r.seller_name, r.seed_asin,
+                r.priority_tier, r.excluded_kind, r.is_figure, r.listing_status, r.listing_checked_at,
                 CASE WHEN f.asin IS NULL THEN 0 ELSE 1 END AS already_favorited
             FROM ranked r
             LEFT JOIN favorites f ON f.asin = r.asin
-            WHERE r.rn = 1
+            WHERE r.rn = 1 AND r.excluded_kind IS NULL
             ORDER BY r.qualified DESC, r.margin_pct DESC, r.created_at DESC
             ''',
             (since,),
@@ -1618,7 +1675,7 @@ def load_agent_candidates(days: int = 7):
          weight_kg, weight_estimated, fee_estimated,
          price_diff_rate_gross, unit_profit_usd, margin_pct,
          qualified, tier, reason, data_json, created_at, times_seen,
-         source_type, seller_id, seller_name, seed_asin, already_favorited) = row
+         source_type, seller_id, seller_name, seed_asin, priority_tier, excluded_kind, is_figure, listing_status, listing_checked_at, already_favorited) = row
         try:
             data = json.loads(data_json)
         except Exception:
@@ -1654,6 +1711,13 @@ def load_agent_candidates(days: int = 7):
             'sellerId': seller_id,
             'sellerName': seller_name,
             'seedAsin': seed_asin,
+            'priorityTier': priority_tier,
+            'excludedKind': excluded_kind,
+            'isFigure': bool(is_figure),
+            'gatedBrand': gated_brand(title, (data or {}).get('brand')),
+            'isMedia': is_media(asin, title),
+            'listingStatus': listing_status,
+            'listingCheckedAt': listing_checked_at,
             'alreadyFavorited': bool(already_favorited),
         })
     return candidates
@@ -1691,10 +1755,11 @@ def load_seller_candidates(seller_id: str):
                 r.price_diff_rate_gross, r.unit_profit_usd, r.margin_pct,
                 r.qualified, r.tier, r.reason, r.data_json, r.created_at, r.times_seen,
                 r.source_type, r.seller_id, r.seller_name, r.seed_asin,
+                r.priority_tier, r.excluded_kind, r.is_figure, r.listing_status, r.listing_checked_at,
                 CASE WHEN f.asin IS NULL THEN 0 ELSE 1 END AS already_favorited
             FROM ranked r
             LEFT JOIN favorites f ON f.asin = r.asin
-            WHERE r.rn = 1
+            WHERE r.rn = 1 AND r.excluded_kind IS NULL
             ORDER BY r.qualified DESC, r.margin_pct DESC, r.created_at DESC
             ''',
             (seller_id,),
@@ -1707,7 +1772,7 @@ def load_seller_candidates(seller_id: str):
          weight_kg, weight_estimated, fee_estimated,
          price_diff_rate_gross, unit_profit_usd, margin_pct,
          qualified, tier, reason, data_json, created_at, times_seen,
-         source_type, row_seller_id, seller_name, seed_asin, already_favorited) = row
+         source_type, row_seller_id, seller_name, seed_asin, priority_tier, excluded_kind, is_figure, listing_status, listing_checked_at, already_favorited) = row
         try:
             data = json.loads(data_json)
         except Exception:
@@ -1743,6 +1808,13 @@ def load_seller_candidates(seller_id: str):
             'sellerId': row_seller_id,
             'sellerName': seller_name,
             'seedAsin': seed_asin,
+            'priorityTier': priority_tier,
+            'excludedKind': excluded_kind,
+            'isFigure': bool(is_figure),
+            'gatedBrand': gated_brand(title, (data or {}).get('brand')),
+            'isMedia': is_media(asin, title),
+            'listingStatus': listing_status,
+            'listingCheckedAt': listing_checked_at,
             'alreadyFavorited': bool(already_favorited),
         })
     return candidates
@@ -1776,6 +1848,7 @@ def load_agent_candidate_detail(asin: str):
                 r.price_diff_rate_gross, r.unit_profit_usd, r.margin_pct,
                 r.qualified, r.tier, r.reason, r.data_json, r.created_at, r.times_seen,
                 r.source_type, r.seller_id, r.seller_name, r.seed_asin,
+                r.priority_tier, r.excluded_kind, r.is_figure, r.listing_status, r.listing_checked_at,
                 CASE WHEN f.asin IS NULL THEN 0 ELSE 1 END AS already_favorited
             FROM ranked r
             LEFT JOIN favorites f ON f.asin = r.asin
@@ -1792,7 +1865,7 @@ def load_agent_candidate_detail(asin: str):
      weight_kg, weight_estimated, fee_estimated,
      price_diff_rate_gross, unit_profit_usd, margin_pct,
      qualified, tier, reason, data_json, created_at, times_seen,
-     source_type, seller_id, seller_name, seed_asin, already_favorited) = row
+     source_type, seller_id, seller_name, seed_asin, priority_tier, excluded_kind, is_figure, listing_status, listing_checked_at, already_favorited) = row
     try:
         data = json.loads(data_json)
     except Exception:
@@ -1828,6 +1901,13 @@ def load_agent_candidate_detail(asin: str):
         'sellerId': seller_id,
         'sellerName': seller_name,
         'seedAsin': seed_asin,
+        'priorityTier': priority_tier,
+        'excludedKind': excluded_kind,
+        'isFigure': bool(is_figure),
+        'gatedBrand': gated_brand(title, (data or {}).get('brand')),
+        'isMedia': is_media(asin, title),
+        'listingStatus': listing_status,
+        'listingCheckedAt': listing_checked_at,
         'alreadyFavorited': bool(already_favorited),
     }
 
