@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Star } from 'lucide-react';
 import { controlScanLoop, loadAgentCandidates, loadAgentRuns, loadKeepaTokenStatus, loadScanLoopStatus, lookupAsin, saveFavorite, setScanLoopMode } from './db';
 import { formatDateTime, formatDuration, formatElapsedSince } from './formatters';
+import { mergeSuppliers, supplierSourceLabel } from './supplierSources';
 
 const EXCHANGE_RATE = 150;
 // CEO: 「期間による絞り込みに関しては、無期限をデフォルトにしてください」— loadAgentCandidates()は
@@ -334,19 +335,9 @@ export default function AgentPage() {
             // CEO(2026-09-27): 「SDなど、複数の仕入れ先が見つかった場合、表示方法は？」
             // →「全社を並べて表示」。NETSEA自動連携(netsea_shop_name等、単一)と、
             // 手動追加(manual_suppliers、複数、scripts/add_manual_supplier.py経由で
-            // Claudeが記録)を、1つのリストにまとめて安い順に並べる。
-            const netseaSupplier = item.data?.netsea_shop_name
-                ? {
-                      source: 'netsea', shopName: item.data.netsea_shop_name, url: item.data?.netsea_product_url ?? null,
-                      priceJpy: item.data?.wholesale_cost_jpy ?? null, minQty: item.data?.netsea_set_num ?? null,
-                  }
-                : null;
-            const manualSuppliers = (item.data?.manual_suppliers ?? []).map((s) => ({
-                source: s.source, shopName: s.shop_name, url: s.url ?? null, priceJpy: s.price_jpy ?? null, minQty: s.min_qty ?? null,
-            }));
-            const allSuppliers = [netseaSupplier, ...manualSuppliers]
-                .filter((s) => s && s.priceJpy != null)
-                .sort((a, b) => a.priceJpy - b.priceJpy);
+            // Claudeが記録)を、1つのリストにまとめて安い順に並べる(mergeSuppliers、
+            // CandidateDetailPageと共通)。
+            const allSuppliers = mergeSuppliers(item.data);
             const sourcingSupplierName = allSuppliers[0]?.shopName ?? null;
             const sourcingSupplierUrl = allSuppliers[0]?.url ?? null;
             // CEO: 「卸売りの仕入れ価格がわかったら、Amazonとは別の列に価格を
@@ -904,13 +895,15 @@ export default function AgentPage() {
                                             {candidate.allSuppliers && candidate.allSuppliers.length > 0 ? (
                                                 <div className="flex flex-col gap-0.5">
                                                     {candidate.allSuppliers.map((supplier, index) => {
-                                                        const label = `${supplier.shopName}${
+                                                        const platformLabel = supplierSourceLabel(supplier.source, 'abbr');
+                                                        const label = `${platformLabel}${
                                                             supplier.minQty ? `(${supplier.minQty}個〜)` : ''
                                                         } ¥${Number(supplier.priceJpy).toFixed(0)}`;
                                                         const isCheapest = index === 0;
                                                         return (
                                                             <span
                                                                 key={`${supplier.source}-${supplier.shopName}`}
+                                                                title={`${supplierSourceLabel(supplier.source, 'full')}: ${supplier.shopName}`}
                                                                 className={isCheapest ? 'font-semibold text-emerald-300' : 'text-slate-400'}
                                                             >
                                                                 {supplier.url ? (

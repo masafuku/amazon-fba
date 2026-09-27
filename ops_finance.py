@@ -1577,7 +1577,7 @@ def netsea_rows_from_items(items: list, fetched_at: str) -> list:
 def replace_netsea_catalog(supplier_ids: list, rows: list) -> int:
     """指定サプライヤーの商品を、rowsで置き換える(1トランザクション)。挿入した行数を返す。"""
     init_ops_tables()
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=30) as conn:
         conn.executemany('DELETE FROM netsea_catalog WHERE supplier_id = ?', [(str(sid),) for sid in supplier_ids])
         conn.executemany(
             '''
@@ -1592,9 +1592,13 @@ def replace_netsea_catalog(supplier_ids: list, rows: list) -> int:
 
 
 def upsert_netsea_rows(rows: list) -> int:
-    """netsea_catalog の行を追加・更新する(削除はしない)。ページ単位の書き込み用。"""
+    """netsea_catalog の行を追加・更新する(削除はしない)。ページ単位の書き込み用。
+
+    同期中はスキャンループ(daily_scan.py)が同じDBに頻繁に書き込んでおり、SQLiteは同時書き込みを
+    1つしか許さないため、既定の5秒タイムアウトだと「database is locked」で頻繁に失敗する
+    (2026-09-28、CEOに再同期を頼まれた直後に実際に発生・原因調査済み)。timeout=30で緩和する。"""
     init_ops_tables()
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=30) as conn:
         conn.executemany(
             '''
             INSERT OR REPLACE INTO netsea_catalog
@@ -1611,7 +1615,7 @@ def delete_stale_netsea_rows(supplier_ids: list, before_iso: str) -> int:
     """指定サプライヤーの行のうち、before_iso より前に取得したもの(今回の同期で見つからなかった
     =出品終了した商品)を削除する。削除した行数を返す。"""
     init_ops_tables()
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=30) as conn:
         deleted = 0
         for sid in supplier_ids:
             deleted += conn.execute(
@@ -1745,7 +1749,7 @@ def apply_wholesale_result(row_id: int, match: dict | None) -> dict:
     init_ops_tables()
     now = datetime.now(timezone.utc).isoformat()
     result = {'matched': match is not None, 'recalculated': False}
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=30) as conn:
         row = conn.execute(
             'SELECT asin, title, monthly_sold, sales_rank, jp_cost_jpy, unit_profit_usd, margin_pct, '
             'priority_tier, excluded_kind, data_json FROM agent_candidates WHERE id = ?',
@@ -1809,7 +1813,7 @@ def add_manual_supplier(
     }
     new_cost = normalize_jp_cost_for_tax(float(price_jpy), None)
     result = {'matched': False, 'recalculated': False, 'rows_updated': 0}
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=30) as conn:
         rows = conn.execute(
             'SELECT id, title, monthly_sold, sales_rank, jp_cost_jpy, priority_tier, excluded_kind, data_json, created_at '
             'FROM agent_candidates WHERE asin = ? ORDER BY created_at DESC',

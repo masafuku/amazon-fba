@@ -11,6 +11,7 @@ import {
 } from 'recharts';
 import { fetchCandidateHistory, fetchSellerCount, fetchStock, loadAgentCandidateDetail, loadCandidateHistory, lookupAsin, saveFavorite } from './db';
 import { formatDateTime } from './formatters';
+import { mergeSuppliers, supplierSourceLabel } from './supplierSources';
 
 const EXCHANGE_RATE = 150;
 
@@ -316,6 +317,11 @@ export default function CandidateDetailPage({ asin, onBack }) {
     const tierStyle = TIER_STYLES[tier] || TIER_STYLES.reject;
     const grossProfitUsd = candidate.usPriceUsd != null && data.jp_cost_usd != null ? candidate.usPriceUsd - data.jp_cost_usd : null;
     const grossMarginPct = grossProfitUsd != null && candidate.usPriceUsd ? grossProfitUsd / candidate.usPriceUsd : null;
+    // CEO: 「仕入れ先の情報は、ダッシュボードページは簡潔に...個別ページに詳しく表記して
+    // ください」(2026-09-28) - 一覧ページ(AgentPage)と同じ並び(mergeSuppliers)だが、
+    // こちらは省略せずプラットフォームのフル名・出展企業名・URL・最小ロット・照会日時を
+    // 全部表示する。
+    const allSuppliers = mergeSuppliers(data);
 
     return (
         <main className="space-y-6">
@@ -351,22 +357,12 @@ export default function CandidateDetailPage({ asin, onBack }) {
                         {candidate.sellerName || candidate.sellerId ? (
                             <> &middot; セラー: {candidate.sellerName || candidate.sellerId}</>
                         ) : null}
-                        {data.netsea_shop_name ? (
+                        {allSuppliers.length > 0 ? (
                             <>
                                 {' '}
-                                &middot; 仕入れ先:{' '}
-                                {data.netsea_product_url ? (
-                                    <a
-                                        href={data.netsea_product_url}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                        className="text-cyan-300 underline decoration-cyan-700 underline-offset-2 hover:text-cyan-200"
-                                    >
-                                        {data.netsea_shop_name}
-                                    </a>
-                                ) : (
-                                    data.netsea_shop_name
-                                )}
+                                &middot; 仕入れ先: {supplierSourceLabel(allSuppliers[0].source, 'abbr')} ¥
+                                {Number(allSuppliers[0].priceJpy).toFixed(0)}
+                                {allSuppliers.length > 1 ? `他${allSuppliers.length - 1}社` : ''}(下記「仕入れ先一覧」参照)
                             </>
                         ) : null}
                     </p>
@@ -436,6 +432,57 @@ export default function CandidateDetailPage({ asin, onBack }) {
                     <p className="text-xs text-slate-500">* 手数料データなし、仮値で計算</p>
                 ) : null}
             </section>
+
+            {allSuppliers.length > 0 ? (
+                <section className="space-y-4 rounded-3xl border border-slate-800 bg-slate-900/80 p-6 shadow-xl shadow-slate-950/10">
+                    <h2 className="text-lg font-semibold text-white">仕入れ先一覧</h2>
+                    <p className="text-xs text-slate-500">
+                        NETSEAは自動照会(scripts/check_candidate_wholesale.py)、それ以外はClaudeが手動で記録(scripts/add_manual_supplier.py)。安い順。
+                    </p>
+                    <div className="overflow-x-auto">
+                        <table className="min-w-full border-collapse text-left text-sm">
+                            <thead>
+                                <tr className="border-b border-slate-800 text-xs uppercase tracking-wide text-slate-500">
+                                    <th className="px-3 py-2">プラットフォーム</th>
+                                    <th className="px-3 py-2">出展企業・ショップ</th>
+                                    <th className="px-3 py-2">卸価格</th>
+                                    <th className="px-3 py-2">最小ロット</th>
+                                    <th className="px-3 py-2">確認日時</th>
+                                    <th className="px-3 py-2">メモ</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {allSuppliers.map((supplier, index) => (
+                                    <tr
+                                        key={`${supplier.source}-${supplier.shopName}`}
+                                        className={`border-b border-slate-800/60 ${index === 0 ? 'text-emerald-300' : 'text-slate-300'}`}
+                                    >
+                                        <td className="px-3 py-2 font-semibold">{supplierSourceLabel(supplier.source, 'full')}</td>
+                                        <td className="px-3 py-2">
+                                            {supplier.url ? (
+                                                <a
+                                                    href={supplier.url}
+                                                    target="_blank"
+                                                    rel="noreferrer"
+                                                    className="underline decoration-cyan-700 underline-offset-2 hover:text-cyan-200"
+                                                >
+                                                    {supplier.shopName}
+                                                </a>
+                                            ) : (
+                                                supplier.shopName
+                                            )}
+                                        </td>
+                                        <td className="px-3 py-2 font-semibold">¥{Number(supplier.priceJpy).toFixed(0)}</td>
+                                        <td className="px-3 py-2">{supplier.minQty ? `${supplier.minQty}個〜` : '-'}</td>
+                                        <td className="px-3 py-2 text-xs text-slate-500">{formatDateTime(supplier.checkedAt) || '-'}</td>
+                                        <td className="px-3 py-2 text-xs text-slate-500">{supplier.note || '-'}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+            ) : null}
 
             <section className="space-y-4 rounded-3xl border border-slate-800 bg-slate-900/80 p-6 shadow-xl shadow-slate-950/10">
                 <h2 className="text-lg font-semibold text-white">その他情報</h2>
