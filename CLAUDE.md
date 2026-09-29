@@ -147,7 +147,8 @@ processes) via systemd: `fba-dashboard.service` (`sqlite_api_server.py`, also se
 `keepa-csv-dashboard/dist/` directly when present, so no separate Node/nginx process is needed
 for the SPA itself — nginx in front is just for Basic Auth) and `fba-scan-loop.service`
 (`scripts/run_all_day.sh`, loops `daily_scan.py` paced to the Keepa refill rate). `send_daily_digest.py`
-runs from cron, not systemd. The scan loop's "stop" is soft by design: a flag file
+and `sp_api_sync.py` (Orders/OrderItems/Finances/FBA Inventory sync for the `#finance` dashboard
+page, every 3h) run from cron, not systemd. The scan loop's "stop" is soft by design: a flag file
 (`.scan_loop_stop_requested`, checked between cycles) prevents the *next* cycle rather than
 killing an in-flight one, so tokens already spent aren't wasted — the dashboard's stop/resume
 buttons and `control_scan_loop()` in `sqlite_api_server.py` implement this, not `systemctl stop`.
