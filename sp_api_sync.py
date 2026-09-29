@@ -107,8 +107,8 @@ def run_once(lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> None:
     state = of.get_sp_sync_state()
     since_iso = state["ordersSyncedAt"] or (
         datetime.now(timezone.utc) - timedelta(days=lookback_days)
-    ).isoformat()
-    now_iso = datetime.now(timezone.utc).isoformat()
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     logger.info(f"Orders同期開始(LastUpdatedAfter={since_iso})")
     order_ids = sync_orders(since_iso)

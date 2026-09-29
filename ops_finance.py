@@ -2675,7 +2675,7 @@ def replace_sp_fba_inventory(items: list) -> int:
         conn.execute('DELETE FROM sp_fba_inventory')
         conn.executemany(
             '''
-            INSERT INTO sp_fba_inventory (asin, sku, fnsku, fulfillable_quantity, snapshot_at)
+            INSERT OR REPLACE INTO sp_fba_inventory (asin, sku, fnsku, fulfillable_quantity, snapshot_at)
             VALUES (:asin, :sku, :fnsku, :fulfillableQuantity, :snapshotAt)
             ''',
             [{**i, 'snapshotAt': now} for i in items],
