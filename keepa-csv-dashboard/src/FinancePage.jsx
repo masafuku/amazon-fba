@@ -9,7 +9,7 @@ import {
     XAxis,
     YAxis,
 } from 'recharts';
-import { loadFinanceInventory, loadFinanceOrders, loadFinanceSummary } from './db';
+import { loadFinanceInventory, loadFinanceOrders, loadFinanceProductPnl, loadFinanceSummary } from './db';
 import { formatDateTime } from './formatters';
 
 const PERIOD_OPTIONS = [
@@ -28,6 +28,7 @@ export default function FinancePage() {
     const [summary, setSummary] = useState(null);
     const [orders, setOrders] = useState([]);
     const [inventory, setInventory] = useState([]);
+    const [products, setProducts] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
 
@@ -35,14 +36,16 @@ export default function FinancePage() {
         setLoading(true);
         setError('');
         try {
-            const [summaryData, ordersData, inventoryData] = await Promise.all([
+            const [summaryData, ordersData, inventoryData, productsData] = await Promise.all([
                 loadFinanceSummary(days),
                 loadFinanceOrders(days),
                 loadFinanceInventory(),
+                loadFinanceProductPnl(days),
             ]);
             setSummary(summaryData);
             setOrders(ordersData);
             setInventory(inventoryData);
+            setProducts(productsData);
         } catch (loadError) {
             setError(loadError?.message || '収支データの読み込みに失敗しました。');
         } finally {
@@ -65,20 +68,6 @@ export default function FinancePage() {
             { name: '純利益', value: summary.netProfitUsd },
         ];
     }, [summary]);
-
-    // ASIN別の簡易内訳(この段階ではCOGSはjp_purchase_recordsのASIN紐付け待ちのため
-    // 表示しない - 売上・数量のみ。詳細な損益内訳は今後の拡張余地)。
-    const bySku = useMemo(() => {
-        const map = new Map();
-        for (const order of orders) {
-            const key = order.asin || order.sku || '(不明)';
-            const current = map.get(key) || { asin: key, quantity: 0, revenueUsd: 0 };
-            current.quantity += order.quantity || 0;
-            current.revenueUsd += (order.itemPriceUsd || 0) * (order.quantity || 0);
-            map.set(key, current);
-        }
-        return [...map.values()].sort((a, b) => b.revenueUsd - a.revenueUsd);
-    }, [orders]);
 
     const coveragePct = summary?.fixedCostCoveragePct;
     const isNoDataYet = summary && summary.orderCount === 0 && inventory.length === 0;
@@ -247,8 +236,8 @@ export default function FinancePage() {
             </div>
 
             <div className="rounded-xl bg-slate-900 p-4">
-                <h2 className="mb-3 text-sm font-semibold text-slate-300">ASIN別売上(期間内)</h2>
-                {bySku.length === 0 ? (
+                <h2 className="mb-3 text-sm font-semibold text-slate-300">商品別P&L(期間内)</h2>
+                {products.length === 0 ? (
                     <p className="text-sm text-slate-500">注文データがありません。</p>
                 ) : (
                     <div className="overflow-x-auto">
@@ -258,14 +247,26 @@ export default function FinancePage() {
                                     <th className="px-2 py-2">ASIN</th>
                                     <th className="px-2 py-2">数量</th>
                                     <th className="px-2 py-2">売上</th>
+                                    <th className="px-2 py-2">手数料</th>
+                                    <th className="px-2 py-2">原価</th>
+                                    <th className="px-2 py-2">純利益</th>
+                                    <th className="px-2 py-2">利益率</th>
                                 </tr>
                             </thead>
                             <tbody>
-                                {bySku.map((row) => (
+                                {products.map((row) => (
                                     <tr key={row.asin} className="border-t border-slate-800">
                                         <td className="px-2 py-2 font-mono text-xs">{row.asin}</td>
-                                        <td className="px-2 py-2">{row.quantity}</td>
+                                        <td className="px-2 py-2">{row.units}</td>
                                         <td className="px-2 py-2">{usd(row.revenueUsd)}</td>
+                                        <td className="px-2 py-2">{usd(row.feesUsd)}</td>
+                                        <td className="px-2 py-2">{usd(row.cogsUsd)}</td>
+                                        <td className={`px-2 py-2 font-semibold ${row.netProfitUsd >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                            {usd(row.netProfitUsd)}
+                                        </td>
+                                        <td className="px-2 py-2">
+                                            {row.marginPct === null || row.marginPct === undefined ? '-' : `${row.marginPct}%`}
+                                        </td>
                                     </tr>
                                 ))}
                             </tbody>

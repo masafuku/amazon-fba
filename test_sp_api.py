@@ -191,9 +191,70 @@ class TestAllocateOrderShipping(unittest.TestCase):
             "orderId": "O1", "purchaseDate": "2026-09-01", "asin": "B0TEST", "sku": "SKU1",
             "quantity": 2, "itemPriceUsd": 10.0, "orderStatus": "Shipped",
         }])
+        of.upsert_sp_order_items("O1", [{
+            "asin": "B0TEST", "sku": "SKU1", "quantity": 2, "itemPriceUsd": 10.0,
+        }])
         summary = of.compute_finance_summary(days=30, usd_to_jpy=150.0)
         # 着地原価/個 = ¥200(商品単価) + ¥50(送料按分) = ¥250 -> $250/150 * 2個 = $3.33...
         self.assertAlmostEqual(summary["cogsUsd"], (250 / 150.0) * 2, places=2)
+
+
+class TestPerProductPnl(unittest.TestCase):
+    """Phase 2/3: sp_order_items経由の商品ごとのP&L(get_per_product_pnl)。
+    1注文に複数ASINが含まれる場合の手数料の数量按分も検証する。"""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._original_db_path = of.DB_PATH
+        of.DB_PATH = Path(self._tmpdir.name) / "test.sqlite3"
+        of.init_ops_tables()
+
+    def tearDown(self):
+        of.DB_PATH = self._original_db_path
+        self._tmpdir.cleanup()
+
+    def test_single_asin_order_pnl(self):
+        of.upsert_jp_purchase_record({
+            "orderDate": "2026-08-26", "sdReceptionNo": "R1", "supplierName": "丸進",
+            "sdProductNo": None, "productName": "定規", "janCode": "JAN1", "variant": None,
+            "unitPriceJpy": 195, "quantity": 30, "amountJpy": 5850,
+        })
+        of.set_asin_jan_map("B0RULER", "JAN1")
+        of.upsert_sp_orders([{
+            "orderId": "O1", "purchaseDate": "2026-09-01", "asin": None, "sku": None,
+            "quantity": None, "itemPriceUsd": None, "orderStatus": "Shipped",
+        }])
+        of.upsert_sp_order_items("O1", [{
+            "asin": "B0RULER", "sku": "SKU1", "quantity": 2, "itemPriceUsd": 7.49,
+        }])
+        of.upsert_sp_financial_events("O1", [
+            {"eventType": "Commission", "amountUsd": -2.0, "postedDate": "2026-09-01"},
+        ])
+        result = of.get_per_product_pnl(days=30, usd_to_jpy=150.0)
+        self.assertEqual(len(result), 1)
+        row = result[0]
+        self.assertEqual(row["asin"], "B0RULER")
+        self.assertEqual(row["units"], 2)
+        self.assertAlmostEqual(row["revenueUsd"], 14.98)
+        self.assertAlmostEqual(row["feesUsd"], -2.0)
+        self.assertAlmostEqual(row["cogsUsd"], (195 / 150.0) * 2, places=2)
+
+    def test_multi_asin_order_splits_fees_by_quantity(self):
+        of.upsert_sp_orders([{
+            "orderId": "O2", "purchaseDate": "2026-09-01", "asin": None, "sku": None,
+            "quantity": None, "itemPriceUsd": None, "orderStatus": "Shipped",
+        }])
+        of.upsert_sp_order_items("O2", [
+            {"asin": "B0A", "sku": "SKU-A", "quantity": 1, "itemPriceUsd": 10.0},
+            {"asin": "B0B", "sku": "SKU-B", "quantity": 3, "itemPriceUsd": 5.0},
+        ])
+        of.upsert_sp_financial_events("O2", [
+            {"eventType": "Commission", "amountUsd": -4.0, "postedDate": "2026-09-01"},
+        ])
+        result = {row["asin"]: row for row in of.get_per_product_pnl(days=30)}
+        # 手数料-4.0ドルが数量比(1:3)で按分される -> B0A=-1.0, B0B=-3.0
+        self.assertAlmostEqual(result["B0A"]["feesUsd"], -1.0)
+        self.assertAlmostEqual(result["B0B"]["feesUsd"], -3.0)
 
 
 if __name__ == "__main__":

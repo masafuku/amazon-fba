@@ -382,3 +382,10 @@ export const loadFinanceOrders = async (days = 30) => {
     const json = await response.json();
     return json.orders ?? [];
 };
+
+export const loadFinanceProductPnl = async (days = 30) => {
+    const response = await fetch(`${API_BASE}/api/finance/products?days=${days}`);
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    const json = await response.json();
+    return json.products ?? [];
+};

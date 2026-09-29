@@ -1281,6 +1281,20 @@ def init_db() -> None:
 
         conn.execute(
             '''
+            CREATE TABLE IF NOT EXISTS sp_order_items (
+                order_id TEXT NOT NULL,
+                asin TEXT,
+                sku TEXT,
+                quantity INTEGER,
+                item_price_usd REAL,
+                PRIMARY KEY (order_id, asin)
+            )
+            '''
+        )
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_sp_order_items_asin ON sp_order_items(asin)')
+
+        conn.execute(
+            '''
             CREATE TABLE IF NOT EXISTS sp_financial_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 order_id TEXT NOT NULL,
@@ -1467,8 +1481,17 @@ def load_finance_summary(days: int = 30, usd_to_jpy: float = 150.0):
     since = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
+        order_count = conn.execute(
+            'SELECT COUNT(*) AS c FROM sp_orders WHERE purchase_date >= ?', (since,),
+        ).fetchone()['c']
+        # 売上/COGSはsp_order_items(商品明細)ベース。ops_finance.pyのcompute_finance_summary()と同一ロジック。
         orders = conn.execute(
-            'SELECT order_id, asin, quantity, item_price_usd FROM sp_orders WHERE purchase_date >= ?',
+            '''
+            SELECT oi.asin AS asin, oi.quantity AS quantity, oi.item_price_usd AS item_price_usd
+            FROM sp_order_items oi
+            JOIN sp_orders o ON o.order_id = oi.order_id
+            WHERE o.purchase_date >= ?
+            ''',
             (since,),
         ).fetchall()
         fees_by_order = {}
@@ -1519,7 +1542,7 @@ def load_finance_summary(days: int = 30, usd_to_jpy: float = 150.0):
 
     return {
         'periodDays': days,
-        'orderCount': len(orders),
+        'orderCount': order_count,
         'revenueUsd': round(revenue_usd, 2),
         'cogsUsd': round(cogs_usd, 2),
         'feesUsd': round(fees_usd, 2),
@@ -1582,6 +1605,78 @@ def load_sp_orders(days: int = 30, limit: int = 100):
         }
         for order_id, purchase_date, asin, sku, quantity, item_price_usd, order_status in rows
     ]
+
+
+def load_finance_products(days: int = 30, usd_to_jpy: float = 150.0):
+    """商品(ASIN)ごとのP&L。ops_finance.pyのget_per_product_pnl()と同一ロジック
+    (二つのPythonエントリポイントはお互いをimportしないという既存方針のため、
+    ここにも複製する)。"""
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        items = conn.execute(
+            '''
+            SELECT oi.order_id AS order_id, oi.asin AS asin, oi.quantity AS quantity,
+                   oi.item_price_usd AS item_price_usd
+            FROM sp_order_items oi
+            JOIN sp_orders o ON o.order_id = oi.order_id
+            WHERE o.purchase_date >= ? AND oi.asin IS NOT NULL
+            ''',
+            (since,),
+        ).fetchall()
+        fees_by_order = {}
+        for row in conn.execute(
+            '''
+            SELECT order_id, SUM(amount_usd) AS total
+            FROM sp_financial_events
+            WHERE order_id IN (SELECT order_id FROM sp_orders WHERE purchase_date >= ?)
+            GROUP BY order_id
+            ''',
+            (since,),
+        ):
+            fees_by_order[row['order_id']] = row['total'] or 0.0
+        cost_by_asin = {}
+        for row in conn.execute(
+            '''
+            SELECT asin, unit_price_jpy, quantity, COALESCE(shipping_cost_jpy, 0) AS shipping_cost_jpy
+            FROM jp_purchase_records WHERE asin IS NOT NULL ORDER BY order_date ASC
+            '''
+        ):
+            shipping_per_unit = (row['shipping_cost_jpy'] / row['quantity']) if row['quantity'] else 0
+            cost_by_asin[row['asin']] = (row['unit_price_jpy'] or 0) + shipping_per_unit
+
+    qty_by_order = {}
+    for it in items:
+        qty_by_order[it['order_id']] = qty_by_order.get(it['order_id'], 0) + (it['quantity'] or 0)
+
+    by_asin = {}
+    for it in items:
+        asin = it['asin']
+        qty = it['quantity'] or 0
+        order_total_qty = qty_by_order.get(it['order_id']) or 0
+        order_fee = fees_by_order.get(it['order_id'], 0.0)
+        allocated_fee = (order_fee * qty / order_total_qty) if order_total_qty else 0.0
+        entry = by_asin.setdefault(asin, {'units': 0, 'revenueUsd': 0.0, 'feesUsd': 0.0})
+        entry['units'] += qty
+        entry['revenueUsd'] += (it['item_price_usd'] or 0) * qty
+        entry['feesUsd'] += allocated_fee
+
+    result = []
+    for asin, entry in by_asin.items():
+        cogs_jpy_per_unit = cost_by_asin.get(asin, 0) or 0
+        cogs_usd = (cogs_jpy_per_unit / usd_to_jpy) * entry['units']
+        net_profit_usd = entry['revenueUsd'] - entry['feesUsd'] - cogs_usd
+        result.append({
+            'asin': asin,
+            'units': entry['units'],
+            'revenueUsd': round(entry['revenueUsd'], 2),
+            'feesUsd': round(entry['feesUsd'], 2),
+            'cogsUsd': round(cogs_usd, 2),
+            'netProfitUsd': round(net_profit_usd, 2),
+            'marginPct': round(100.0 * net_profit_usd / entry['revenueUsd'], 1) if entry['revenueUsd'] else None,
+        })
+    result.sort(key=lambda r: r['revenueUsd'], reverse=True)
+    return result
 
 
 # 出品制限(ゲーティング)で、Amazon.comに新規出品できないと確認したブランド。定義元は
@@ -2377,6 +2472,14 @@ class Handler(BaseHTTPRequestHandler):
             days = to_int_or_default((params.get('days') or [None])[0], 30)
             try:
                 self._send_json(200, {'ok': True, 'orders': load_sp_orders(days=days)})
+            except Exception as exc:
+                self._send_json(500, {'error': str(exc)})
+            return
+
+        if parsed.path == '/api/finance/products':
+            days = to_int_or_default((params.get('days') or [None])[0], 30)
+            try:
+                self._send_json(200, {'ok': True, 'products': load_finance_products(days=days)})
             except Exception as exc:
                 self._send_json(500, {'error': str(exc)})
             return

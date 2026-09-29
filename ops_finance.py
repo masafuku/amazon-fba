@@ -217,6 +217,19 @@ def init_ops_tables():
             CREATE INDEX IF NOT EXISTS idx_sp_orders_asin ON sp_orders(asin);
             CREATE INDEX IF NOT EXISTS idx_sp_orders_purchase_date ON sp_orders(purchase_date);
 
+            -- Orders API (getOrderItems) の商品明細。getOrders自体にはASINが
+            -- 含まれないため別テーブル(1注文=複数商品のこともあるため、sp_ordersに
+            -- 直接持たせず1:多で持つ)。商品ごとのP&Lはこちらをsp_ordersとJOINして出す。
+            CREATE TABLE IF NOT EXISTS sp_order_items (
+                order_id TEXT NOT NULL,
+                asin TEXT,
+                sku TEXT,
+                quantity INTEGER,
+                item_price_usd REAL,
+                PRIMARY KEY (order_id, asin)
+            );
+            CREATE INDEX IF NOT EXISTS idx_sp_order_items_asin ON sp_order_items(asin);
+
             -- Finances API (listFinancialEventsByOrderId) の取得結果。
             -- referral_fee_percent/fba_pickpack_feeという「推定値」ではなく、
             -- Amazonが実際に請求した金額をここに実績値として持つ。
@@ -2655,6 +2668,22 @@ def upsert_sp_orders(orders: list) -> int:
     return len(orders)
 
 
+def upsert_sp_order_items(order_id: str, items: list) -> int:
+    """items: [{asin, sku, quantity, itemPriceUsd}, ...]。既存の同order_id分は洗い替え
+    (getOrderItemsを再取得するたびに最新の明細で置き換える)。"""
+    init_ops_tables()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute('DELETE FROM sp_order_items WHERE order_id = ?', (order_id,))
+        conn.executemany(
+            '''
+            INSERT INTO sp_order_items (order_id, asin, sku, quantity, item_price_usd)
+            VALUES (:orderId, :asin, :sku, :quantity, :itemPriceUsd)
+            ''',
+            [{**i, 'orderId': order_id} for i in items],
+        )
+    return len(items)
+
+
 def upsert_sp_financial_events(order_id: str, events: list) -> int:
     """events: [{eventType, amountUsd, postedDate}, ...]. 既存の同order_id分は洗い替え。"""
     init_ops_tables()
@@ -2815,8 +2844,20 @@ def compute_finance_summary(days: int = 30, usd_to_jpy: float = 150.0) -> dict:
     since = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
+        order_count = conn.execute(
+            'SELECT COUNT(*) AS c FROM sp_orders WHERE purchase_date >= ?', (since,),
+        ).fetchone()['c']
+        # 売上/COGSはsp_order_items(商品明細)ベース。getOrderItemsをまだ同期していない
+        # 注文(order_itemsが無い)は、商品ごとの内訳が無いだけで合計からは除外される
+        # (2026-09-30以前の挙動もitem_price_usd/quantityが常にNULLだったため実質0円計上
+        # だった。同期が進めば自然に解消する)。
         orders = conn.execute(
-            'SELECT order_id, asin, quantity, item_price_usd FROM sp_orders WHERE purchase_date >= ?',
+            '''
+            SELECT oi.asin AS asin, oi.quantity AS quantity, oi.item_price_usd AS item_price_usd
+            FROM sp_order_items oi
+            JOIN sp_orders o ON o.order_id = oi.order_id
+            WHERE o.purchase_date >= ?
+            ''',
             (since,),
         ).fetchall()
         fees_by_order = {}
@@ -2869,7 +2910,7 @@ def compute_finance_summary(days: int = 30, usd_to_jpy: float = 150.0) -> dict:
 
     return {
         'periodDays': days,
-        'orderCount': len(orders),
+        'orderCount': order_count,
         'revenueUsd': round(revenue_usd, 2),
         'cogsUsd': round(cogs_usd, 2),
         'feesUsd': round(fees_usd, 2),
@@ -2879,6 +2920,82 @@ def compute_finance_summary(days: int = 30, usd_to_jpy: float = 150.0) -> dict:
         'fixedCostCoveragePct': round(100.0 * (revenue_usd - fees_usd - cogs_usd) / fixed_cost_period_usd, 1)
         if fixed_cost_period_usd > 0 else None,
     }
+
+
+def get_per_product_pnl(days: int = 30, usd_to_jpy: float = 150.0) -> list:
+    """商品(ASIN)ごとのP&L。sp_order_items(数量・売上)、sp_financial_events(手数料、
+    order_id経由でASINへ配賦)、jp_purchase_records(原価)をASIN単位に集計して返す。
+    1注文に複数ASINが含まれる場合、その注文の手数料合計を数量按分でASINごとに配る
+    (Finances APIの各手数料明細は商品単位だが、getOrderItemsとの突合は行っていない
+    MVP実装のため、まずは按分で近似する)。"""
+    init_ops_tables()
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        items = conn.execute(
+            '''
+            SELECT oi.order_id AS order_id, oi.asin AS asin, oi.quantity AS quantity,
+                   oi.item_price_usd AS item_price_usd
+            FROM sp_order_items oi
+            JOIN sp_orders o ON o.order_id = oi.order_id
+            WHERE o.purchase_date >= ? AND oi.asin IS NOT NULL
+            ''',
+            (since,),
+        ).fetchall()
+        fees_by_order = {}
+        for row in conn.execute(
+            '''
+            SELECT order_id, SUM(amount_usd) AS total
+            FROM sp_financial_events
+            WHERE order_id IN (SELECT order_id FROM sp_orders WHERE purchase_date >= ?)
+            GROUP BY order_id
+            ''',
+            (since,),
+        ):
+            fees_by_order[row['order_id']] = row['total'] or 0.0
+        cost_by_asin = {}
+        for row in conn.execute(
+            '''
+            SELECT asin, unit_price_jpy, quantity, COALESCE(shipping_cost_jpy, 0) AS shipping_cost_jpy
+            FROM jp_purchase_records WHERE asin IS NOT NULL ORDER BY order_date ASC
+            '''
+        ):
+            shipping_per_unit = (row['shipping_cost_jpy'] / row['quantity']) if row['quantity'] else 0
+            cost_by_asin[row['asin']] = (row['unit_price_jpy'] or 0) + shipping_per_unit
+
+    # 注文ごとの数量合計(手数料の按分に使う)
+    qty_by_order: dict = {}
+    for it in items:
+        qty_by_order[it['order_id']] = qty_by_order.get(it['order_id'], 0) + (it['quantity'] or 0)
+
+    by_asin: dict = {}
+    for it in items:
+        asin = it['asin']
+        qty = it['quantity'] or 0
+        order_total_qty = qty_by_order.get(it['order_id']) or 0
+        order_fee = fees_by_order.get(it['order_id'], 0.0)
+        allocated_fee = (order_fee * qty / order_total_qty) if order_total_qty else 0.0
+        entry = by_asin.setdefault(asin, {'units': 0, 'revenueUsd': 0.0, 'feesUsd': 0.0})
+        entry['units'] += qty
+        entry['revenueUsd'] += (it['item_price_usd'] or 0) * qty
+        entry['feesUsd'] += allocated_fee
+
+    result = []
+    for asin, entry in by_asin.items():
+        cogs_jpy_per_unit = cost_by_asin.get(asin, 0) or 0
+        cogs_usd = (cogs_jpy_per_unit / usd_to_jpy) * entry['units']
+        net_profit_usd = entry['revenueUsd'] - entry['feesUsd'] - cogs_usd
+        result.append({
+            'asin': asin,
+            'units': entry['units'],
+            'revenueUsd': round(entry['revenueUsd'], 2),
+            'feesUsd': round(entry['feesUsd'], 2),
+            'cogsUsd': round(cogs_usd, 2),
+            'netProfitUsd': round(net_profit_usd, 2),
+            'marginPct': round(100.0 * net_profit_usd / entry['revenueUsd'], 1) if entry['revenueUsd'] else None,
+        })
+    result.sort(key=lambda r: r['revenueUsd'], reverse=True)
+    return result
 
 
 def get_sp_fba_inventory_with_days_of_stock(days_for_velocity: int = 30) -> list:

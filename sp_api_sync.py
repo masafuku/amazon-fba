@@ -5,9 +5,11 @@ send_daily_digest.pyと同じ設計)。cron等で定期実行する想定(例: 3
 処理の流れ:
   1. sp_sync_state から前回同期時刻(なければ7日前)を読む
   2. Orders API: LastUpdatedAfter以降の注文を取得 -> sp_orders にupsert
-  3. Finances API: 直近取得した注文ごとに実手数料を取得 -> sp_financial_events にupsert
-  4. FBA Inventory API: 現在の在庫スナップショットを取得 -> sp_fba_inventory を洗い替え
-  5. sp_sync_state を更新
+  3. Orders API (getOrderItems): 直近取得した注文ごとに商品明細(ASIN/数量/単価)を
+     取得 -> sp_order_items にupsert(商品ごとのP&Lに必要)
+  4. Finances API: 直近取得した注文ごとに実手数料を取得 -> sp_financial_events にupsert
+  5. FBA Inventory API: 現在の在庫スナップショットを取得 -> sp_fba_inventory を洗い替え
+  6. sp_sync_state を更新
 
 認証情報(LWA_CLIENT_ID/LWA_CLIENT_SECRET/SP_API_REFRESH_TOKEN)が未設定の場合は
 何もせずログだけ出して正常終了する(daily_scan.py側の自動巡回やダッシュボードの
@@ -19,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 
 import ops_finance as of
@@ -58,6 +61,34 @@ def sync_orders(since_iso: str) -> list:
     if collected:
         of.upsert_sp_orders(collected)
     return [o["orderId"] for o in collected]
+
+
+def sync_order_items(order_ids: list) -> None:
+    """注文ごとにgetOrderItemsを呼び、sp_order_itemsにupsertする(商品ごとのP&Lに必要)。
+    呼び出し量がgetOrders呼び出しの上に注文数だけ増えるため、SP-APIの操作ごとの
+    レート制限(429)を避ける軽いディレイを挟む(フルのトークンバケット制御は
+    過剰と判断、429が頻発するようなら見直す)。"""
+    for order_id in order_ids:
+        payload = sp_client.get_order_items(order_id)
+        order_items = payload.get("payload", {}).get("OrderItems", [])
+        items = []
+        for oi in order_items:
+            qty = oi.get("QuantityOrdered")
+            item_price = oi.get("ItemPrice", {}).get("Amount")
+            # ItemPriceはその明細行の合計額(単価×数量)なので、単価に換算して保存
+            # (compute_finance_summary側はitem_price_usd×quantityで売上を出すため)。
+            unit_price_usd = None
+            if item_price is not None and qty:
+                unit_price_usd = float(item_price) / qty
+            items.append({
+                "asin": oi.get("ASIN"),
+                "sku": oi.get("SellerSKU"),
+                "quantity": qty,
+                "itemPriceUsd": unit_price_usd,
+            })
+        if items:
+            of.upsert_sp_order_items(order_id, items)
+        time.sleep(0.5)
 
 
 def sync_finances(order_ids: list) -> None:
@@ -116,6 +147,10 @@ def run_once(lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> None:
     of.set_sp_sync_state(orders_synced_at=now_iso)
 
     if order_ids:
+        logger.info("OrderItems同期開始")
+        sync_order_items(order_ids)
+        logger.info("OrderItems同期完了")
+
         logger.info("Finances同期開始")
         sync_finances(order_ids)
         of.set_sp_sync_state(finances_synced_at=now_iso)

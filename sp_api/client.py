@@ -147,6 +147,13 @@ def get_orders(
     return _request("/orders/v0/orders", params)
 
 
+def get_order_items(order_id: str, next_token: Optional[str] = None) -> Dict[str, Any]:
+    """Orders API: getOrderItems - 注文内の商品明細(ASIN/SKU/数量/単価)。
+    getOrdersの返り値自体にはASINが含まれないため、商品ごとのP&Lにはこちらが必要。"""
+    params = {"NextToken": next_token} if next_token else None
+    return _request(f"/orders/v0/orders/{order_id}/orderItems", params)
+
+
 def list_financial_events_by_order(order_id: str) -> Dict[str, Any]:
     """Finances API: listFinancialEventsByOrderId - actual referral/FBA/storage fees."""
     return _request(f"/finances/v0/orders/{order_id}/financialEvents")
