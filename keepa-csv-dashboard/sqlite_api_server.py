@@ -1320,11 +1320,42 @@ def init_db() -> None:
 
         conn.execute(
             '''
+            CREATE TABLE IF NOT EXISTS sp_inbound_shipments (
+                shipment_id TEXT PRIMARY KEY,
+                plan_id TEXT,
+                shipment_confirmation_id TEXT,
+                status TEXT,
+                destination_fc TEXT,
+                delivery_window_start TEXT,
+                delivery_window_end TEXT,
+                created_at TEXT,
+                synced_at TEXT
+            )
+            '''
+        )
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_sp_inbound_shipments_confirmation_id ON sp_inbound_shipments(shipment_confirmation_id)')
+
+        conn.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS sp_inbound_shipment_items (
+                shipment_id TEXT NOT NULL,
+                asin TEXT,
+                sku TEXT,
+                quantity INTEGER,
+                PRIMARY KEY (shipment_id, asin)
+            )
+            '''
+        )
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_sp_inbound_shipment_items_asin ON sp_inbound_shipment_items(asin)')
+
+        conn.execute(
+            '''
             CREATE TABLE IF NOT EXISTS sp_sync_state (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 orders_synced_at TEXT,
                 finances_synced_at TEXT,
-                inventory_synced_at TEXT
+                inventory_synced_at TEXT,
+                inbound_synced_at TEXT
             )
             '''
         )
@@ -1365,6 +1396,10 @@ def init_db() -> None:
         jp_purchase_records_columns = {row[1] for row in conn.execute('PRAGMA table_info(jp_purchase_records)').fetchall()}
         if 'shipping_cost_jpy' not in jp_purchase_records_columns:
             conn.execute('ALTER TABLE jp_purchase_records ADD COLUMN shipping_cost_jpy REAL')
+
+        sp_sync_state_columns = {row[1] for row in conn.execute('PRAGMA table_info(sp_sync_state)').fetchall()}
+        if 'inbound_synced_at' not in sp_sync_state_columns:
+            conn.execute('ALTER TABLE sp_sync_state ADD COLUMN inbound_synced_at TEXT')
 
         conn.execute(
             '''
@@ -1676,6 +1711,123 @@ def load_finance_products(days: int = 30, usd_to_jpy: float = 150.0):
             'marginPct': round(100.0 * net_profit_usd / entry['revenueUsd'], 1) if entry['revenueUsd'] else None,
         })
     result.sort(key=lambda r: r['revenueUsd'], reverse=True)
+    return result
+
+
+def load_finance_shipments(usd_to_jpy: float = 150.0):
+    """FBA納品便(sp_inbound_shipments)ごとのP&L概算。ops_finance.pyのget_shipment_pnl()
+    と同一ロジック(二つのPythonエントリポイントはお互いをimportしないという既存方針
+    のため、ここにも複製する)。売上はFIFO近似(正確なロット追跡はできない)。"""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        shipment_rows = conn.execute(
+            '''
+            SELECT shipment_id, plan_id, shipment_confirmation_id, status, destination_fc,
+                   delivery_window_start, delivery_window_end, created_at
+            FROM sp_inbound_shipments ORDER BY created_at DESC
+            '''
+        ).fetchall()
+        if not shipment_rows:
+            return []
+        items_by_shipment = {}
+        for row in conn.execute('SELECT shipment_id, asin, sku, quantity FROM sp_inbound_shipment_items'):
+            items_by_shipment.setdefault(row['shipment_id'], []).append(
+                {'asin': row['asin'], 'sku': row['sku'], 'quantity': row['quantity']}
+            )
+        cost_by_asin_rows = conn.execute(
+            '''
+            SELECT asin, order_date, unit_price_jpy, quantity, COALESCE(shipping_cost_jpy, 0) AS shipping_cost_jpy
+            FROM jp_purchase_records WHERE asin IS NOT NULL ORDER BY order_date ASC
+            '''
+        ).fetchall()
+        sold_items = conn.execute(
+            '''
+            SELECT oi.asin AS asin, oi.quantity AS quantity, oi.item_price_usd AS item_price_usd,
+                   o.purchase_date AS purchase_date
+            FROM sp_order_items oi
+            JOIN sp_orders o ON o.order_id = oi.order_id
+            WHERE oi.asin IS NOT NULL
+            ORDER BY o.purchase_date ASC
+            '''
+        ).fetchall()
+
+    shipments = [
+        {
+            'shipmentId': r['shipment_id'],
+            'planId': r['plan_id'],
+            'shipmentConfirmationId': r['shipment_confirmation_id'],
+            'status': r['status'],
+            'destinationFc': r['destination_fc'],
+            'deliveryWindowStart': r['delivery_window_start'],
+            'deliveryWindowEnd': r['delivery_window_end'],
+            'createdAt': r['created_at'],
+            'items': items_by_shipment.get(r['shipment_id'], []),
+        }
+        for r in shipment_rows
+    ]
+
+    purchases_by_asin = {}
+    for row in cost_by_asin_rows:
+        shipping_per_unit = (row['shipping_cost_jpy'] / row['quantity']) if row['quantity'] else 0
+        landed = (row['unit_price_jpy'] or 0) + shipping_per_unit
+        purchases_by_asin.setdefault(row['asin'], []).append((row['order_date'] or '', landed))
+
+    def landed_cost_for(asin, as_of_date):
+        history = purchases_by_asin.get(asin)
+        if not history:
+            return 0.0
+        if not as_of_date:
+            return history[-1][1]
+        candidates = [cost for date, cost in history if date <= as_of_date]
+        return candidates[-1] if candidates else history[0][1]
+
+    sales_queue = {}
+    for row in sold_items:
+        sales_queue.setdefault(row['asin'], []).append(
+            {'qty': row['quantity'] or 0, 'unitRevenue': row['item_price_usd'] or 0}
+        )
+
+    shipments_sorted = sorted(shipments, key=lambda s: s['deliveryWindowStart'] or s['createdAt'] or '')
+
+    result = []
+    for shipment in shipments_sorted:
+        as_of = shipment['deliveryWindowStart'] or shipment['createdAt']
+        total_cost_usd = 0.0
+        total_revenue_usd = 0.0
+        total_units_shipped = 0
+        total_units_sold = 0
+        for item in shipment['items']:
+            asin = item['asin']
+            qty_shipped = item['quantity'] or 0
+            total_units_shipped += qty_shipped
+            total_cost_usd += (landed_cost_for(asin, as_of) / usd_to_jpy) * qty_shipped
+
+            remaining = qty_shipped
+            queue = sales_queue.get(asin, [])
+            while remaining > 0 and queue:
+                sale = queue[0]
+                take = min(remaining, sale['qty'])
+                total_revenue_usd += take * sale['unitRevenue']
+                total_units_sold += take
+                sale['qty'] -= take
+                remaining -= take
+                if sale['qty'] <= 0:
+                    queue.pop(0)
+
+        net_profit_usd = total_revenue_usd - total_cost_usd
+        result.append({
+            'shipmentId': shipment['shipmentId'],
+            'shipmentConfirmationId': shipment['shipmentConfirmationId'],
+            'status': shipment['status'],
+            'destinationFc': shipment['destinationFc'],
+            'deliveryWindowStart': shipment['deliveryWindowStart'],
+            'deliveryWindowEnd': shipment['deliveryWindowEnd'],
+            'unitsShipped': total_units_shipped,
+            'unitsSold': total_units_sold,
+            'costUsd': round(total_cost_usd, 2),
+            'revenueUsd': round(total_revenue_usd, 2),
+            'netProfitUsd': round(net_profit_usd, 2),
+        })
     return result
 
 
@@ -2480,6 +2632,13 @@ class Handler(BaseHTTPRequestHandler):
             days = to_int_or_default((params.get('days') or [None])[0], 30)
             try:
                 self._send_json(200, {'ok': True, 'products': load_finance_products(days=days)})
+            except Exception as exc:
+                self._send_json(500, {'error': str(exc)})
+            return
+
+        if parsed.path == '/api/finance/shipments':
+            try:
+                self._send_json(200, {'ok': True, 'shipments': load_finance_shipments()})
             except Exception as exc:
                 self._send_json(500, {'error': str(exc)})
             return

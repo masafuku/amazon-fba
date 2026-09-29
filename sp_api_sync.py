@@ -9,7 +9,10 @@ send_daily_digest.pyと同じ設計)。cron等で定期実行する想定(例: 3
      取得 -> sp_order_items にupsert(商品ごとのP&Lに必要)
   4. Finances API: 直近取得した注文ごとに実手数料を取得 -> sp_financial_events にupsert
   5. FBA Inventory API: 現在の在庫スナップショットを取得 -> sp_fba_inventory を洗い替え
-  6. sp_sync_state を更新
+  6. Fulfillment Inbound API(v2024-03-20): 納品プラン一覧・便ごとの詳細・商品明細を
+     取得 -> sp_inbound_shipments/sp_inbound_shipment_items にupsert(納品便ごとの
+     P&Lに必要)
+  7. sp_sync_state を更新
 
 認証情報(LWA_CLIENT_ID/LWA_CLIENT_SECRET/SP_API_REFRESH_TOKEN)が未設定の場合は
 何もせずログだけ出して正常終了する(daily_scan.py側の自動巡回やダッシュボードの
@@ -91,6 +94,49 @@ def sync_order_items(order_ids: list) -> None:
         time.sleep(0.5)
 
 
+def sync_inbound_shipments() -> None:
+    """Fulfillment Inbound API(v2024-03-20)。全納品プランを取得し、プランごとに
+    埋め込みのshipments一覧・商品明細(items)・便ごとの詳細(destination/納品期間/
+    FBA Shipment ID)を取得してsp_inbound_shipments/sp_inbound_shipment_itemsに
+    upsertする。v0系(Orders/Finances)とはレスポンス形式が異なりpayloadでラップ
+    されない点に注意。"""
+    plan_ids = []
+    next_token = None
+    while True:
+        payload = sp_client.get_inbound_plans(next_token=next_token)
+        plan_ids.extend(p["inboundPlanId"] for p in payload.get("inboundPlans", []))
+        next_token = payload.get("pagination", {}).get("nextToken")
+        if not next_token:
+            break
+
+    for plan_id in plan_ids:
+        plan = sp_client.get_inbound_plan(plan_id)
+        items_payload = sp_client.get_inbound_plan_items(plan_id)
+        items = [
+            {"asin": i.get("asin"), "sku": i.get("msku"), "quantity": i.get("quantity")}
+            for i in items_payload.get("items", [])
+        ]
+        for shipment_summary in plan.get("shipments", []) or []:
+            shipment_id = shipment_summary["shipmentId"]
+            detail = sp_client.get_inbound_shipment(plan_id, shipment_id)
+            window = detail.get("selectedDeliveryWindow", {}) or {}
+            destination = detail.get("destination", {}) or {}
+            of.upsert_sp_inbound_shipment(
+                {
+                    "shipmentId": shipment_id,
+                    "planId": plan_id,
+                    "shipmentConfirmationId": detail.get("shipmentConfirmationId"),
+                    "status": detail.get("status"),
+                    "destinationFc": destination.get("warehouseId"),
+                    "deliveryWindowStart": window.get("startDate"),
+                    "deliveryWindowEnd": window.get("endDate"),
+                    "createdAt": plan.get("createdAt"),
+                },
+                items,
+            )
+        time.sleep(0.5)
+
+
 def sync_finances(order_ids: list) -> None:
     for order_id in order_ids:
         payload = sp_client.list_financial_events_by_order(order_id)
@@ -160,6 +206,11 @@ def run_once(lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> None:
     sync_inventory()
     of.set_sp_sync_state(inventory_synced_at=now_iso)
     logger.info("FBA在庫スナップショット取得完了")
+
+    logger.info("FBA納品便(Inbound Shipments)同期開始")
+    sync_inbound_shipments()
+    of.set_sp_sync_state(inbound_synced_at=now_iso)
+    logger.info("FBA納品便(Inbound Shipments)同期完了")
 
 
 def main() -> None:

@@ -173,6 +173,29 @@ def get_inventory_summaries(next_token: Optional[str] = None) -> Dict[str, Any]:
     return _request("/fba/inventory/v1/summaries", params)
 
 
+def get_inbound_plans(next_token: Optional[str] = None) -> Dict[str, Any]:
+    """Fulfillment Inbound API(v2024-03-20): listInboundPlans - Send to Amazonで
+    作成した納品プラン一覧(FBA納品便ごとのP&L用)。"""
+    params = {"pageSize": 20, "NextToken": next_token} if next_token else {"pageSize": 20}
+    return _request("/inbound/fba/2024-03-20/inboundPlans", params)
+
+
+def get_inbound_plan(plan_id: str) -> Dict[str, Any]:
+    """getInboundPlan - プラン詳細(埋め込みのshipments配列にshipmentId/statusが入る)。"""
+    return _request(f"/inbound/fba/2024-03-20/inboundPlans/{plan_id}")
+
+
+def get_inbound_plan_items(plan_id: str, next_token: Optional[str] = None) -> Dict[str, Any]:
+    """listInboundPlanItems - プラン内の商品明細(ASIN/SKU/数量)。"""
+    params = {"NextToken": next_token} if next_token else None
+    return _request(f"/inbound/fba/2024-03-20/inboundPlans/{plan_id}/items", params)
+
+
+def get_inbound_shipment(plan_id: str, shipment_id: str) -> Dict[str, Any]:
+    """getShipment - 便ごとの詳細(納品先FC、納品期間、実際のFBA Shipment ID等)。"""
+    return _request(f"/inbound/fba/2024-03-20/inboundPlans/{plan_id}/shipments/{shipment_id}")
+
+
 def get_listings_restrictions(
     asin: str,
     condition_type: str = "new_new",

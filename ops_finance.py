@@ -252,6 +252,32 @@ def init_ops_tables():
                 snapshot_at TEXT
             );
 
+            -- Fulfillment Inbound API(v2024-03-20)。FBA納品便(Send to Amazonで作る
+            -- 納品プラン)ごとのP&L用。1プラン=1納品便が現状の実運用(複数便への分割は
+            -- 未対応、items は planId 単位でのみ取得できるため、分割時は全shipmentに
+            -- 同じitems一覧が入る簡略実装)。
+            CREATE TABLE IF NOT EXISTS sp_inbound_shipments (
+                shipment_id TEXT PRIMARY KEY,
+                plan_id TEXT,
+                shipment_confirmation_id TEXT,  -- 例: FBA19RGV6RMN(セラーセントラル表示のID)
+                status TEXT,
+                destination_fc TEXT,
+                delivery_window_start TEXT,
+                delivery_window_end TEXT,
+                created_at TEXT,
+                synced_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_sp_inbound_shipments_confirmation_id ON sp_inbound_shipments(shipment_confirmation_id);
+
+            CREATE TABLE IF NOT EXISTS sp_inbound_shipment_items (
+                shipment_id TEXT NOT NULL,
+                asin TEXT,
+                sku TEXT,
+                quantity INTEGER,
+                PRIMARY KEY (shipment_id, asin)
+            );
+            CREATE INDEX IF NOT EXISTS idx_sp_inbound_shipment_items_asin ON sp_inbound_shipment_items(asin);
+
             -- SP-APIエンドポイントごとの前回同期時刻(digest_stateと同じsingleton行)。
             CREATE TABLE IF NOT EXISTS sp_sync_state (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -410,6 +436,10 @@ def init_ops_tables():
         jp_purchase_records_columns = {row[1] for row in conn.execute('PRAGMA table_info(jp_purchase_records)').fetchall()}
         if 'shipping_cost_jpy' not in jp_purchase_records_columns:
             conn.execute('ALTER TABLE jp_purchase_records ADD COLUMN shipping_cost_jpy REAL')
+
+        sp_sync_state_columns = {row[1] for row in conn.execute('PRAGMA table_info(sp_sync_state)').fetchall()}
+        if 'inbound_synced_at' not in sp_sync_state_columns:
+            conn.execute('ALTER TABLE sp_sync_state ADD COLUMN inbound_synced_at TEXT')
 
         # seller_poolの一度きりの自動バックフィル: 既にsource_type='seller'の
         # 実績がagent_candidatesにある(過去のセラーマイニング結果)場合、
@@ -2617,31 +2647,33 @@ def get_sp_sync_state() -> dict:
     init_ops_tables()
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
-            'SELECT orders_synced_at, finances_synced_at, inventory_synced_at FROM sp_sync_state WHERE id = 1'
+            'SELECT orders_synced_at, finances_synced_at, inventory_synced_at, inbound_synced_at FROM sp_sync_state WHERE id = 1'
         ).fetchone()
     if not row:
-        return {'ordersSyncedAt': None, 'financesSyncedAt': None, 'inventorySyncedAt': None}
-    return {'ordersSyncedAt': row[0], 'financesSyncedAt': row[1], 'inventorySyncedAt': row[2]}
+        return {'ordersSyncedAt': None, 'financesSyncedAt': None, 'inventorySyncedAt': None, 'inboundSyncedAt': None}
+    return {'ordersSyncedAt': row[0], 'financesSyncedAt': row[1], 'inventorySyncedAt': row[2], 'inboundSyncedAt': row[3]}
 
 
-def set_sp_sync_state(*, orders_synced_at=None, finances_synced_at=None, inventory_synced_at=None) -> None:
+def set_sp_sync_state(*, orders_synced_at=None, finances_synced_at=None, inventory_synced_at=None, inbound_synced_at=None) -> None:
     """渡されたフィールドだけ更新する(未指定のフィールドは既存値を保持)。"""
     init_ops_tables()
     current = get_sp_sync_state()
     orders_synced_at = orders_synced_at if orders_synced_at is not None else current['ordersSyncedAt']
     finances_synced_at = finances_synced_at if finances_synced_at is not None else current['financesSyncedAt']
     inventory_synced_at = inventory_synced_at if inventory_synced_at is not None else current['inventorySyncedAt']
+    inbound_synced_at = inbound_synced_at if inbound_synced_at is not None else current['inboundSyncedAt']
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
             '''
-            INSERT INTO sp_sync_state (id, orders_synced_at, finances_synced_at, inventory_synced_at)
-            VALUES (1, ?, ?, ?)
+            INSERT INTO sp_sync_state (id, orders_synced_at, finances_synced_at, inventory_synced_at, inbound_synced_at)
+            VALUES (1, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 orders_synced_at = excluded.orders_synced_at,
                 finances_synced_at = excluded.finances_synced_at,
-                inventory_synced_at = excluded.inventory_synced_at
+                inventory_synced_at = excluded.inventory_synced_at,
+                inbound_synced_at = excluded.inbound_synced_at
             ''',
-            (orders_synced_at, finances_synced_at, inventory_synced_at),
+            (orders_synced_at, finances_synced_at, inventory_synced_at, inbound_synced_at),
         )
 
 
@@ -2710,6 +2742,180 @@ def replace_sp_fba_inventory(items: list) -> int:
             [{**i, 'snapshotAt': now} for i in items],
         )
     return len(items)
+
+
+def upsert_sp_inbound_shipment(shipment: dict, items: list) -> None:
+    """shipment: {shipmentId, planId, shipmentConfirmationId, status, destinationFc,
+    deliveryWindowStart, deliveryWindowEnd, createdAt}。
+    items: [{asin, sku, quantity}, ...] (そのプラン全体のitems一覧。1プラン=1便運用の
+    前提での簡略実装、複数便分割時は同一items一覧が全便に入る - Phase4のNote参照)。"""
+    init_ops_tables()
+    now = datetime.now(timezone.utc).isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            '''
+            INSERT INTO sp_inbound_shipments (
+                shipment_id, plan_id, shipment_confirmation_id, status, destination_fc,
+                delivery_window_start, delivery_window_end, created_at, synced_at
+            )
+            VALUES (:shipmentId, :planId, :shipmentConfirmationId, :status, :destinationFc,
+                    :deliveryWindowStart, :deliveryWindowEnd, :createdAt, :syncedAt)
+            ON CONFLICT(shipment_id) DO UPDATE SET
+                plan_id = excluded.plan_id,
+                shipment_confirmation_id = excluded.shipment_confirmation_id,
+                status = excluded.status,
+                destination_fc = excluded.destination_fc,
+                delivery_window_start = excluded.delivery_window_start,
+                delivery_window_end = excluded.delivery_window_end,
+                created_at = excluded.created_at,
+                synced_at = excluded.synced_at
+            ''',
+            {**shipment, 'syncedAt': now},
+        )
+        conn.execute('DELETE FROM sp_inbound_shipment_items WHERE shipment_id = ?', (shipment['shipmentId'],))
+        conn.executemany(
+            '''
+            INSERT OR REPLACE INTO sp_inbound_shipment_items (shipment_id, asin, sku, quantity)
+            VALUES (:shipmentId, :asin, :sku, :quantity)
+            ''',
+            [{**i, 'shipmentId': shipment['shipmentId']} for i in items],
+        )
+
+
+def list_sp_inbound_shipments() -> list:
+    init_ops_tables()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            '''
+            SELECT shipment_id, plan_id, shipment_confirmation_id, status, destination_fc,
+                   delivery_window_start, delivery_window_end, created_at
+            FROM sp_inbound_shipments ORDER BY created_at DESC
+            '''
+        ).fetchall()
+        items_by_shipment: dict = {}
+        for row in conn.execute('SELECT shipment_id, asin, sku, quantity FROM sp_inbound_shipment_items'):
+            items_by_shipment.setdefault(row['shipment_id'], []).append(
+                {'asin': row['asin'], 'sku': row['sku'], 'quantity': row['quantity']}
+            )
+    return [
+        {
+            'shipmentId': r['shipment_id'],
+            'planId': r['plan_id'],
+            'shipmentConfirmationId': r['shipment_confirmation_id'],
+            'status': r['status'],
+            'destinationFc': r['destination_fc'],
+            'deliveryWindowStart': r['delivery_window_start'],
+            'deliveryWindowEnd': r['delivery_window_end'],
+            'createdAt': r['created_at'],
+            'items': items_by_shipment.get(r['shipment_id'], []),
+        }
+        for r in rows
+    ]
+
+
+def get_shipment_pnl(usd_to_jpy: float = 150.0) -> list:
+    """FBA納品便(sp_inbound_shipments)ごとのP&L概算。
+
+    原価: 便の各ASINの数量 × jp_purchase_recordsのその便に最も近い日付の仕入単価
+    (+送料按分、既存のcost_by_asinロジックと同じ)。
+
+    売上: 正確なロット追跡はできない(Amazonはどの納品便由来の在庫が売れたかを
+    教えない)ため、ASINごとに納品便を納品期間開始日の古い順に並べ、
+    sp_order_itemsの売上(注文日が納品期間開始日以降のもの)を数量ベースの
+    FIFO近似で先頭の便から順に割り当てる、という概算を行う。UI側で
+    「概算」である旨を明記すること。"""
+    init_ops_tables()
+    shipments = list_sp_inbound_shipments()
+    if not shipments:
+        return []
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        cost_by_asin_rows = conn.execute(
+            '''
+            SELECT asin, order_date, unit_price_jpy, quantity, COALESCE(shipping_cost_jpy, 0) AS shipping_cost_jpy
+            FROM jp_purchase_records WHERE asin IS NOT NULL ORDER BY order_date ASC
+            '''
+        ).fetchall()
+        sold_items = conn.execute(
+            '''
+            SELECT oi.asin AS asin, oi.quantity AS quantity, oi.item_price_usd AS item_price_usd,
+                   o.purchase_date AS purchase_date
+            FROM sp_order_items oi
+            JOIN sp_orders o ON o.order_id = oi.order_id
+            WHERE oi.asin IS NOT NULL
+            ORDER BY o.purchase_date ASC
+            '''
+        ).fetchall()
+
+    # ASINごとの仕入単価履歴(着地原価)。便の納品期間開始日に最も近い(かつそれ以前の)
+    # 仕入れ記録を使う。無ければ直近(最後)の記録にフォールバック。
+    purchases_by_asin: dict = {}
+    for row in cost_by_asin_rows:
+        shipping_per_unit = (row['shipping_cost_jpy'] / row['quantity']) if row['quantity'] else 0
+        landed = (row['unit_price_jpy'] or 0) + shipping_per_unit
+        purchases_by_asin.setdefault(row['asin'], []).append((row['order_date'] or '', landed))
+
+    def landed_cost_for(asin: str, as_of_date: str | None) -> float:
+        history = purchases_by_asin.get(asin)
+        if not history:
+            return 0.0
+        if not as_of_date:
+            return history[-1][1]
+        candidates = [cost for date, cost in history if date <= as_of_date]
+        return candidates[-1] if candidates else history[0][1]
+
+    # ASINごとの未消化販売キュー(FIFO)。(quantity, unit_revenue_usd)
+    sales_queue: dict = {}
+    for row in sold_items:
+        sales_queue.setdefault(row['asin'], []).append(
+            {'qty': row['quantity'] or 0, 'unitRevenue': row['item_price_usd'] or 0}
+        )
+
+    # 便をASINごとに納品期間開始日の古い順で処理するため、まずASIN×便の一覧を作る
+    shipments_sorted = sorted(shipments, key=lambda s: s['deliveryWindowStart'] or s['createdAt'] or '')
+
+    result = []
+    for shipment in shipments_sorted:
+        as_of = shipment['deliveryWindowStart'] or shipment['createdAt']
+        total_cost_usd = 0.0
+        total_revenue_usd = 0.0
+        total_units_shipped = 0
+        total_units_sold = 0
+        for item in shipment['items']:
+            asin = item['asin']
+            qty_shipped = item['quantity'] or 0
+            total_units_shipped += qty_shipped
+            total_cost_usd += (landed_cost_for(asin, as_of) / usd_to_jpy) * qty_shipped
+
+            remaining = qty_shipped
+            queue = sales_queue.get(asin, [])
+            while remaining > 0 and queue:
+                sale = queue[0]
+                take = min(remaining, sale['qty'])
+                total_revenue_usd += take * sale['unitRevenue']
+                total_units_sold += take
+                sale['qty'] -= take
+                remaining -= take
+                if sale['qty'] <= 0:
+                    queue.pop(0)
+
+        net_profit_usd = total_revenue_usd - total_cost_usd
+        result.append({
+            'shipmentId': shipment['shipmentId'],
+            'shipmentConfirmationId': shipment['shipmentConfirmationId'],
+            'status': shipment['status'],
+            'destinationFc': shipment['destinationFc'],
+            'deliveryWindowStart': shipment['deliveryWindowStart'],
+            'deliveryWindowEnd': shipment['deliveryWindowEnd'],
+            'unitsShipped': total_units_shipped,
+            'unitsSold': total_units_sold,
+            'costUsd': round(total_cost_usd, 2),
+            'revenueUsd': round(total_revenue_usd, 2),
+            'netProfitUsd': round(net_profit_usd, 2),
+        })
+    return result
 
 
 def get_sd_parse_state() -> str | None:

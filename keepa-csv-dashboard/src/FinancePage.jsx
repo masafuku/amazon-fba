@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { BarChart3, Package, RefreshCw } from 'lucide-react';
+import { BarChart3, Package, RefreshCw, Truck } from 'lucide-react';
 import {
     Bar,
     BarChart,
@@ -9,7 +9,13 @@ import {
     XAxis,
     YAxis,
 } from 'recharts';
-import { loadFinanceInventory, loadFinanceOrders, loadFinanceProductPnl, loadFinanceSummary } from './db';
+import {
+    loadFinanceInventory,
+    loadFinanceOrders,
+    loadFinanceProductPnl,
+    loadFinanceShipments,
+    loadFinanceSummary,
+} from './db';
 import { formatDateTime } from './formatters';
 
 const PERIOD_OPTIONS = [
@@ -29,6 +35,7 @@ export default function FinancePage() {
     const [orders, setOrders] = useState([]);
     const [inventory, setInventory] = useState([]);
     const [products, setProducts] = useState([]);
+    const [shipments, setShipments] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
 
@@ -36,16 +43,18 @@ export default function FinancePage() {
         setLoading(true);
         setError('');
         try {
-            const [summaryData, ordersData, inventoryData, productsData] = await Promise.all([
+            const [summaryData, ordersData, inventoryData, productsData, shipmentsData] = await Promise.all([
                 loadFinanceSummary(days),
                 loadFinanceOrders(days),
                 loadFinanceInventory(),
                 loadFinanceProductPnl(days),
+                loadFinanceShipments(),
             ]);
             setSummary(summaryData);
             setOrders(ordersData);
             setInventory(inventoryData);
             setProducts(productsData);
+            setShipments(shipmentsData);
         } catch (loadError) {
             setError(loadError?.message || '収支データの読み込みに失敗しました。');
         } finally {
@@ -266,6 +275,57 @@ export default function FinancePage() {
                                         </td>
                                         <td className="px-2 py-2">
                                             {row.marginPct === null || row.marginPct === undefined ? '-' : `${row.marginPct}%`}
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                )}
+            </div>
+
+            <div className="rounded-xl bg-slate-900 p-4">
+                <h2 className="mb-1 flex items-center gap-2 text-sm font-semibold text-slate-300">
+                    <Truck size={16} /> FBA納品便ごとのP&L
+                </h2>
+                <p className="mb-3 text-xs text-slate-500">
+                    どの納品便から売れたかは正確には分からないため、納品便を納品期間の古い順に並べ、
+                    売上を数量ベースでFIFO(先入れ先出し)的に割り当てた概算です。
+                </p>
+                {shipments.length === 0 ? (
+                    <p className="text-sm text-slate-500">納品便データがありません。</p>
+                ) : (
+                    <div className="overflow-x-auto">
+                        <table className="w-full text-left text-sm">
+                            <thead>
+                                <tr className="text-slate-400">
+                                    <th className="px-2 py-2">FBA Shipment ID</th>
+                                    <th className="px-2 py-2">状態</th>
+                                    <th className="px-2 py-2">納品先FC</th>
+                                    <th className="px-2 py-2">納品期間</th>
+                                    <th className="px-2 py-2">出荷数</th>
+                                    <th className="px-2 py-2">販売数(概算)</th>
+                                    <th className="px-2 py-2">原価</th>
+                                    <th className="px-2 py-2">売上(概算)</th>
+                                    <th className="px-2 py-2">純利益(概算)</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {shipments.map((row) => (
+                                    <tr key={row.shipmentId} className="border-t border-slate-800">
+                                        <td className="px-2 py-2 font-mono text-xs">{row.shipmentConfirmationId || row.shipmentId}</td>
+                                        <td className="px-2 py-2 text-xs">{row.status}</td>
+                                        <td className="px-2 py-2 text-xs">{row.destinationFc}</td>
+                                        <td className="px-2 py-2 text-xs">
+                                            {row.deliveryWindowStart ? formatDateTime(row.deliveryWindowStart) : '-'}
+                                            {row.deliveryWindowEnd ? ` 〜 ${formatDateTime(row.deliveryWindowEnd)}` : ''}
+                                        </td>
+                                        <td className="px-2 py-2">{row.unitsShipped}</td>
+                                        <td className="px-2 py-2">{row.unitsSold}</td>
+                                        <td className="px-2 py-2">{usd(row.costUsd)}</td>
+                                        <td className="px-2 py-2">{usd(row.revenueUsd)}</td>
+                                        <td className={`px-2 py-2 font-semibold ${row.netProfitUsd >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                            {usd(row.netProfitUsd)}
                                         </td>
                                     </tr>
                                 ))}

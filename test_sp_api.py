@@ -257,5 +257,76 @@ class TestPerProductPnl(unittest.TestCase):
         self.assertAlmostEqual(result["B0B"]["feesUsd"], -3.0)
 
 
+class TestShipmentPnl(unittest.TestCase):
+    """Phase 4: FBA納品便(sp_inbound_shipments)ごとのP&L(get_shipment_pnl)。
+    原価の紐付けと、売上のFIFO近似割り当てを検証する。"""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._original_db_path = of.DB_PATH
+        of.DB_PATH = Path(self._tmpdir.name) / "test.sqlite3"
+        of.init_ops_tables()
+
+    def tearDown(self):
+        of.DB_PATH = self._original_db_path
+        self._tmpdir.cleanup()
+
+    def _shipment(self, shipment_id="sh1", confirmation_id="FBA1", window_start="2026-10-18T00:00Z"):
+        return {
+            "shipmentId": shipment_id, "planId": "plan1", "shipmentConfirmationId": confirmation_id,
+            "status": "READY_TO_SHIP", "destinationFc": "HIA1",
+            "deliveryWindowStart": window_start, "deliveryWindowEnd": "2026-10-24T23:59Z",
+            "createdAt": "2026-09-29T00:00:00Z",
+        }
+
+    def test_cost_only_when_no_sales_yet(self):
+        of.upsert_jp_purchase_record({
+            "orderDate": "2026-08-26", "sdReceptionNo": "R1", "supplierName": "丸進",
+            "sdProductNo": None, "productName": "定規", "janCode": "JAN1", "variant": None,
+            "unitPriceJpy": 195, "quantity": 30, "amountJpy": 5850,
+        })
+        of.set_asin_jan_map("B0RULER", "JAN1")
+        of.upsert_sp_inbound_shipment(self._shipment(), [{"asin": "B0RULER", "sku": "SKU1", "quantity": 30}])
+
+        result = of.get_shipment_pnl(usd_to_jpy=150.0)
+        self.assertEqual(len(result), 1)
+        row = result[0]
+        self.assertEqual(row["shipmentConfirmationId"], "FBA1")
+        self.assertEqual(row["unitsShipped"], 30)
+        self.assertEqual(row["unitsSold"], 0)
+        self.assertAlmostEqual(row["costUsd"], (195 / 150.0) * 30, places=2)
+        self.assertAlmostEqual(row["revenueUsd"], 0.0)
+
+    def test_fifo_allocates_sales_to_earliest_shipment_first(self):
+        of.upsert_jp_purchase_record({
+            "orderDate": "2026-08-26", "sdReceptionNo": "R2", "supplierName": "丸進",
+            "sdProductNo": None, "productName": "定規", "janCode": "JAN2", "variant": None,
+            "unitPriceJpy": 195, "quantity": 60, "amountJpy": 11700,
+        })
+        of.set_asin_jan_map("B0RULER2", "JAN2")
+        # 2つの便(古い順: sh-old -> sh-new)、それぞれ10個ずつ出荷
+        of.upsert_sp_inbound_shipment(
+            self._shipment("sh-old", "FBA-OLD", "2026-10-01T00:00Z"),
+            [{"asin": "B0RULER2", "sku": "SKU2", "quantity": 10}],
+        )
+        of.upsert_sp_inbound_shipment(
+            self._shipment("sh-new", "FBA-NEW", "2026-10-15T00:00Z"),
+            [{"asin": "B0RULER2", "sku": "SKU2", "quantity": 10}],
+        )
+        # 15個売れた注文(古い便の10個 + 新しい便の5個にまたがる想定)
+        of.upsert_sp_orders([{
+            "orderId": "O1", "purchaseDate": "2026-10-05", "asin": None, "sku": None,
+            "quantity": None, "itemPriceUsd": None, "orderStatus": "Shipped",
+        }])
+        of.upsert_sp_order_items("O1", [{"asin": "B0RULER2", "sku": "SKU2", "quantity": 15, "itemPriceUsd": 7.49}])
+
+        result = {row["shipmentConfirmationId"]: row for row in of.get_shipment_pnl(usd_to_jpy=150.0)}
+        # 古い便(10個出荷)が先に売上を吸収 -> 10個分完売、新しい便は残り5個分だけ売れた扱い
+        self.assertEqual(result["FBA-OLD"]["unitsSold"], 10)
+        self.assertEqual(result["FBA-NEW"]["unitsSold"], 5)
+        self.assertAlmostEqual(result["FBA-OLD"]["revenueUsd"], 7.49 * 10, places=2)
+        self.assertAlmostEqual(result["FBA-NEW"]["revenueUsd"], 7.49 * 5, places=2)
+
+
 if __name__ == "__main__":
     unittest.main()
