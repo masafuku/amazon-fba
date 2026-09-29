@@ -41,6 +41,15 @@ HOST = os.getenv('API_HOST', '0.0.0.0')
 PORT = 8001
 DB_PATH = Path(__file__).resolve().parent / 'keepa_imports.sqlite3'
 
+# priority_tierを優先度順(S>A+>A->B+>B->C+>C->D)に並べるSQL片。ops_finance.py側の
+# PRIORITY_TIER_ORDER/PRIORITY_TIER_SQL_ORDERと同じ並びを、独立スキーマ管理の都合上
+# ここにも複製している(この2ファイルの並行スキーマ管理という既存の規約通り)。
+_PRIORITY_TIER_SQL_ORDER = (
+    "CASE priority_tier WHEN 'S' THEN 0 WHEN 'A+' THEN 1 WHEN 'A-' THEN 2 "
+    "WHEN 'B+' THEN 3 WHEN 'B-' THEN 4 WHEN 'C+' THEN 5 WHEN 'C-' THEN 6 "
+    "WHEN 'D' THEN 7 ELSE 8 END"
+)
+
 # 本番デプロイ(AWS等)向け: `npm run build` の出力(dist/)がこの隣に
 # あれば、/api/* 以外のリクエストをその静的ファイルとして配信する。
 # ローカル開発時(Vite dev server + プロキシ)は dist/ が存在しないので
@@ -1039,23 +1048,10 @@ def init_db() -> None:
             conn.execute('ALTER TABLE agent_candidates ADD COLUMN listing_status TEXT')
         if 'listing_checked_at' not in agent_candidates_columns:
             conn.execute('ALTER TABLE agent_candidates ADD COLUMN listing_checked_at TEXT')
+        # tierは旧・利益率ベースの合否判定列(2026-09-28、priority_tierへ統合され廃止。
+        # 過去データは残すがどこからも書き込まない)。ADD COLUMNのみ残す。
         if 'tier' not in agent_candidates_columns:
             conn.execute('ALTER TABLE agent_candidates ADD COLUMN tier TEXT')
-            # ops_finance.py側と同じ一度きりのバックフィル(この2ファイルの並行
-            # スキーマ管理という既存の規約通り)。
-            conn.execute(
-                '''
-                UPDATE agent_candidates
-                SET tier = CASE
-                    WHEN margin_pct IS NULL THEN 'reject'
-                    WHEN margin_pct >= 0.20 THEN 'pass'
-                    WHEN margin_pct >= 0 THEN 'consider'
-                    WHEN (us_price_usd - jp_cost_jpy / 150.0) >= 0 THEN 'reference'
-                    ELSE 'reject'
-                END
-                WHERE tier IS NULL
-                '''
-            )
         conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_seller_id ON agent_candidates(seller_id)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_source_type ON agent_candidates(source_type)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_run_id ON agent_candidates(run_id)')
@@ -1656,14 +1652,14 @@ def load_agent_candidates(days: int = 7):
                 r.us_price_usd, r.jp_cost_jpy, r.sales_rank, r.review_count, r.monthly_sold, r.price_volatility_90d,
                 r.weight_kg, r.weight_estimated, r.fee_estimated,
                 r.price_diff_rate_gross, r.unit_profit_usd, r.margin_pct,
-                r.qualified, r.tier, r.reason, r.data_json, r.created_at, r.times_seen,
+                r.qualified, r.reason, r.data_json, r.created_at, r.times_seen,
                 r.source_type, r.seller_id, r.seller_name, r.seed_asin,
                 r.priority_tier, r.excluded_kind, r.is_figure, r.listing_status, r.listing_checked_at,
                 CASE WHEN f.asin IS NULL THEN 0 ELSE 1 END AS already_favorited
             FROM ranked r
             LEFT JOIN favorites f ON f.asin = r.asin
             WHERE r.rn = 1 AND r.excluded_kind IS NULL
-            ORDER BY r.qualified DESC, r.margin_pct DESC, r.created_at DESC
+            ORDER BY r.qualified DESC, ''' + _PRIORITY_TIER_SQL_ORDER + ''', r.created_at DESC
             ''',
             (since,),
         ).fetchall()
@@ -1674,7 +1670,7 @@ def load_agent_candidates(days: int = 7):
          us_price_usd, jp_cost_jpy, sales_rank, review_count, monthly_sold, price_volatility_90d,
          weight_kg, weight_estimated, fee_estimated,
          price_diff_rate_gross, unit_profit_usd, margin_pct,
-         qualified, tier, reason, data_json, created_at, times_seen,
+         qualified, reason, data_json, created_at, times_seen,
          source_type, seller_id, seller_name, seed_asin, priority_tier, excluded_kind, is_figure, listing_status, listing_checked_at, already_favorited) = row
         try:
             data = json.loads(data_json)
@@ -1702,7 +1698,6 @@ def load_agent_candidates(days: int = 7):
             'unitProfitUsd': unit_profit_usd,
             'marginPct': margin_pct,
             'qualified': bool(qualified),
-            'tier': tier or ('pass' if qualified else 'reject'),  # 安全側フォールバック(基本Noneにならない)
             'reason': reason,
             'data': data,
             'createdAt': created_at,
@@ -1753,14 +1748,14 @@ def load_seller_candidates(seller_id: str):
                 r.us_price_usd, r.jp_cost_jpy, r.sales_rank, r.review_count, r.monthly_sold, r.price_volatility_90d,
                 r.weight_kg, r.weight_estimated, r.fee_estimated,
                 r.price_diff_rate_gross, r.unit_profit_usd, r.margin_pct,
-                r.qualified, r.tier, r.reason, r.data_json, r.created_at, r.times_seen,
+                r.qualified, r.reason, r.data_json, r.created_at, r.times_seen,
                 r.source_type, r.seller_id, r.seller_name, r.seed_asin,
                 r.priority_tier, r.excluded_kind, r.is_figure, r.listing_status, r.listing_checked_at,
                 CASE WHEN f.asin IS NULL THEN 0 ELSE 1 END AS already_favorited
             FROM ranked r
             LEFT JOIN favorites f ON f.asin = r.asin
             WHERE r.rn = 1 AND r.excluded_kind IS NULL
-            ORDER BY r.qualified DESC, r.margin_pct DESC, r.created_at DESC
+            ORDER BY r.qualified DESC, ''' + _PRIORITY_TIER_SQL_ORDER + ''', r.created_at DESC
             ''',
             (seller_id,),
         ).fetchall()
@@ -1771,7 +1766,7 @@ def load_seller_candidates(seller_id: str):
          us_price_usd, jp_cost_jpy, sales_rank, review_count, monthly_sold, price_volatility_90d,
          weight_kg, weight_estimated, fee_estimated,
          price_diff_rate_gross, unit_profit_usd, margin_pct,
-         qualified, tier, reason, data_json, created_at, times_seen,
+         qualified, reason, data_json, created_at, times_seen,
          source_type, row_seller_id, seller_name, seed_asin, priority_tier, excluded_kind, is_figure, listing_status, listing_checked_at, already_favorited) = row
         try:
             data = json.loads(data_json)
@@ -1799,7 +1794,6 @@ def load_seller_candidates(seller_id: str):
             'unitProfitUsd': unit_profit_usd,
             'marginPct': margin_pct,
             'qualified': bool(qualified),
-            'tier': tier or ('pass' if qualified else 'reject'),
             'reason': reason,
             'data': data,
             'createdAt': created_at,
@@ -1846,7 +1840,7 @@ def load_agent_candidate_detail(asin: str):
                 r.us_price_usd, r.jp_cost_jpy, r.sales_rank, r.review_count, r.monthly_sold, r.price_volatility_90d,
                 r.weight_kg, r.weight_estimated, r.fee_estimated,
                 r.price_diff_rate_gross, r.unit_profit_usd, r.margin_pct,
-                r.qualified, r.tier, r.reason, r.data_json, r.created_at, r.times_seen,
+                r.qualified, r.reason, r.data_json, r.created_at, r.times_seen,
                 r.source_type, r.seller_id, r.seller_name, r.seed_asin,
                 r.priority_tier, r.excluded_kind, r.is_figure, r.listing_status, r.listing_checked_at,
                 CASE WHEN f.asin IS NULL THEN 0 ELSE 1 END AS already_favorited
@@ -1864,7 +1858,7 @@ def load_agent_candidate_detail(asin: str):
      us_price_usd, jp_cost_jpy, sales_rank, review_count, monthly_sold, price_volatility_90d,
      weight_kg, weight_estimated, fee_estimated,
      price_diff_rate_gross, unit_profit_usd, margin_pct,
-     qualified, tier, reason, data_json, created_at, times_seen,
+     qualified, reason, data_json, created_at, times_seen,
      source_type, seller_id, seller_name, seed_asin, priority_tier, excluded_kind, is_figure, listing_status, listing_checked_at, already_favorited) = row
     try:
         data = json.loads(data_json)
@@ -1892,7 +1886,6 @@ def load_agent_candidate_detail(asin: str):
         'unitProfitUsd': unit_profit_usd,
         'marginPct': margin_pct,
         'qualified': bool(qualified),
-        'tier': tier or ('pass' if qualified else 'reject'),
         'reason': reason,
         'data': data,
         'createdAt': created_at,
@@ -2082,10 +2075,8 @@ def load_seller_pool():
                 SELECT
                     seller_id,
                     COUNT(DISTINCT asin) AS product_count,
-                    SUM(CASE WHEN tier = 'pass' THEN 1 ELSE 0 END) AS pass_count,
-                    SUM(CASE WHEN tier = 'consider' THEN 1 ELSE 0 END) AS consider_count,
-                    SUM(CASE WHEN tier = 'reference' THEN 1 ELSE 0 END) AS reference_count,
-                    SUM(CASE WHEN tier = 'reject' OR tier IS NULL THEN 1 ELSE 0 END) AS reject_count,
+                    SUM(CASE WHEN qualified = 1 THEN 1 ELSE 0 END) AS qualified_count,
+                    SUM(CASE WHEN priority_tier IN ('S','A+','A-','B+') THEN 1 ELSE 0 END) AS top_tier_count,
                     SUM(monthly_sold) AS total_monthly_sold,
                     AVG(margin_pct) AS avg_margin_pct
                 FROM deduped
@@ -2094,9 +2085,8 @@ def load_seller_pool():
             )
             SELECT sp.seller_id, sp.seller_name, sp.source, sp.seed_asin, sp.seed_keyword,
                    sp.added_at, sp.last_mined_at, sp.times_mined, sp.total_qualified, sp.status,
-                   COALESCE(s.product_count, 0), COALESCE(s.pass_count, 0),
-                   COALESCE(s.consider_count, 0), COALESCE(s.reference_count, 0),
-                   COALESCE(s.reject_count, 0), s.total_monthly_sold, s.avg_margin_pct
+                   COALESCE(s.product_count, 0), COALESCE(s.qualified_count, 0),
+                   COALESCE(s.top_tier_count, 0), s.total_monthly_sold, s.avg_margin_pct
             FROM seller_pool sp
             LEFT JOIN stats s ON s.seller_id = sp.seller_id
             ORDER BY sp.times_mined ASC, COALESCE(sp.last_mined_at, '') ASC
@@ -2115,16 +2105,14 @@ def load_seller_pool():
             'totalQualified': total_qualified,
             'status': status,
             'productCount': product_count,
-            'passCount': pass_count,
-            'considerCount': consider_count,
-            'referenceCount': reference_count,
-            'rejectCount': reject_count,
+            'qualifiedCount': qualified_count,
+            'topTierCount': top_tier_count,
             'totalMonthlySold': total_monthly_sold,
             'avgMarginPct': avg_margin_pct,
         }
         for (seller_id, seller_name, source, seed_asin, seed_keyword, added_at, last_mined_at,
-             times_mined, total_qualified, status, product_count, pass_count, consider_count,
-             reference_count, reject_count, total_monthly_sold, avg_margin_pct) in rows
+             times_mined, total_qualified, status, product_count, qualified_count,
+             top_tier_count, total_monthly_sold, avg_margin_pct) in rows
     ]
 
 

@@ -4,15 +4,20 @@ import { loadSellerCandidates, loadSellerPool, saveFavorite } from './db';
 import { formatDateTime } from './formatters';
 
 // AgentPage.jsx / SellerMiningPage.jsx / CandidateDetailPage.jsxと同じ定義
-// (合格ラインの多段階化)。このコードベースの既存パターンに合わせ、各ページ
-// ローカルにコピーを持つ(共通モジュール化は今回のスコープ外)。
-const TIER_STYLES = {
-    pass: { label: '合格', className: 'bg-emerald-900/60 text-emerald-200' },
-    consider: { label: '要検討', className: 'bg-amber-900/60 text-amber-200' },
-    reference: { label: '参考', className: 'bg-slate-700/60 text-slate-300' },
-    reject: { label: '不合格', className: 'bg-slate-800 text-slate-400' },
+// (発注の優先度Tier、2026-09-28に旧・判定を統合)。このコードベースの既存
+// パターンに合わせ、各ページローカルにコピーを持つ(共通モジュール化は
+// 今回のスコープ外)。
+const PRIORITY_TIER_STYLES = {
+    S: 'bg-fuchsia-900/60 text-fuchsia-200',
+    'A+': 'bg-emerald-800/70 text-emerald-100',
+    'A-': 'bg-emerald-950/60 text-emerald-300',
+    'B+': 'bg-sky-900/60 text-sky-200',
+    'B-': 'bg-sky-950/60 text-sky-400',
+    'C+': 'bg-amber-950/60 text-amber-300',
+    'C-': 'bg-rose-950/60 text-rose-300',
+    D: 'bg-slate-800 text-slate-500',
 };
-const resolveTier = (candidate) => candidate.tier ?? (candidate.qualified ? 'pass' : 'reject');
+const PRIORITY_TIERS = ['S', 'A+', 'A-', 'B+', 'B-', 'C+', 'C-', 'D'];
 
 function StatCard({ label, value, tone, title }) {
     const toneClass = tone === 'positive' ? 'text-emerald-400' : tone === 'negative' ? 'text-rose-400' : 'text-white';
@@ -81,10 +86,9 @@ export default function SellerDetailPage({ sellerId, onBack }) {
     }, [sellerId]);
 
     const tierBreakdown = useMemo(() => {
-        const counts = { pass: 0, consider: 0, reference: 0, reject: 0 };
+        const counts = Object.fromEntries(PRIORITY_TIERS.map((t) => [t, 0]));
         candidates.forEach((item) => {
-            const tier = resolveTier(item);
-            counts[tier] = (counts[tier] || 0) + 1;
+            if (item.priorityTier in counts) counts[item.priorityTier] += 1;
         });
         return counts;
     }, [candidates]);
@@ -114,13 +118,14 @@ export default function SellerDetailPage({ sellerId, onBack }) {
     );
 
     const sortedCandidates = useMemo(() => {
-        const tierOrder = { pass: 0, consider: 1, reference: 2, reject: 3 };
         return [...candidates].sort((left, right) => {
             let leftValue;
             let rightValue;
-            if (sortKey === 'tier') {
-                leftValue = tierOrder[resolveTier(left)] ?? 9;
-                rightValue = tierOrder[resolveTier(right)] ?? 9;
+            if (sortKey === 'priorityTier') {
+                leftValue = PRIORITY_TIERS.indexOf(left.priorityTier);
+                rightValue = PRIORITY_TIERS.indexOf(right.priorityTier);
+                leftValue = leftValue === -1 ? PRIORITY_TIERS.length : leftValue;
+                rightValue = rightValue === -1 ? PRIORITY_TIERS.length : rightValue;
             } else if (sortKey === 'createdAt') {
                 leftValue = Date.parse(left.createdAt) || 0;
                 rightValue = Date.parse(right.createdAt) || 0;
@@ -161,7 +166,7 @@ export default function SellerDetailPage({ sellerId, onBack }) {
         }
     };
 
-    const passRate = seller?.productCount ? seller.passCount / seller.productCount : null;
+    const passRate = seller?.productCount ? seller.qualifiedCount / seller.productCount : null;
 
     return (
         <main className="space-y-6">
@@ -195,7 +200,7 @@ export default function SellerDetailPage({ sellerId, onBack }) {
                         label="優秀さ(合格率)"
                         value={passRate == null ? '-' : `${(passRate * 100).toFixed(0)}%`}
                         tone={passRate != null && passRate >= 0.2 ? 'positive' : undefined}
-                        title={`合格${tierBreakdown.pass} / 要検討${tierBreakdown.consider} / 参考${tierBreakdown.reference} / 不合格${tierBreakdown.reject}`}
+                        title={PRIORITY_TIERS.map((t) => `${t}:${tierBreakdown[t]}`).join(' / ')}
                     />
                     <StatCard label="商品数" value={seller.productCount ?? 0} />
                     <StatCard
@@ -226,7 +231,7 @@ export default function SellerDetailPage({ sellerId, onBack }) {
                         出品商品 <span className="font-semibold text-cyan-300">{candidates.length}</span>件
                     </h2>
                     <p className="text-xs text-slate-500">
-                        合格{tierBreakdown.pass} / 要検討{tierBreakdown.consider} / 参考{tierBreakdown.reference} / 不合格{tierBreakdown.reject}
+                        {PRIORITY_TIERS.map((t) => `${t}:${tierBreakdown[t]}`).join(' / ')}
                     </p>
                 </div>
 
@@ -250,7 +255,7 @@ export default function SellerDetailPage({ sellerId, onBack }) {
                             <thead className="bg-slate-950/90">
                                 <tr>
                                     <th className="px-4 py-3 font-medium text-slate-400">画像</th>
-                                    {renderSortHeader('判定', 'tier')}
+                                    {renderSortHeader('優先度', 'priorityTier')}
                                     {renderSortHeader('ASIN', 'asin')}
                                     {renderSortHeader('商品名', 'title')}
                                     {renderSortHeader('ROI', 'roiPct')}
@@ -267,8 +272,7 @@ export default function SellerDetailPage({ sellerId, onBack }) {
                             </thead>
                             <tbody>
                                 {sortedCandidates.map((candidate) => {
-                                    const tier = resolveTier(candidate);
-                                    const style = TIER_STYLES[tier] || TIER_STYLES.reject;
+                                    const priorityStyle = PRIORITY_TIER_STYLES[candidate.priorityTier] || PRIORITY_TIER_STYLES.D;
                                     const roiPct = candidate.data?.roi_pct ?? null;
                                     return (
                                         <tr key={candidate.asin} className="border-t border-slate-800 bg-slate-950/80">
@@ -286,10 +290,10 @@ export default function SellerDetailPage({ sellerId, onBack }) {
                                             </td>
                                             <td className="px-4 py-3">
                                                 <span
-                                                    className={`rounded-lg px-2 py-1 text-xs font-semibold ${style.className}`}
-                                                    title={tier === 'pass' ? '' : candidate.reason || ''}
+                                                    className={`rounded-lg px-2 py-1 text-xs font-semibold ${priorityStyle}`}
+                                                    title={candidate.qualified ? '' : candidate.reason || ''}
                                                 >
-                                                    {style.label}
+                                                    {candidate.priorityTier || '-'}
                                                 </span>
                                             </td>
                                             <td className="px-4 py-3 font-semibold">

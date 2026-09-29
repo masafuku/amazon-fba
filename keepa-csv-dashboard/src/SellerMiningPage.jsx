@@ -21,16 +21,6 @@ const SELLER_SOURCE_LABEL = {
 const DEFAULT_MAX_SELLERS = 5;
 const DEFAULT_MAX_CANDIDATES = 15;
 
-// 合格ラインの多段階化(CEO: 「合格ラインは何段階かに分けてください」)。
-// このページでは個別商品バッジではなく、セラー別統計の「優秀さ」列の
-// 内訳ツールチップのラベルとして使う。
-const TIER_STYLES = {
-    pass: { label: '合格', className: 'bg-emerald-900/60 text-emerald-200' },
-    consider: { label: '要検討', className: 'bg-amber-900/60 text-amber-200' },
-    reference: { label: '参考', className: 'bg-slate-700/60 text-slate-300' },
-    reject: { label: '不合格', className: 'bg-slate-800 text-slate-400' },
-};
-
 export default function SellerMiningPage() {
     const [runs, setRuns] = useState([]);
     const [tokenStatus, setTokenStatus] = useState(null);
@@ -154,7 +144,7 @@ export default function SellerMiningPage() {
         () =>
             sellerPool.map((item) => ({
                 ...item,
-                passRate: item.productCount ? item.passCount / item.productCount : null,
+                passRate: item.productCount ? item.qualifiedCount / item.productCount : null,
             })),
         [sellerPool]
     );
@@ -559,10 +549,9 @@ export default function SellerMiningPage() {
                             <tbody>
                                 {sortedSellerPool.map((item) => {
                                     const tierBreakdown =
-                                        `${TIER_STYLES.pass.label}${item.passCount ?? 0} / ` +
-                                        `${TIER_STYLES.consider.label}${item.considerCount ?? 0} / ` +
-                                        `${TIER_STYLES.reference.label}${item.referenceCount ?? 0} / ` +
-                                        `${TIER_STYLES.reject.label}${item.rejectCount ?? 0}`;
+                                        `合格(C+以上)${item.qualifiedCount ?? 0} / ` +
+                                        `うちS〜B+ ${item.topTierCount ?? 0} / ` +
+                                        `全${item.productCount ?? 0}`;
                                     return (
                                         <tr
                                             key={item.sellerId}

@@ -41,17 +41,17 @@ class TestWholesale(unittest.TestCase):
         return mock.patch.object(ops_finance, 'DB_PATH', Path(tmp) / 'test.sqlite3')
 
     def _insert_candidate(self, conn, asin='B0G2RBRV24', tier='A', jp_cost=291.0, ean=JAN, listing='ok',
-                          title='Nakabayashi Silicone Book Marker', extra=None):
+                          title='Nakabayashi Silicone Book Marker', extra=None, qualified=1, roi_pct=1.0):
         data = {'us_price_usd': 12.0, 'jp_cost_usd': round(jp_cost / 150, 2), 'jp_cost_jpy': jp_cost,
                 'amazon_fee_usd': 1.8, 'fba_fee_usd': 3.5, 'weight_kg': 0.05, 'ean': ean,
-                'roi_pct': 1.0, 'monthly_sold': 100, 'sales_rank': 5000, 'brand': 'Nakabayashi'}
+                'roi_pct': roi_pct, 'monthly_sold': 100, 'sales_rank': 5000, 'brand': 'Nakabayashi'}
         data.update(extra or {})
         conn.execute(
             "INSERT INTO agent_candidates (run_id, category, asin, title, qualified, tier, priority_tier, "
             "listing_status, monthly_sold, sales_rank, us_price_usd, jp_cost_jpy, weight_kg, margin_pct, unit_profit_usd, "
-            "data_json, created_at) VALUES ('r1', 'kw', ?, ?, 1, 'pass', ?, ?, 100, 5000, 12.0, ?, 0.05, 0.3, 3.0, ?, "
+            "data_json, created_at) VALUES ('r1', 'kw', ?, ?, ?, 'pass', ?, ?, 100, 5000, 12.0, ?, 0.05, 0.3, 3.0, ?, "
             "'2026-09-27T00:00:00+00:00')",
-            (asin, title, tier, listing, jp_cost, json.dumps(data)),
+            (asin, title, qualified, tier, listing, jp_cost, json.dumps(data)),
         )
 
     def _catalog(self, items):
@@ -104,11 +104,11 @@ class TestWholesale(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, self._db(tmp):
             ops_finance.init_ops_tables()
             with sqlite3.connect(ops_finance.DB_PATH) as conn:
-                self._insert_candidate(conn, 'B0AAAAAAA1', 'A')                                      # 対象
+                self._insert_candidate(conn, 'B0AAAAAAA1', 'A+')                                      # 対象
                 self._insert_candidate(conn, 'B0AAAAAAA2', 'S', ean=None)                            # JANなし
-                self._insert_candidate(conn, 'B0AAAAAAA3', 'A', listing='approval_required')         # 出品不可
+                self._insert_candidate(conn, 'B0AAAAAAA3', 'A+', listing='approval_required')         # 出品不可
                 self._insert_candidate(conn, 'B0AAAAAAA4', 'B-')                                     # Tier対象外
-                self._insert_candidate(conn, 'B0AAAAAAA5', 'A', extra={'wholesale_checked_at': fresh})  # 照会済み
+                self._insert_candidate(conn, 'B0AAAAAAA5', 'A+', extra={'wholesale_checked_at': fresh})  # 照会済み
                 self._insert_candidate(conn, 'B0AAAAAAA6', 'S', extra={'netsea_jan': self.JAN})      # NETSEA由来
                 self._insert_candidate(conn, 'B0AAAAAAA7', 'S', extra={'brand': 'HARIO'}, title='Hario Kettle')
             found = ops_finance.load_candidates_needing_wholesale(limit=10)
@@ -155,6 +155,30 @@ class TestWholesale(unittest.TestCase):
         self.assertEqual(json.loads(rows[0][2])['wholesale_cost_jpy'], 198.0)
         self.assertIn('wholesale_checked_at', json.loads(rows[1][2]))
         self.assertNotIn('wholesale_cost_jpy', json.loads(rows[1][2]))
+
+    def test_apply_updates_qualified_and_reason_when_wholesale_makes_it_qualify(self):
+        # 2026-09-28: tier/qualifiedがpriority_tierへ統合されたことで生まれた非同期
+        # バグの修正確認。高い原価では赤字(C-, qualified=0)だった候補が、安い卸価格
+        # 適用でROIが上がりqualified=1に切り替わることを確認する。
+        with tempfile.TemporaryDirectory() as tmp, self._db(tmp):
+            ops_finance.init_ops_tables()
+            with sqlite3.connect(ops_finance.DB_PATH) as conn:
+                # jp_cost=2000, us_price=12ではROIが赤字になりC-/qualified=0のはず
+                self._insert_candidate(conn, tier='C-', jp_cost=2000.0, qualified=0, roi_pct=-0.5)
+                row_id = conn.execute('SELECT id FROM agent_candidates').fetchone()[0]
+            self._catalog([_item(1, 'a', self.JAN, [_set('a-1', self.JAN, 5, 990)])])   # 198円/個、税込217.8円
+            match = ops_finance.find_netsea_match([self.JAN])
+            result = ops_finance.apply_wholesale_result(row_id, match)
+            with sqlite3.connect(ops_finance.DB_PATH) as conn:
+                qualified, reason, priority_tier = conn.execute(
+                    'SELECT qualified, reason, priority_tier FROM agent_candidates WHERE id = ?', (row_id,)
+                ).fetchone()
+        self.assertTrue(result['recalculated'])
+        self.assertEqual(result['qualified_before'], 0)
+        self.assertEqual(result['qualified_after'], 1)
+        self.assertEqual(qualified, 1)
+        self.assertIsNone(reason)
+        self.assertIn(priority_tier, ('S', 'A+', 'A-', 'B+', 'B-', 'C+'))
 
 
 if __name__ == '__main__':

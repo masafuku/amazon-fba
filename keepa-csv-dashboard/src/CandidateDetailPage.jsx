@@ -15,14 +15,17 @@ import { mergeSuppliers, supplierSourceLabel } from './supplierSources';
 
 const EXCHANGE_RATE = 150;
 
-// AgentPage.jsxと同じ定義(合格ラインの多段階化)。
-const TIER_STYLES = {
-    pass: { label: '合格', className: 'bg-emerald-900/60 text-emerald-200' },
-    consider: { label: '要検討', className: 'bg-amber-900/60 text-amber-200' },
-    reference: { label: '参考', className: 'bg-slate-700/60 text-slate-300' },
-    reject: { label: '不合格', className: 'bg-slate-800 text-slate-400' },
+// AgentPage.jsxと同じ定義(発注の優先度Tier、2026-09-28に旧・判定を統合)。
+const PRIORITY_TIER_STYLES = {
+    S: 'bg-fuchsia-900/60 text-fuchsia-200',
+    'A+': 'bg-emerald-800/70 text-emerald-100',
+    'A-': 'bg-emerald-950/60 text-emerald-300',
+    'B+': 'bg-sky-900/60 text-sky-200',
+    'B-': 'bg-sky-950/60 text-sky-400',
+    'C+': 'bg-amber-950/60 text-amber-300',
+    'C-': 'bg-rose-950/60 text-rose-300',
+    D: 'bg-slate-800 text-slate-500',
 };
-const resolveTier = (candidate) => candidate.tier ?? (candidate.qualified ? 'pass' : 'reject');
 
 // https://keepa.com/#!product/<domainId>-<asin> という既知のURL形式。
 // keepa_mcp/keepa_client.py の DOMAIN_IDS と同じ値(バックエンド変更不要、
@@ -313,8 +316,7 @@ export default function CandidateDetailPage({ asin, onBack }) {
     }
 
     const data = candidate.data || {};
-    const tier = resolveTier(candidate);
-    const tierStyle = TIER_STYLES[tier] || TIER_STYLES.reject;
+    const priorityStyle = PRIORITY_TIER_STYLES[candidate.priorityTier] || PRIORITY_TIER_STYLES.D;
     const grossProfitUsd = candidate.usPriceUsd != null && data.jp_cost_usd != null ? candidate.usPriceUsd - data.jp_cost_usd : null;
     const grossMarginPct = grossProfitUsd != null && candidate.usPriceUsd ? grossProfitUsd / candidate.usPriceUsd : null;
     // CEO: 「仕入れ先の情報は、ダッシュボードページは簡潔に...個別ページに詳しく表記して
@@ -347,7 +349,12 @@ export default function CandidateDetailPage({ asin, onBack }) {
                 )}
                 <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
-                        <span className={`rounded-lg px-2 py-1 text-xs font-semibold ${tierStyle.className}`}>{tierStyle.label}</span>
+                        <span
+                            className={`rounded-lg px-2 py-1 text-xs font-semibold ${priorityStyle}`}
+                            title={candidate.qualified ? '発注の優先度(自動判定)' : candidate.reason || '不合格(実売証拠なし、またはROIが赤字)'}
+                        >
+                            {candidate.priorityTier || '-'}
+                        </span>
                         {data.brand ? <span className="text-xs text-slate-400">ブランド: {data.brand}</span> : null}
                     </div>
                     <h1 className="mt-1 text-xl font-semibold text-white">{candidate.title || '(商品名不明)'}</h1>
@@ -366,7 +373,7 @@ export default function CandidateDetailPage({ asin, onBack }) {
                             </>
                         ) : null}
                     </p>
-                    {tier !== 'pass' && candidate.reason ? (
+                    {!candidate.qualified && candidate.reason ? (
                         <p className="mt-1 text-xs text-amber-300">理由: {candidate.reason}</p>
                     ) : null}
                 </div>

@@ -16,20 +16,14 @@ const SCAN_LOOP_MODE_LABELS = {
     'keyword-search': 'キーワード検索固定',
 };
 
-// 合格ラインの多段階化(CEO: 「合格ラインは何段階かに分けてください」)。
-const TIER_STYLES = {
-    pass: { label: '合格', className: 'bg-emerald-900/60 text-emerald-200' },
-    consider: { label: '要検討', className: 'bg-amber-900/60 text-amber-200' },
-    reference: { label: '参考', className: 'bg-slate-700/60 text-slate-300' },
-    reject: { label: '不合格', className: 'bg-slate-800 text-slate-400' },
-};
-const resolveTier = (candidate) => candidate.tier ?? (candidate.qualified ? 'pass' : 'reject');
-
-// 発注の優先度Tier(S/A/B+/B-/C)。上の「判定」(利益による合格判定)とは別物で、米国の実売
-// (先月の購入・BSR)とROI・粗利から自動で付ける(定義: _shared/fba-sourcing-candidates.md の
-// 「Tier 確定版」)。競合(出品者)数は判定に入れず、「セラー数」列と絞り込みで見る。
+// 発注の優先度Tier(S/A+/A-/B+/B-/C+/C-/D)。2026-09-28、旧・利益率ベースの合否判定
+// (判定: 合格/要検討/参考/不合格)を廃止し、こちらに一本化した。「実売の確度」
+// (強い実売>=100件 / 実売あり30-99件 / ランク変動のみ / 実売なし)を主軸、「ROI水準」を
+// 副軸にした4x4マトリクスで自動で付ける(ops_finance.pyの_classify_priority_tier参照)。
+// qualified(合格/不合格、bool)はpriority_tierから導出される(S~C+=合格、C-/D=不合格)。
+// 競合(出品者)数は判定に入れず、「セラー数」列と絞り込みで見る。
 // 完全除外カテゴリ(食品・医薬品/化粧品・包丁類)はAPI側で返さないので、ここには出てこない。
-const PRIORITY_TIERS = ['S', 'A', 'B+', 'B-', 'C'];
+const PRIORITY_TIERS = ['S', 'A+', 'A-', 'B+', 'B-', 'C+', 'C-', 'D'];
 // Amazon.comでの出品可否(scripts/check_candidate_restrictions.py がSP-APIで照会して保存)。
 // null/未定義 = 未確認。
 const LISTING_STATUS_STYLES = {
@@ -49,12 +43,15 @@ const PRODUCT_APPROVAL_STATUSES = ['product_approval_required', 'brand_and_produ
 const NOT_ELIGIBLE_STATUSES = ['not_eligible', 'restricted'];
 const PRIORITY_TIER_STYLES = {
     S: 'bg-fuchsia-900/60 text-fuchsia-200',
-    A: 'bg-emerald-900/60 text-emerald-200',
+    'A+': 'bg-emerald-800/70 text-emerald-100',
+    'A-': 'bg-emerald-950/60 text-emerald-300',
     'B+': 'bg-sky-900/60 text-sky-200',
-    'B-': 'bg-slate-700/60 text-slate-300',
-    C: 'bg-slate-800 text-slate-400',
+    'B-': 'bg-sky-950/60 text-sky-400',
+    'C+': 'bg-amber-950/60 text-amber-300',
+    'C-': 'bg-rose-950/60 text-rose-300',
+    D: 'bg-slate-800 text-slate-500',
 };
-// 「優先度」列のソート用: 降順(▼)でS→A→B+→B-→C→未判定の順に並ぶ数値にする
+// 「優先度」列のソート用: 降順(▼)でS→A+→A-→B+→B-→C+→C-→D→未判定の順に並ぶ数値にする
 const prioritySortValue = (tier) => {
     const index = PRIORITY_TIERS.indexOf(tier);
     return index === -1 ? 0 : PRIORITY_TIERS.length - index;
@@ -86,7 +83,11 @@ export default function AgentPage() {
     const [days, setDays] = useState(storedAgentFilters.days ?? UNLIMITED_DAYS);
     const [showRejected, setShowRejected] = useState(storedAgentFilters.showRejected ?? false);
     const [showRunHistory, setShowRunHistory] = useState(false);
-    const [sortKey, setSortKey] = useState(storedAgentFilters.sortKey ?? 'marginPct');
+    // 2026-09-28のTier統合(判定列廃止)前に保存された'qualified'ソートは、
+    // 対応する列が無くなったため'prioritySort'(優先度)にフォールバックする。
+    const [sortKey, setSortKey] = useState(
+        storedAgentFilters.sortKey === 'qualified' ? 'prioritySort' : (storedAgentFilters.sortKey ?? 'marginPct')
+    );
     const [sortOrder, setSortOrder] = useState(storedAgentFilters.sortOrder ?? 'desc');
     const [searchText, setSearchText] = useState(storedAgentFilters.searchText ?? '');
     const [categoryFilter, setCategoryFilter] = useState(storedAgentFilters.categoryFilter ?? 'all');
@@ -112,7 +113,12 @@ export default function AgentPage() {
     // 商品単位の承認(Transparency等)と、出品不可は、それぞれ既定で隠す(未確認・出品可は表示する)。
     const [hideProductApproval, setHideProductApproval] = useState(storedAgentFilters.hideProductApproval ?? true);
     const [hideNotEligible, setHideNotEligible] = useState(storedAgentFilters.hideNotEligible ?? true);
-    const [priorityFilter, setPriorityFilter] = useState(storedAgentFilters.priorityFilter ?? []);
+    // 2026-09-28のTier再設計(S/A/B+/B-/C -> S/A+/A-/B+/B-/C+/C-/D)前に保存された旧Tier値
+    // ('A'や'C'等)が残っている場合、どのTierにも一致せずフィルタが無効化されたように
+    // 見えてしまうため、現行のPRIORITY_TIERSに存在する値だけを引き継ぐ。
+    const [priorityFilter, setPriorityFilter] = useState(
+        (storedAgentFilters.priorityFilter ?? []).filter((tier) => PRIORITY_TIERS.includes(tier))
+    );
     const [maxCompetitors, setMaxCompetitors] = useState(storedAgentFilters.maxCompetitors ?? '');
     const [scanLoopStatus, setScanLoopStatus] = useState(null);
     const [scanLoopBusy, setScanLoopBusy] = useState(false);
@@ -294,7 +300,7 @@ export default function AgentPage() {
         // フィギュア/コレクタブルは、優先度Tierを付けたうえで、表示だけをオン/オフできる
         // (CEO指示 2026-09-26)。isFigureはevaluate_mcp_candidates()/バックフィルが付ける
         // フラグ。以前のreason='figure_or_collectible'の行も、引き続き隠す。
-        // showRejectedがオンでも別トグルで独立に隠せる(showRejectedは「利益率で落ちた候補も
+        // showRejectedがオンでも別トグルで独立に隠せる(showRejectedは「不合格(C-/D)候補も
         // 見たい」用途で、こちらは「出品しづらいカテゴリを視界から消したい」という別の目的)。
         const withoutFigures = hideFigures
             ? byQualified.filter((item) => !(item.isFigure || item.reason === 'figure_or_collectible'))
@@ -627,8 +633,9 @@ export default function AgentPage() {
                             type="button"
                             onClick={() => setShowRejected((current) => !current)}
                             className={`rounded-2xl px-4 py-2 text-sm font-semibold ${showRejected ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-300'}`}
+                            title="不合格(優先度C-またはD)の候補も表示する"
                         >
-                            不合格候補も表示
+                            C-/Dも表示
                         </button>
                         <button
                             type="button"
@@ -653,7 +660,7 @@ export default function AgentPage() {
                     <select
                         value={categoryFilter}
                         onChange={(event) => setCategoryFilter(event.target.value)}
-                        className="rounded-xl border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm text-white outline-none focus:border-cyan-400"
+                        className="w-56 max-w-full rounded-xl border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm text-white outline-none focus:border-cyan-400"
                     >
                         <option value="all">カテゴリ: すべて</option>
                         {categoryOptions.map((category) => (
@@ -780,15 +787,14 @@ export default function AgentPage() {
                             <thead className="bg-slate-950/90">
                                 <tr>
                                     <th className="px-4 py-3 font-medium text-slate-400">画像</th>
-                                    {renderSortHeader('判定', 'qualified')}
                                     {renderSortHeader('優先度(自動)', 'prioritySort')}
+                                    {renderSortHeader('商品名', 'title')}
+                                    {renderSortHeader('先月の販売個数', 'monthlySoldOrDrops')}
+                                    {renderSortHeader('ROI(投下資本利益率)', 'roiPct')}
+                                    {renderSortHeader('ASIN', 'asin')}
+                                    {renderSortHeader('仕入れ先', 'sourcingSupplierName')}
                                     {renderSortHeader('カテゴリ', 'category')}
                                     {renderSortHeader('セラー', 'sellerName')}
-                                    {renderSortHeader('仕入れ先', 'sourcingSupplierName')}
-                                    {renderSortHeader('ASIN', 'asin')}
-                                    {renderSortHeader('商品名', 'title')}
-                                    {renderSortHeader('ROI(投下資本利益率)', 'roiPct')}
-                                    {renderSortHeader('先月の販売個数', 'monthlySoldOrDrops')}
                                     {renderSortHeader('US価格($)', 'usPriceUsd')}
                                     {renderSortHeader('Amazon JP価格(円)', 'jpAmazonCostJpy')}
                                     {renderSortHeader('卸価格(円)', 'wholesaleCostJpy')}
@@ -830,24 +836,14 @@ export default function AgentPage() {
                                             )}
                                         </td>
                                         <td className="px-4 py-3">
-                                            {(() => {
-                                                const tier = resolveTier(candidate);
-                                                const style = TIER_STYLES[tier] || TIER_STYLES.reject;
-                                                return (
-                                                    <span
-                                                        className={`rounded-lg px-2 py-1 text-xs font-semibold ${style.className}`}
-                                                        title={tier === 'pass' ? '' : candidate.reason || ''}
-                                                    >
-                                                        {style.label}
-                                                    </span>
-                                                );
-                                            })()}
-                                        </td>
-                                        <td className="px-4 py-3">
                                             {candidate.priorityTier ? (
                                                 <span
-                                                    className={`rounded-lg px-2 py-1 text-xs font-semibold ${PRIORITY_TIER_STYLES[candidate.priorityTier] || PRIORITY_TIER_STYLES.C}`}
-                                                    title="発注の優先度(自動判定)。米国の実売とROI・粗利から付与。競合数は判定に入れていません"
+                                                    className={`rounded-lg px-2 py-1 text-xs font-semibold ${PRIORITY_TIER_STYLES[candidate.priorityTier] || PRIORITY_TIER_STYLES.D}`}
+                                                    title={
+                                                        candidate.qualified
+                                                            ? '発注の優先度(自動判定)。米国の実売とROIから付与。競合数は判定に入れていません'
+                                                            : candidate.reason || '不合格(実売証拠なし、またはROIが赤字)'
+                                                    }
                                                 >
                                                     {candidate.priorityTier}
                                                 </span>
@@ -878,18 +874,31 @@ export default function AgentPage() {
                                                 </span>
                                             ) : null}
                                         </td>
-                                        <td className="px-4 py-3 text-slate-300">{candidate.category || '-'}</td>
-                                        <td className="px-4 py-3 text-slate-300">
-                                            {candidate.sellerId ? (
-                                                <a
-                                                    href={`#seller/${encodeURIComponent(candidate.sellerId)}`}
-                                                    className="text-cyan-300 underline decoration-cyan-700 underline-offset-2 hover:text-cyan-200"
-                                                >
-                                                    {candidate.sellerName || candidate.sellerId}
-                                                </a>
-                                            ) : (
-                                                '-'
-                                            )}
+                                        <td className="min-w-[280px] max-w-2xl px-4 py-3 text-slate-200">{candidate.title || '-'}</td>
+                                        <td
+                                            className="px-4 py-3 font-semibold text-sky-300"
+                                            title={
+                                                candidate.monthlySold == null && candidate.data?.sales_rank_drops_30 != null
+                                                    ? '先月の販売個数は非公開(Amazonの月50個以上バッジ基準未満)のため、ランキング変動回数(売れたと推定されるイベント数)で代替表示'
+                                                    : undefined
+                                            }
+                                        >
+                                            {candidate.monthlySold != null
+                                                ? `${candidate.monthlySold.toLocaleString()}個`
+                                                : candidate.data?.sales_rank_drops_30 != null
+                                                  ? `ランク変動30日 ${candidate.data.sales_rank_drops_30}回`
+                                                  : '-'}
+                                        </td>
+                                        <td className={`px-4 py-3 font-semibold ${candidate.roiPct == null ? '' : candidate.roiPct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`} title="実質利益 ÷ JP原価(投下資本)。US価格に対する実質利益率とは分母が異なる">
+                                            {candidate.roiPct == null ? '-' : `${(candidate.roiPct * 100).toFixed(1)}%`}
+                                        </td>
+                                        <td className="px-4 py-3 font-semibold">
+                                            <a
+                                                href={`#candidate/${encodeURIComponent(candidate.asin)}`}
+                                                className="text-cyan-300 underline decoration-cyan-700 underline-offset-2 hover:text-cyan-200"
+                                            >
+                                                {candidate.asin}
+                                            </a>
                                         </td>
                                         <td className="px-4 py-3 text-slate-300">
                                             {candidate.allSuppliers && candidate.allSuppliers.length > 0 ? (
@@ -926,31 +935,18 @@ export default function AgentPage() {
                                                 '-'
                                             )}
                                         </td>
-                                        <td className="px-4 py-3 font-semibold">
-                                            <a
-                                                href={`#candidate/${encodeURIComponent(candidate.asin)}`}
-                                                className="text-cyan-300 underline decoration-cyan-700 underline-offset-2 hover:text-cyan-200"
-                                            >
-                                                {candidate.asin}
-                                            </a>
-                                        </td>
-                                        <td className="max-w-xl px-4 py-3 text-slate-200">{candidate.title || '-'}</td>
-                                        <td className={`px-4 py-3 font-semibold ${candidate.roiPct == null ? '' : candidate.roiPct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`} title="実質利益 ÷ JP原価(投下資本)。US価格に対する実質利益率とは分母が異なる">
-                                            {candidate.roiPct == null ? '-' : `${(candidate.roiPct * 100).toFixed(1)}%`}
-                                        </td>
-                                        <td
-                                            className="px-4 py-3 font-semibold text-sky-300"
-                                            title={
-                                                candidate.monthlySold == null && candidate.data?.sales_rank_drops_30 != null
-                                                    ? '先月の販売個数は非公開(Amazonの月50個以上バッジ基準未満)のため、ランキング変動回数(売れたと推定されるイベント数)で代替表示'
-                                                    : undefined
-                                            }
-                                        >
-                                            {candidate.monthlySold != null
-                                                ? `${candidate.monthlySold.toLocaleString()}個`
-                                                : candidate.data?.sales_rank_drops_30 != null
-                                                  ? `ランク変動30日 ${candidate.data.sales_rank_drops_30}回`
-                                                  : '-'}
+                                        <td className="max-w-[140px] truncate px-4 py-3 text-slate-300" title={candidate.category || ''}>{candidate.category || '-'}</td>
+                                        <td className="px-4 py-3 text-slate-300">
+                                            {candidate.sellerId ? (
+                                                <a
+                                                    href={`#seller/${encodeURIComponent(candidate.sellerId)}`}
+                                                    className="text-cyan-300 underline decoration-cyan-700 underline-offset-2 hover:text-cyan-200"
+                                                >
+                                                    {candidate.sellerName || candidate.sellerId}
+                                                </a>
+                                            ) : (
+                                                '-'
+                                            )}
                                         </td>
                                         <td className="px-4 py-3 text-slate-200">
                                             {candidate.usPriceUsd == null ? '-' : `$${Number(candidate.usPriceUsd).toFixed(2)}`}

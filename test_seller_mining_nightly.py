@@ -24,25 +24,28 @@ class TestDiscoverSellersForPendingCandidates(unittest.TestCase):
         db_path = Path(tmp) / 'test.sqlite3'
         return mock.patch.object(ops_finance, 'DB_PATH', db_path), mock.patch.object(daily_scan, 'DB_PATH', db_path), db_path
 
-    def _insert_candidate(self, conn, asin, qualified, tier, margin_pct=0.3, source_type='keyword',
+    def _insert_candidate(self, conn, asin, qualified, priority_tier, roi_pct=0.3, source_type='keyword',
                           created_at='2026-09-27T00:00:00+00:00'):
         conn.execute(
-            "INSERT INTO agent_candidates (run_id, category, asin, qualified, tier, margin_pct, "
+            "INSERT INTO agent_candidates (run_id, category, asin, qualified, priority_tier, margin_pct, "
             "unit_profit_usd, data_json, source_type, created_at) "
-            "VALUES ('r1', 'kw', ?, ?, ?, ?, 3.0, '{}', ?, ?)",
-            (asin, qualified, tier, margin_pct, source_type, created_at),
+            "VALUES ('r1', 'kw', ?, ?, ?, 0.3, 3.0, ?, ?, ?)",
+            (asin, qualified, priority_tier, json.dumps({'roi_pct': roi_pct}), source_type, created_at),
         )
 
-    def test_picks_qualified_and_consider_candidates_not_already_in_seller_pool(self):
+    def test_picks_qualified_candidates_not_already_in_seller_pool(self):
+        # 2026-09-28、tier(pass/consider)がpriority_tierへ統合され、qualifiedの
+        # 判定元はpriority_tier(S〜C+)になった。旧・「consider」相当も含めて
+        # qualified=1であれば拾われる。
         with tempfile.TemporaryDirectory() as tmp:
             p1, p2, db_path = self._patch_db(tmp)
             with p1, p2:
                 ops_finance.init_ops_tables()
                 with sqlite3.connect(db_path) as conn:
-                    self._insert_candidate(conn, 'B0AAAAAAA1', qualified=1, tier='pass', margin_pct=0.5)
-                    self._insert_candidate(conn, 'B0AAAAAAA2', qualified=0, tier='consider', margin_pct=0.3)
-                    self._insert_candidate(conn, 'B0AAAAAAA3', qualified=0, tier='reject', margin_pct=0.1)  # 対象外
-                    self._insert_candidate(conn, 'B0AAAAAAA4', qualified=1, tier='pass', source_type='seller')  # 対象外(seller由来)
+                    self._insert_candidate(conn, 'B0AAAAAAA1', qualified=1, priority_tier='A+', roi_pct=0.5)
+                    self._insert_candidate(conn, 'B0AAAAAAA2', qualified=1, priority_tier='C+', roi_pct=0.05)
+                    self._insert_candidate(conn, 'B0AAAAAAA3', qualified=0, priority_tier='D', roi_pct=0.1)  # 対象外
+                    self._insert_candidate(conn, 'B0AAAAAAA4', qualified=1, priority_tier='A+', source_type='seller')  # 対象外(seller由来)
                 with mock.patch.object(daily_scan, 'discover_and_register_sellers', return_value=['S1']) as mocked:
                     found = daily_scan.discover_sellers_for_pending_candidates(limit=10)
         self.assertEqual(found, 2)
@@ -55,25 +58,25 @@ class TestDiscoverSellersForPendingCandidates(unittest.TestCase):
             with p1, p2:
                 ops_finance.init_ops_tables()
                 with sqlite3.connect(db_path) as conn:
-                    self._insert_candidate(conn, 'B0AAAAAAA1', qualified=1, tier='pass')
+                    self._insert_candidate(conn, 'B0AAAAAAA1', qualified=1, priority_tier='A+')
                 ops_finance.add_sellers(['S1'], source='keyword_expansion', seed_asin='B0AAAAAAA1')
                 with mock.patch.object(daily_scan, 'discover_and_register_sellers') as mocked:
                     found = daily_scan.discover_sellers_for_pending_candidates(limit=10)
         self.assertEqual(found, 0)
         mocked.assert_not_called()
 
-    def test_respects_limit_and_orders_qualified_before_consider(self):
+    def test_orders_by_priority_tier_then_roi(self):
         with tempfile.TemporaryDirectory() as tmp:
             p1, p2, db_path = self._patch_db(tmp)
             with p1, p2:
                 ops_finance.init_ops_tables()
                 with sqlite3.connect(db_path) as conn:
-                    self._insert_candidate(conn, 'B0LOWQUAL1', qualified=0, tier='consider', margin_pct=0.9)
-                    self._insert_candidate(conn, 'B0HIGHQUAL', qualified=1, tier='pass', margin_pct=0.1)
+                    self._insert_candidate(conn, 'B0LOWTIER1', qualified=1, priority_tier='B-', roi_pct=0.9)
+                    self._insert_candidate(conn, 'B0HIGHTIER', qualified=1, priority_tier='S', roi_pct=0.1)
                 with mock.patch.object(daily_scan, 'discover_and_register_sellers', return_value=['S1']) as mocked:
                     daily_scan.discover_sellers_for_pending_candidates(limit=1)
-        # qualified=1 が margin_pctで劣っていても、qualified優先で先に選ばれる
-        self.assertEqual(mocked.call_args_list[0].args[0], 'B0HIGHQUAL')
+        # ROIがB-より劣っていても、priority_tierが高い(S)方が先に選ばれる
+        self.assertEqual(mocked.call_args_list[0].args[0], 'B0HIGHTIER')
 
     def test_ignores_candidates_older_than_max_age(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -81,7 +84,7 @@ class TestDiscoverSellersForPendingCandidates(unittest.TestCase):
             with p1, p2:
                 ops_finance.init_ops_tables()
                 with sqlite3.connect(db_path) as conn:
-                    self._insert_candidate(conn, 'B0OLD00001', qualified=1, tier='pass',
+                    self._insert_candidate(conn, 'B0OLD00001', qualified=1, priority_tier='A+',
                                            created_at='2026-01-01T00:00:00+00:00')
                 with mock.patch.object(daily_scan, 'discover_and_register_sellers') as mocked:
                     found = daily_scan.discover_sellers_for_pending_candidates(limit=10, max_age_hours=48)

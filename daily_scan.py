@@ -92,6 +92,7 @@ from keepa_mcp.server import (
 )
 from ops_finance import (
     DB_PATH,
+    PRIORITY_TIER_SQL_ORDER,
     add_keywords,
     add_sellers,
     evaluate_mcp_candidates,
@@ -257,7 +258,7 @@ def _expand_from_one_seller(
     seller_evaluation = evaluate_mcp_candidates(seller_result)
     qualified_count = len(seller_evaluation["qualified"])
     print(f"[INFO] セラー「{seller_name}」の出品: {seller_result.get('evaluated', 0)}件評価 / "
-          f"実質利益率20%以上: {qualified_count}件")
+          f"合格(優先度C+以上): {qualified_count}件")
 
     if seller_evaluation["qualified"]:
         enrich_qualified_candidates_with_offer_details(
@@ -285,23 +286,16 @@ def _expand_from_one_seller(
 
 
 def _best_discovery_candidates(evaluation: dict, limit: int = 1) -> list[dict]:
-    """セラー発見の起点候補を選ぶ。合格(pass、既にmargin_pct降順ソート済み)を
-    優先し、足りなければ要検討(consider、黒字だが実質利益率20%未満)を
-    margin_pct降順で補う。CEO: 「要検討候補もセラー発見の対象に含めてほしい」
-    - 合格限定だとセラープールの成長機会(keywordソースだけでも要検討36件)を
-    捨てていたため。evaluate_mcp_candidates()の戻り値をそのまま渡せる
-    ({"qualified": [...], "rejected": [...]}、tierはrejected内の各要素が
-    個別に持つ)。
+    """セラー発見の起点候補を選ぶ。evaluate_mcp_candidates()の戻り値をそのまま
+    渡せる({"qualified": [...], "rejected": [...]})。
+
+    2026-09-28、tier(pass/consider/reference/reject)がpriority_tierへ統合された
+    ことで、qualifiedの範囲自体がB-/C+まで広がった(旧・要検討候補の大半を含む)ため、
+    単純にqualified(既にpriority_tier順+ROI降順でソート済み)の先頭からlimit件を
+    返すだけでよい(旧・rejected内のtier=='consider'を補う処理は不要になった)。
     """
     qualified = evaluation.get("qualified") or []
-    picks = list(qualified[:limit])
-    if len(picks) < limit:
-        considering = sorted(
-            (e for e in evaluation.get("rejected") or [] if e.get("tier") == "consider"),
-            key=lambda e: e.get("margin_pct") or 0, reverse=True,
-        )
-        picks.extend(considering[: limit - len(picks)])
-    return picks
+    return list(qualified[:limit])
 
 
 def discover_sellers_for_pending_candidates(
@@ -309,9 +303,9 @@ def discover_sellers_for_pending_candidates(
     max_age_hours: int = NIGHTLY_SELLER_DISCOVERY_MAX_AGE_HOURS,
 ) -> int:
     """夜間のセラーマイニング枠の冒頭で呼ぶ: 日中のキーワード検索で見つかった
-    合格候補(無ければ要検討候補)のうち、まだセラーを発見していないものを
-    見つけて、discover_and_register_sellers()で登録する(即時マイニングは
-    しない)。
+    合格候補(qualified=1、2026-09-28にpriority_tierへ統合後はS〜C+まで含む)のうち、
+    まだセラーを発見していないものを見つけて、discover_and_register_sellers()で
+    登録する(即時マイニングはしない)。
 
     CEO: 「優良が見つかってもその場では検索せず。セラーサーチは夜間だけに
     する」(2026-09-27) - 以前はrun_daily_scan()が合格候補を見つけたその場で
@@ -334,15 +328,15 @@ def discover_sellers_for_pending_candidates(
         rows = conn.execute(
             '''
             WITH ranked AS (
-                SELECT asin, category, qualified, tier, margin_pct, created_at,
+                SELECT asin, category, qualified, priority_tier, data_json, created_at,
                     ROW_NUMBER() OVER (PARTITION BY asin ORDER BY created_at DESC) AS rn
                 FROM agent_candidates
                 WHERE source_type = 'keyword' AND created_at >= ?
             )
             SELECT asin, category FROM ranked
-            WHERE rn = 1 AND (qualified = 1 OR tier = 'consider')
+            WHERE rn = 1 AND qualified = 1
               AND asin NOT IN (SELECT DISTINCT seed_asin FROM seller_pool WHERE seed_asin IS NOT NULL)
-            ORDER BY qualified DESC, margin_pct DESC
+            ORDER BY ''' + PRIORITY_TIER_SQL_ORDER + ''', json_extract(data_json, '$.roi_pct') DESC
             LIMIT ?
             ''',
             (cutoff, limit),
@@ -495,7 +489,7 @@ def run_daily_scan(
     print("[INFO] 実質利益率(FBA手数料・国際送料込み)でフィルタ中 ...")
     evaluation = evaluate_mcp_candidates(mcp_result)
 
-    print(f"[INFO] 実質利益率20%以上: {len(evaluation['qualified'])}件 / "
+    print(f"[INFO] 合格(優先度C+以上): {len(evaluation['qualified'])}件 / "
           f"却下: {len(evaluation['rejected'])}件")
     if evaluation["weight_missing"]:
         print(f"[WARN] 重量データなし(仮値で計算): {evaluation['weight_missing']}")
@@ -518,7 +512,7 @@ def run_daily_scan(
     # 即時のLINE通知はしない(CEOの希望: 1日の候補は朝8時・夜8時に
     # send_daily_digest.py がまとめて通知する)。ここでは結果をDBに
     # 保存するだけ。
-    print(f"[INFO] 実質利益率{len(evaluation['qualified'])}件合格。ダイジェスト通知(8時/20時)でまとめて送信されます。")
+    print(f"[INFO] 合格(優先度C+以上){len(evaluation['qualified'])}件。ダイジェスト通知(8時/20時)でまとめて送信されます。")
 
     log_agent_run(
         run_id, started_at, time.monotonic() - start_time,

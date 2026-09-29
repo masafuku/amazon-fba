@@ -341,7 +341,7 @@ def init_ops_tables():
             conn.execute('ALTER TABLE agent_candidates ADD COLUMN seller_name TEXT')
         if 'seed_asin' not in agent_candidates_columns:
             conn.execute('ALTER TABLE agent_candidates ADD COLUMN seed_asin TEXT')  # このセラーを見つけたきっかけのASIN
-        # 発注の優先度Tier(S/A/B+/B-/C)・完全除外の種別(food/drug_cosmetic/knife)・
+        # 発注の優先度Tier(S/A+/A-/B+/B-/C+/C-/D)・完全除外の種別(food/drug_cosmetic/knife)・
         # フィギュアのフラグ。既存行は NULL/0 のまま(一括の再分類は
         # scripts/backfill_priority_tier.py で明示的に行う)。
         # keepa-csv-dashboard/sqlite_api_server.py にも同じマイグレーションがある。
@@ -358,26 +358,12 @@ def init_ops_tables():
             conn.execute('ALTER TABLE agent_candidates ADD COLUMN listing_status TEXT')
         if 'listing_checked_at' not in agent_candidates_columns:
             conn.execute('ALTER TABLE agent_candidates ADD COLUMN listing_checked_at TEXT')
+        # tierはpass/consider/reference/rejectという旧・利益率ベースの合否判定列。
+        # 2026-09-28、priority_tier(発注優先度Tier)への統合でqualifiedの計算元から
+        # 外れ、以後どこからも書き込まれない(過去データはそのまま残す。DROP COLUMN
+        # はしない)。ADD COLUMN自体は、新規DBが本番と同じスキーマになるよう残す。
         if 'tier' not in agent_candidates_columns:
             conn.execute('ALTER TABLE agent_candidates ADD COLUMN tier TEXT')
-            # 一度きりのバックフィル: 既存行はmargin_pct/us_price_usd/jp_cost_jpyから
-            # tierを再計算できる(exchange_rate=150.0はevaluate_mcp_candidates()の
-            # 呼び出し元が誰も上書きしていない、このコードベースで常に使われている
-            # デフォルト値)。ADD COLUMN直後の一度だけ実行され、以後'tier'カラムが
-            # 存在するので二度と実行されない。
-            conn.execute(
-                '''
-                UPDATE agent_candidates
-                SET tier = CASE
-                    WHEN margin_pct IS NULL THEN 'reject'
-                    WHEN margin_pct >= 0.20 THEN 'pass'
-                    WHEN margin_pct >= 0 THEN 'consider'
-                    WHEN (us_price_usd - jp_cost_jpy / 150.0) >= 0 THEN 'reference'
-                    ELSE 'reject'
-                END
-                WHERE tier IS NULL
-                '''
-            )
         conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_seller_id ON agent_candidates(seller_id)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_source_type ON agent_candidates(source_type)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_agent_candidates_tier ON agent_candidates(tier)')
@@ -804,25 +790,13 @@ def weekly_report(year_month: str = None) -> dict:
 
 DEFAULT_WEIGHT_KG_FALLBACK = 0.5  # weight_kg が取れない商品向けの保守的な仮値
 
-# CEO: 「輸出ビジネスだと利益率よりも、ROIの方が適切な指標では？」「利益率は15%に
-# しましょう」— 資金を回転させて増やしていくビジネスモデルでは、投下資本(JP原価)
-# に対する回収率(ROI)の方が資金効率の観点で本質的に重要。ただし利益率(US価格に
-# 対する余裕度)は価格競争・手数料変動への耐性を示す安全弁として引き続き必要
-# (ROIが高くても利益率が極端に薄い商品は、僅かな値下げで簡単に赤字転落するため)。
-# ROIを主な合格基準、利益率を安全弁とする二段階ゲート(20%→15%に引き下げ)。
-MIN_MARGIN_PCT = 0.15             # 安全弁: これ未満は(ROIが良くても)自動除外
-MIN_ROI_PCT = 0.50                # 主な合格基準: 資金効率
-
-# 合格ラインの多段階化(CEO: 「合格ラインは何段階かに分けてください。たとえば、
-# US−JPがゼロ以上、つまり手数料が0円なら成立する、というのもみたいです」)。
-# qualified/rejectedという2リストのメンバーシップ自体は変えない(tier==passが
-# qualified、それ以外はすべてrejected) - 各エントリに付与するtierフィールドが
-# 新しい情報として増えるだけ。
-TIER_PASS = 'pass'            # ROI >= 50% かつ 実質利益率 >= 15%(両方満たして合格)
-TIER_CONSIDER = 'consider'    # 実質利益率 0%以上だが、ROIまたは利益率が基準未満
-TIER_REFERENCE = 'reference'  # 実質利益率マイナスだが、手数料を一切引かない粗差
-                               # (US価格 - JP原価)が0以上(=手数料が0円なら成立する)
-TIER_REJECT = 'reject'        # 上記のいずれでもない、または価格データ自体が無い
+# CEO: 「輸出ビジネスだと利益率よりも、ROIの方が適切な指標では？」— 資金を回転させて
+# 増やしていくビジネスモデルでは、投下資本(JP原価)に対する回収率(ROI)が資金効率の
+# 観点で本質的に重要。2026-09-28、CEO判断で旧・合否判定(tier: pass/consider/
+# reference/reject、利益率の安全弁MIN_MARGIN_PCT込み)を廃止し、発注優先度Tier
+# (priority_tier)に一本化した。qualifiedはpriority_tierから導出する
+# (QUALIFIED_PRIORITY_TIERS / is_qualified_priority_tier、下記927行目付近で定義)。
+MIN_ROI_PCT = 0.20                # priority_tierのROI帯境界(PRIORITY_B_SPLIT_ROI)の元値
 
 # CEO: 「何もしていないので特に課税事業者としては登録されていないとおもいます」
 # 「本業は不動産賃貸業です。課税事業者登録は、今後しますが、今は税込前提で試算
@@ -854,127 +828,125 @@ def normalize_jp_cost_for_tax(
     return min(candidates) if candidates else None
 
 
-def _has_minimum_demand_evidence(demand_signal: dict | None) -> bool:
-    """需要データが完全に欠落している(=売上ランクも月間販売数も無い)候補を
-    見分ける。CEO: 「需要シグナルを加味する」への対応。
-
-    NETSEA本実行で、利益率・ROIは基準を満たすのに売上ランク無し・月間販売数
-    無し・出品者1件のみという「合格」判定が4件連続で発生した(実例:
-    B001AI0MDQ/B001AI6DJ8/B0779MLPPK/B07GSDKMPC)。共通していたのは
-    `sales_rank`が完全に欠落(Keepaのstats.current[SALES]が -1 = データなし)
-    していたこと - これは「ランクが低い」のとは違い、Amazonが売上ランクを
-    一切算出していない=ほぼ動きの無いリスティングであることを示す。
-    `sales_rank_drops_30`が0(値として存在はする)だけでは判定材料にしない
-    (0自体は正当な値であり、僅かな実売があるケースと区別がつかないため)。
-
-    demand_signal自体が渡されない(=呼び出し元がまだ対応していない、または
-    データ取得元がKeepaでない)場合は判定不能なので、常にTrue(=足切りしない、
-    従来通りの挙動)を返す。"""
-    if demand_signal is None:
-        return True
-    return demand_signal.get('sales_rank') is not None or demand_signal.get('monthly_sold') is not None
-
-
-def _classify_tier(
-    margin_pct: float | None,
-    roi_pct: float | None,
-    us_price_usd: float | None,
-    jp_cost_usd: float | None,
-    min_margin_pct: float = MIN_MARGIN_PCT,
-    min_roi_pct: float = MIN_ROI_PCT,
-    demand_signal: dict | None = None,
-) -> str:
-    """calc_unit_profit()の結果から4段階のtierを判定する。
-    CEO: 「輸出ビジネスだと利益率よりも、ROIの方が適切な指標では？」— ROIを主な
-    合格基準(資金効率)、利益率を安全弁(価格競争・手数料変動への耐性)として
-    両方を満たす場合のみ合格とする。
-
-    CEO: 「需要シグナルを加味する」— 利益率・ROIの基準を満たしていても、
-    売上ランク・月間販売数のどちらも存在しない(=需要の裏付けが全く無い)
-    候補は、価格が歪んだ放置リスティングである可能性が高いため合格にせず
-    「要検討」に格下げする(不合格にはしない - 価格計算自体は間違っていない
-    ため、人間の目視確認に委ねる)。"""
-    if margin_pct is None:
-        return TIER_REJECT
-    if margin_pct >= min_margin_pct and roi_pct is not None and roi_pct >= min_roi_pct:
-        if _has_minimum_demand_evidence(demand_signal):
-            return TIER_PASS
-        return TIER_CONSIDER
-    if margin_pct >= 0:
-        return TIER_CONSIDER
-    if us_price_usd is not None and jp_cost_usd is not None and (us_price_usd - jp_cost_usd) >= 0:
-        return TIER_REFERENCE
-    return TIER_REJECT
-
-
-# 発注の優先度Tier(S/A/B+/B-/C)。上の`tier`(利益による合格判定: pass/consider/...)
-# とは別物で、こちらは「米国での実売の裏付け」と「ROI・粗利」から発注の優先順を
-# 付けるもの。定義は _shared/fba-sourcing-candidates.md の「Tier 確定版」
-# (2026-09-21)に合わせている: 米国の実売(Keepaの「先月の購入」=monthly_sold、
-# 空欄は50点未満/なし)を根拠にし、monthly_soldが無いときは単独ASINのBSR
-# 上位(目安 #60,000以内)を実売ありとみなす。競合(出品者)数は判定に入れない
-# (メモ欄扱い。CEO確認済み)。日本の実売は使わない。
+# 発注の優先度Tier(S/A+/A-/B+/B-/C+/C-/D)。2026-09-28にCEOと再設計:
+# 旧体系(S/A/B+/B-/C)は、monthly_soldの実数値(Keepa確定値)とBSR絶対値による
+# 推定が区別されず、Sだけ利益$3以上という非対称な足切りがあり、メディアだけ
+# 別基準(ランク変動30日)を使うなど一貫性を欠いていた。新体系は「実売の確度」
+# (強い実売 > 実売あり > ランク変動のみ > 実売なし)と「ROI水準」の
+# 4x4マトリクスで決まる、メディアの特別扱いは廃止(全商品共通の基準)。
+# 競合(出品者)数は判定に入れない(メモ欄扱い。CEO確認済み)。日本の実売は使わない。
+# 仕入れ先(卸)が確定しているかどうかもTierには反映しない(CEO確認済み、対象外)。
+#
+#     実売の確度 ＼ ROI  | >=100%  | 20~100% | 0~20% | <0%(赤字)
+#     強い実売(>=100件)   |   S     |   A+    |  C+   |   C-
+#     実売あり(30~99件)   |   A+    |   A-    |  C+   |   C-
+#     ランク変動のみ       |   B+    |   B-    |  C+   |   C-
+#     実売なし            |   D     |   D     |  D    |   D
+#
+# 実売なしはROIに関わらず無条件でD。roi_pctがNone(判定不能)の場合も一律D。
 PRIORITY_S = 'S'
-PRIORITY_A = 'A'
+PRIORITY_A_PLUS = 'A+'
+PRIORITY_A_MINUS = 'A-'
 PRIORITY_B_PLUS = 'B+'
 PRIORITY_B_MINUS = 'B-'
-PRIORITY_C = 'C'
-PRIORITY_STRONG_MONTHLY_SOLD = 100   # 先月100点以上 = 需要が強い
-PRIORITY_MIN_MONTHLY_SOLD = 50       # 先月50点以上 = 実売あり
-PRIORITY_MAX_SALES_RANK = 60_000     # monthly_sold無しのとき、BSRがこれ以内なら実売あり
-PRIORITY_S_MIN_PROFIT_USD = 3.0      # Sの粗利下限($/個)
-PRIORITY_A_MIN_ROI = 1.0             # S/AのROI下限(100%)
-PRIORITY_B_SPLIT_ROI = MIN_ROI_PCT   # B+/B-の境目(CEO指定: ROI 50% = 利益面の合格ライン)
-# メディア(本・DVD/BD・CD)は、ランキングが「そのカテゴリ内の順位」で雑貨と同じ基準では実売を
-# 判断できない(CEO指示 2026-09-27)ため、BSRの近似は使わず、「先月の購入」か、30日の
-# ランク変動(実売の近似)が一定回数以上ある場合だけ需要ありとみなす。
-PRIORITY_MEDIA_MIN_RANK_DROPS_30 = 10
+PRIORITY_C_PLUS = 'C+'
+PRIORITY_C_MINUS = 'C-'
+PRIORITY_D = 'D'
+PRIORITY_TIER_ORDER = ('S', 'A+', 'A-', 'B+', 'B-', 'C+', 'C-', 'D')  # 優先度の高い順
+
+PRIORITY_STRONG_MONTHLY_SOLD = 100      # 先月100点以上(実数値) = 強い実売
+PRIORITY_REAL_MIN_MONTHLY_SOLD = 30     # 先月30点以上(実数値) = 実売あり
+PRIORITY_HIGH_ROI = 1.0                 # ROI 100%以上の帯
+PRIORITY_B_SPLIT_ROI = MIN_ROI_PCT      # ROI 20%(CEO指定 2026-09-28: 利益面の合格ライン)の帯
+# ランク変動ベースの実売判定基準。旧・メディア専用の閾値だったが、2026-09-28に
+# 全商品共通の基準として採用(メディアの特別扱いは廃止)。
+PRIORITY_MIN_RANK_DROPS_30 = 10
 
 
 def _classify_priority_tier(
-    unit_profit_usd: float | None,
     roi_pct: float | None,
     monthly_sold: int | None,
-    sales_rank: int | None,
-    is_media: bool = False,
-    sales_rank_drops_30: int | None = None,
+    sales_rank_drops_30: int | None,
 ) -> str:
-    """発注の優先度Tier(S/A/B+/B-/C)を返す。
+    """発注の優先度Tier(S/A+/A-/B+/B-/C+/C-/D)を返す。上部のコメントにある
+    4x4マトリクス(実売の確度 x ROI水準)そのものの実装。
 
-    需要: monthly_sold >= 100 は「強い」、>= 50 は「あり」。monthly_soldが無い
-    (Keepaに値が無い=50点未満、またはデータ欠落)ときは、sales_rankが
-    60,000位以内なら「あり」とみなす。それ以外は「なし」。
-    - S : 需要が強い かつ 粗利 >= $3 かつ ROI >= 100%
-    - A : 需要あり かつ ROI >= 100%(Sを除く)
-    - B+: 需要あり かつ 50% <= ROI < 100%
-    - B-: 需要あり かつ ROI < 50%(粗利はプラス)
-    - C : 需要なし、または粗利がゼロ以下・価格データ無し
+    実売の確度(排他的、この優先順で判定):
+    - 強い実売: monthly_soldが実数値 かつ >= 100
+    - 実売あり: monthly_soldが実数値 かつ 30 <= monthly_sold < 100
+    - ランク変動のみ: monthly_soldが無く(None)、sales_rank_drops_30 >= 10
+    - 実売なし: 上記以外(monthly_soldが実数値だが30未満、または両方無し/不足)
+
+    実売なしはROIに関わらず一律D。roi_pctがNone(判定不能)も一律D。
     """
-    if unit_profit_usd is None or roi_pct is None or unit_profit_usd <= 0:
-        return PRIORITY_C
-    strong = monthly_sold is not None and monthly_sold >= PRIORITY_STRONG_MONTHLY_SOLD
-    if is_media:
-        # メディア: BSRの近似は使わない。先月の購入(50以上)か、30日のランク変動(10回以上)が必要。
-        has_demand = (
-            strong
-            or (monthly_sold is not None and monthly_sold >= PRIORITY_MIN_MONTHLY_SOLD)
-            or (sales_rank_drops_30 is not None and sales_rank_drops_30 >= PRIORITY_MEDIA_MIN_RANK_DROPS_30)
-        )
+    if monthly_sold is not None and monthly_sold >= PRIORITY_STRONG_MONTHLY_SOLD:
+        evidence = 'strong'
+    elif monthly_sold is not None and monthly_sold >= PRIORITY_REAL_MIN_MONTHLY_SOLD:
+        evidence = 'real'
+    elif monthly_sold is None and sales_rank_drops_30 is not None and sales_rank_drops_30 >= PRIORITY_MIN_RANK_DROPS_30:
+        evidence = 'rank'
     else:
-        has_demand = (
-            strong
-            or (monthly_sold is not None and monthly_sold >= PRIORITY_MIN_MONTHLY_SOLD)
-            or (monthly_sold is None and sales_rank is not None and sales_rank <= PRIORITY_MAX_SALES_RANK)
-        )
-    if not has_demand:
-        return PRIORITY_C
-    if strong and unit_profit_usd >= PRIORITY_S_MIN_PROFIT_USD and roi_pct >= PRIORITY_A_MIN_ROI:
-        return PRIORITY_S
-    if roi_pct >= PRIORITY_A_MIN_ROI:
-        return PRIORITY_A
+        evidence = 'none'
+
+    if evidence == 'none':
+        return PRIORITY_D
+    if roi_pct is None:
+        return PRIORITY_D
+
+    if roi_pct >= PRIORITY_HIGH_ROI:
+        if evidence == 'strong':
+            return PRIORITY_S
+        if evidence == 'real':
+            return PRIORITY_A_PLUS
+        return PRIORITY_B_PLUS  # rank
     if roi_pct >= PRIORITY_B_SPLIT_ROI:
-        return PRIORITY_B_PLUS
-    return PRIORITY_B_MINUS
+        if evidence in ('strong', 'real'):
+            return PRIORITY_A_MINUS if evidence == 'real' else PRIORITY_A_PLUS
+        return PRIORITY_B_MINUS  # rank
+    if roi_pct >= 0:
+        return PRIORITY_C_PLUS
+    return PRIORITY_C_MINUS
+
+
+# 2026-09-28、CEO判断で旧・合否判定(tier: pass/consider/reference/reject)を廃止し、
+# qualifiedはpriority_tierから直接導出する形に統合した。「実売証拠があり、ROIが
+# 赤字でない」ものを合格とする(C+=ROI0〜20%も合格に含む、CEO: 「C+も合格では？」)。
+QUALIFIED_PRIORITY_TIERS = ('S', 'A+', 'A-', 'B+', 'B-', 'C+')
+
+# 8値のpriority_tierを優先度順に並べるSQLのCASE式。ops_finance.py側のORDER BYや、
+# ダッシュボードAPI(sqlite_api_server.py)側で同じ並びを再現する際に使う
+# (後者は独立スキーマの都合上インポートできないため、この文字列をコピーする)。
+PRIORITY_TIER_SQL_ORDER = 'CASE priority_tier ' + ' '.join(
+    f"WHEN '{tier}' THEN {index}" for index, tier in enumerate(PRIORITY_TIER_ORDER)
+) + f' ELSE {len(PRIORITY_TIER_ORDER)} END'
+
+
+def is_qualified_priority_tier(priority_tier: str | None) -> bool:
+    """priority_tierから合格/不合格を判定する。None(完全除外品)・C-(赤字)・
+    D(実売証拠なし)は不合格、それ以外(S/A+/A-/B+/B-/C+)は合格。"""
+    return priority_tier in QUALIFIED_PRIORITY_TIERS
+
+
+def _priority_rejection_reason(entry: dict) -> str | None:
+    """不合格(is_qualified_priority_tier==False)の場合に表示する理由文言を返す。
+    合格の場合はNone。旧tierと違い、利益率(margin_pct)には一切言及しない
+    (2026-09-28、利益率の安全弁は廃止されたため)。"""
+    priority_tier = entry.get('priority_tier')
+    if is_qualified_priority_tier(priority_tier):
+        return None
+    roi_pct = entry.get('roi_pct')
+    if priority_tier == PRIORITY_C_MINUS:
+        return f"ROI {roi_pct:.0%}(赤字)" if roi_pct is not None else "ROI 赤字"
+    # ここに来るのはD、またはpriority_tier自体が未計算(None、通常は起きないが念のため)
+    if roi_pct is None:
+        return "ROIを計算できない(価格・原価データ不足)"
+    monthly_sold = entry.get('monthly_sold')
+    drops = entry.get('sales_rank_drops_30')
+    return (
+        f"米国の実売の根拠なし(先月の販売 {monthly_sold if monthly_sold is not None else '-'}件"
+        f" / ランク変動30日 {drops if drops is not None else '-'}回。"
+        f"基準: 30件以上、または販売数不明でランク変動10回以上)"
+    )
 
 
 # 完全除外カテゴリ(輸出に課題があるため。CEO: 「食品、医薬品、刃物は輸出に課題が
@@ -1162,18 +1134,21 @@ def _apply_priority_fields(entry: dict) -> dict:
     entry['excluded_kind'] = kind
     entry['is_figure'] = bool(_is_figure_or_collectible_keyword(title))
     entry['priority_tier'] = None if kind else _classify_priority_tier(
-        entry.get('unit_profit_usd'), entry.get('roi_pct'),
-        entry.get('monthly_sold'), entry.get('sales_rank'),
-        is_media=_is_media(entry.get('asin'), title),
-        sales_rank_drops_30=entry.get('sales_rank_drops_30'),
+        entry.get('roi_pct'), entry.get('monthly_sold'), entry.get('sales_rank_drops_30'),
     )
     return entry
 
 
+def _qualified_sort_key(entry: dict) -> tuple:
+    """qualifiedリストの並び順: priority_tier(S>A+>...>D)昇順、
+    同Tier内はroi_pct降順(Noneは最後)。"""
+    tier_index = PRIORITY_TIER_ORDER.index(entry['priority_tier']) if entry.get('priority_tier') in PRIORITY_TIER_ORDER else len(PRIORITY_TIER_ORDER)
+    roi_pct = entry.get('roi_pct')
+    return (tier_index, roi_pct is None, -roi_pct if roi_pct is not None else 0)
+
+
 def evaluate_mcp_candidates(
     mcp_result: dict,
-    min_margin_pct: float = MIN_MARGIN_PCT,
-    min_roi_pct: float = MIN_ROI_PCT,
     exchange_rate: float = 150.0,
 ) -> dict:
     """keepa_mcp.server.find_arbitrage_candidates() の戻り値を受け取り、
@@ -1187,10 +1162,13 @@ def evaluate_mcp_candidates(
     使い、無い場合のみ calc_unit_profit() のデフォルト仮値にフォールバック
     する(国際送料は仮値のまま。Keepaは国際配送費までは持っていない)。
 
+    合否(qualified)はpriority_tierから導出する(is_qualified_priority_tier、
+    2026-09-28に旧・利益率ベースのtier判定から統合)。
+
     Returns:
         {
-          'qualified': [利益率が閾値以上の候補 + profit詳細],
-          'rejected':  [利益率が閾値未満だった候補 + 理由],
+          'qualified': [priority_tierが合格範囲の候補 + profit詳細],
+          'rejected':  [priority_tierが不合格範囲だった候補 + 理由],
           'weight_missing': [重量データが無く仮値で計算した候補のASIN一覧],
           'fee_missing': [手数料データが無く仮値で計算した候補のASIN一覧],
         }
@@ -1297,22 +1275,15 @@ def evaluate_mcp_candidates(
             'jp_amazon_cost_jpy': cost['price'],
             'wholesale_cost_jpy': None,
         }
-        entry['tier'] = _classify_tier(
-            profit['margin_pct'], profit['roi_pct'], profit['us_price_usd'], profit['jp_cost_usd'],
-            min_margin_pct, min_roi_pct, entry['demand_signal'],
-        )
         _apply_priority_fields(entry)
 
-        if entry['tier'] == TIER_PASS:
+        if is_qualified_priority_tier(entry['priority_tier']):
             qualified.append(entry)
         else:
-            entry['reason'] = (
-                f"実質利益率 {profit['margin_pct']:.1%}(閾値{min_margin_pct:.0%}) / "
-                f"ROI {profit['roi_pct']:.0%}(閾値{min_roi_pct:.0%}) が基準未満"
-            )
+            entry['reason'] = _priority_rejection_reason(entry)
             rejected.append(entry)
 
-    qualified.sort(key=lambda e: e['margin_pct'], reverse=True)
+    qualified.sort(key=_qualified_sort_key)
 
     # keepa_mcp.find_arbitrage_candidates() の粗選別(価格変動・JP一致・
     # 価格差率など)で落ちた候補も「不合格」として表示する。
@@ -1362,7 +1333,6 @@ def evaluate_mcp_candidates(
             'wholesale_cost_jpy': None,
             'unit_profit_usd': None,
             'margin_pct': None,
-            'tier': TIER_REJECT,  # 価格データが無い場合の既定値(下で価格が両方揃えば上書きされる)
             'reason': f"粗選別で除外: {_translate_skip_reason(skip.get('reason', ''))}",
         }
 
@@ -1396,11 +1366,10 @@ def evaluate_mcp_candidates(
             entry['weight_kg'] = weight_kg
             entry['weight_estimated'] = used_fallback_weight
             entry['fee_estimated'] = used_fallback_fee
-            entry['tier'] = _classify_tier(
-                profit['margin_pct'], profit['roi_pct'], profit['us_price_usd'], profit['jp_cost_usd'],
-                min_margin_pct, min_roi_pct, entry['demand_signal'],
-            )
 
+        # 粗選別で落ちた行は、価格が両方揃ってpriority_tierが合格範囲になったとしても
+        # qualifiedには入れない(粗選別自体の判断=価格差率や変動率の問題を優先する)。
+        # reasonは上で設定した「粗選別で除外」のまま変えない。
         _apply_priority_fields(entry)
         rejected.append(entry)
 
@@ -1435,28 +1404,6 @@ def _translate_skip_reason(reason: str) -> str:
     return reason or '理由不明'
 
 
-def build_qualified_line_message(evaluation: dict, max_items: int = 5) -> str:
-    """evaluate_mcp_candidates() の結果を notify_line.send_line_notify() に
-    渡せるメッセージ文字列に整形する。"""
-    qualified = evaluation['qualified']
-    if not qualified:
-        return f"本日の候補: 実質利益率20%以上の商品は見つかりませんでした(評価{evaluation['evaluated']}件)。"
-
-    lines = [f"実質利益率{MIN_MARGIN_PCT:.0%}以上の候補 {len(qualified)}件"]
-    for item in qualified[:max_items]:
-        weight_note = '(重量は仮値)' if item['weight_estimated'] else ''
-        lines.append('---')
-        lines.append(f"ASIN: {item['asin']}")
-        lines.append(f"{item['title']}")
-        lines.append(f"利益率: {item['margin_pct']:.1%} / 1個あたり利益: ${item['unit_profit_usd']:.2f}")
-        lines.append(f"ランキング: {item['sales_rank']} / レビュー数: {item['review_count']}{weight_note}")
-
-    if len(qualified) > max_items:
-        lines.append(f"他 {len(qualified) - max_items} 件")
-
-    return '\n'.join(lines)
-
-
 # ---------------------------------------------------------------------------
 # 7. 1日2回(朝8時/夜8時)のLINEダイジェスト通知
 #
@@ -1486,11 +1433,11 @@ def set_last_digest_sent_at(sent_at: str) -> None:
         )
 
 
-LISTING_CHECK_TIERS = ('S', 'A', 'B+')   # 出品可否を照会する優先度Tier(照会の件数を抑えるため上位だけ)
+LISTING_CHECK_TIERS = ('S', 'A+', 'A-', 'B+')   # 出品可否を照会する優先度Tier(照会の件数を抑えるため上位だけ)
 
 
 def load_asins_needing_listing_check(limit: int = 30, max_age_days: int = 7, all_tiers: bool = False) -> list:
-    """出品可否を照会すべきASINを返す: 優先度Tier S/A/B+ で、完全除外・フィギュア・メディア・
+    """出品可否を照会すべきASINを返す: 優先度Tier S/A+/A-/B+ で、完全除外・フィギュア・メディア・
     出品制限ブランドではなく、未確認、または前回の照会から max_age_days 日以上たったもの。
     Tierの高い順、同じTierでは新しい順。
 
@@ -1511,7 +1458,7 @@ def load_asins_needing_listing_check(limit: int = 30, max_age_days: int = 7, all
             SELECT asin, title, priority_tier, data_json FROM ranked
             WHERE rn = 1 {'' if all_tiers else f'AND priority_tier IN ({placeholders})'}
               AND (listing_checked_at IS NULL OR listing_checked_at < ?)
-            ORDER BY CASE priority_tier WHEN 'S' THEN 0 WHEN 'A' THEN 1 WHEN 'B+' THEN 2 WHEN 'B-' THEN 3 ELSE 4 END, created_at DESC
+            ORDER BY CASE priority_tier WHEN 'S' THEN 0 WHEN 'A+' THEN 1 WHEN 'A-' THEN 2 WHEN 'B+' THEN 3 WHEN 'B-' THEN 4 WHEN 'C+' THEN 5 WHEN 'C-' THEN 6 WHEN 'D' THEN 7 ELSE 8 END, created_at DESC
             ''',
             (cutoff,) if all_tiers else (*LISTING_CHECK_TIERS, cutoff),
         ).fetchall()
@@ -1545,7 +1492,7 @@ def save_listing_status(asin: str, status: str) -> int:
 # NETSEAの卸価格の付与(カタログ同期 -> 候補のJANで突き合わせ)
 # ---------------------------------------------------------------------------
 
-WHOLESALE_CHECK_TIERS = ('S', 'A', 'B+')
+WHOLESALE_CHECK_TIERS = ('S', 'A+', 'A-', 'B+')
 
 
 def netsea_rows_from_items(items: list, fetched_at: str) -> list:
@@ -1651,7 +1598,7 @@ def find_netsea_match(jans: list) -> dict | None:
 
 
 def load_candidates_needing_wholesale(limit: int = 20, max_age_days: int = 7) -> list:
-    """NETSEAの卸価格を照会すべき候補(ASINごとの最新行)を返す: 優先度Tier S/A/B+ で出品可
+    """NETSEAの卸価格を照会すべき候補(ASINごとの最新行)を返す: 優先度Tier S/A+/A-/B+ で出品可
     (listing_status='ok')、完全除外・フィギュア・NETSEA由来ではなく、未照会または
     max_age_days日以上前のもの。Tierの高い順。戻り値: [{'id', 'asin', 'jans'}]"""
     init_ops_tables()
@@ -1671,7 +1618,7 @@ def load_candidates_needing_wholesale(limit: int = 20, max_age_days: int = 7) ->
               AND json_extract(data_json, '$.netsea_jan') IS NULL
               AND (json_extract(data_json, '$.wholesale_checked_at') IS NULL
                    OR json_extract(data_json, '$.wholesale_checked_at') < ?)
-            ORDER BY CASE priority_tier WHEN 'S' THEN 0 WHEN 'A' THEN 1 ELSE 2 END, created_at DESC
+            ORDER BY CASE priority_tier WHEN 'S' THEN 0 WHEN 'A+' THEN 1 WHEN 'A-' THEN 2 WHEN 'B+' THEN 3 WHEN 'B-' THEN 4 WHEN 'C+' THEN 5 WHEN 'C-' THEN 6 WHEN 'D' THEN 7 ELSE 8 END, created_at DESC
             ''',
             (*WHOLESALE_CHECK_TIERS, cutoff),
         ).fetchall()
@@ -1698,7 +1645,7 @@ def load_candidates_needing_wholesale(limit: int = 20, max_age_days: int = 7) ->
 
 def _recompute_cost_and_tier(
     data: dict, title: str | None, monthly_sold, sales_rank, tier: str | None, excluded_kind: str | None,
-    old_cost_jpy: float | None, new_cost_jpy: float | None,
+    old_cost_jpy: float | None, new_cost_jpy: float | None, new_source: str | None = None,
 ) -> tuple[dict, dict]:
     """新しい原価候補(new_cost_jpy、税基準は揃え済み)が、今の原価(old_cost_jpy)より
     安ければ、利益・ROI・優先度Tierを再計算する(手数料・為替・重量は、dataに保存済みの
@@ -1709,13 +1656,26 @@ def _recompute_cost_and_tier(
     変えていない - test_netsea_wholesale.pyがそのまま通ることで担保)。
 
     戻り値: (更新後のdata, {'recalculated': bool, 'roi_before', 'roi_after', 'tier_before',
-    'tier_after', 'db_updates': {jp_cost_jpy/unit_profit_usd/margin_pct/priority_tier}})。
-    再計算しなかった場合、'db_updates'は空dict。
-    """
+    'tier_after', 'db_updates': {jp_cost_jpy/unit_profit_usd/margin_pct/priority_tier/
+    qualified/reason}})。再計算しなかった場合、'db_updates'は空dict。
+
+    2026-09-28: qualified/reasonもここで再計算してdb_updatesに含める(旧・非同期バグの
+    修正 - 以前はpriority_tierだけ更新され、qualifiedは仕入れ先確定前の古い値のまま
+    だった)。
+
+    2026-09-28: 同額タイブレーク(CEO:「netseaとsdが同じ値段ならsdを優先して」) -
+    new_source='sd'かつ現在の原価の出所(data['jp_cost_source'])がsdでない場合、
+    金額が同じ(0.5円以内)でも情報源をSDに差し替える(採用原価の数値は変わらないが、
+    どの仕入れ先を正としてdata_jsonに記録するかが変わる)。"""
     result = {'recalculated': False}
     usable = all(data.get(k) for k in ('us_price_usd', 'jp_cost_usd')) and data.get('fba_fee_usd') is not None \
         and data.get('amazon_fee_usd') is not None and data.get('weight_kg') is not None and old_cost_jpy
-    if not (usable and new_cost_jpy is not None and new_cost_jpy < old_cost_jpy - 0.5):
+    is_cheaper = new_cost_jpy is not None and new_cost_jpy < old_cost_jpy - 0.5 if old_cost_jpy else False
+    is_tie_sd_preferred = (
+        new_source == 'sd' and data.get('jp_cost_source') != 'sd'
+        and new_cost_jpy is not None and old_cost_jpy is not None and abs(new_cost_jpy - old_cost_jpy) <= 0.5
+    )
+    if not (usable and new_cost_jpy is not None and (is_cheaper or is_tie_sd_preferred)):
         return data, result
 
     exchange_rate = old_cost_jpy / data['jp_cost_usd']
@@ -1730,14 +1690,24 @@ def _recompute_cost_and_tier(
     data['jp_cost_jpy_before_wholesale'] = old_cost_jpy
     data.update(profit)
     data['jp_cost_jpy'] = new_cost_jpy
+    if new_source:
+        data['jp_cost_source'] = new_source
     entry = {**data, 'title': title, 'monthly_sold': monthly_sold, 'sales_rank': sales_rank}
     _apply_priority_fields(entry)
-    new_tier = entry['priority_tier']
+    new_tier = None if excluded_kind else entry['priority_tier']
+    entry['priority_tier'] = new_tier
+    new_qualified = 0 if excluded_kind else int(is_qualified_priority_tier(new_tier))
+    new_reason = None if new_qualified else _priority_rejection_reason(entry)
     db_updates = {
         'jp_cost_jpy': new_cost_jpy, 'unit_profit_usd': profit['unit_profit_usd'],
-        'margin_pct': profit['margin_pct'], 'priority_tier': None if excluded_kind else new_tier,
+        'margin_pct': profit['margin_pct'], 'priority_tier': new_tier,
+        'qualified': new_qualified, 'reason': new_reason,
     }
-    result.update({'roi_after': profit['roi_pct'], 'tier_after': db_updates['priority_tier'], 'db_updates': db_updates})
+    result.update({
+        'roi_after': profit['roi_pct'], 'tier_after': new_tier,
+        'qualified_before': None, 'qualified_after': new_qualified,
+        'db_updates': db_updates,
+    })
     return data, result
 
 
@@ -1752,12 +1722,13 @@ def apply_wholesale_result(row_id: int, match: dict | None) -> dict:
     with sqlite3.connect(DB_PATH, timeout=30) as conn:
         row = conn.execute(
             'SELECT asin, title, monthly_sold, sales_rank, jp_cost_jpy, unit_profit_usd, margin_pct, '
-            'priority_tier, excluded_kind, data_json FROM agent_candidates WHERE id = ?',
+            'priority_tier, excluded_kind, qualified, data_json FROM agent_candidates WHERE id = ?',
             (row_id,),
         ).fetchone()
         if row is None:
             return result
-        asin, title, monthly_sold, sales_rank, jp_cost_jpy, unit_profit_usd, margin_pct, tier, excluded_kind, data_json = row
+        (asin, title, monthly_sold, sales_rank, jp_cost_jpy, unit_profit_usd, margin_pct, tier,
+         excluded_kind, qualified_before, data_json) = row
         data = json.loads(data_json) if data_json else {}
         data['wholesale_checked_at'] = now
         db_updates = {}
@@ -1774,8 +1745,10 @@ def apply_wholesale_result(row_id: int, match: dict | None) -> dict:
             old_cost = jp_cost_jpy if jp_cost_jpy is not None else data.get('jp_cost_jpy')
             data, recompute_result = _recompute_cost_and_tier(
                 data, title, monthly_sold, sales_rank, tier, excluded_kind, old_cost, new_cost,
+                new_source='netsea',
             )
             db_updates = recompute_result.pop('db_updates', {})
+            recompute_result['qualified_before'] = qualified_before
             result.update(recompute_result)
         assignments = ', '.join(f'{k} = ?' for k in ('data_json', *db_updates))
         conn.execute(
@@ -1815,14 +1788,16 @@ def add_manual_supplier(
     result = {'matched': False, 'recalculated': False, 'rows_updated': 0}
     with sqlite3.connect(DB_PATH, timeout=30) as conn:
         rows = conn.execute(
-            'SELECT id, title, monthly_sold, sales_rank, jp_cost_jpy, priority_tier, excluded_kind, data_json, created_at '
+            'SELECT id, title, monthly_sold, sales_rank, jp_cost_jpy, priority_tier, excluded_kind, '
+            'qualified, data_json, created_at '
             'FROM agent_candidates WHERE asin = ? ORDER BY created_at DESC',
             (asin,),
         ).fetchall()
         if not rows:
             return result
         result['matched'] = True
-        for index, (row_id, title, monthly_sold, sales_rank, jp_cost_jpy, tier, excluded_kind, data_json, _created_at) in enumerate(rows):
+        for index, (row_id, title, monthly_sold, sales_rank, jp_cost_jpy, tier, excluded_kind,
+                    qualified_before, data_json, _created_at) in enumerate(rows):
             data = json.loads(data_json) if data_json else {}
             suppliers = [
                 s for s in (data.get('manual_suppliers') or [])
@@ -1833,8 +1808,10 @@ def add_manual_supplier(
             old_cost = jp_cost_jpy if jp_cost_jpy is not None else data.get('jp_cost_jpy')
             data, recompute_result = _recompute_cost_and_tier(
                 data, title, monthly_sold, sales_rank, tier, excluded_kind, old_cost, new_cost,
+                new_source=source,
             )
             db_updates = recompute_result.pop('db_updates', {})
+            recompute_result['qualified_before'] = qualified_before
             if index == 0:   # 最新行の結果を代表として返す
                 result.update(recompute_result)
             assignments = ', '.join(f'{k} = ?' for k in ('data_json', *db_updates))
@@ -1846,13 +1823,13 @@ def add_manual_supplier(
     return result
 
 
-DIGEST_PRIORITY_TIERS = ('S', 'A', 'B+')   # LINEの朝/夜の通知に載せる優先度Tier(CEO指示 2026-09-27)
+DIGEST_PRIORITY_TIERS = ('S', 'A+', 'A-', 'B+')   # LINEの朝/夜の通知に載せる優先度Tier(2026-09-28 Tier再設計)
 _DIGEST_TIER_ORDER = {tier: index for index, tier in enumerate(DIGEST_PRIORITY_TIERS)}
 
 
 def load_digest_window(since_iso: str | None):
     """前回ダイジェスト送信以降(初回はsince_iso=None、直近24時間扱い)の
-    データをまとめて返す: 優先度Tier S/A/B+ の候補(ASIN重複除去・複数回見つかった
+    データをまとめて返す: 優先度Tier S/A+/A-/B+ の候補(ASIN重複除去・複数回見つかった
     場合は最新のものを採用)と、その間に検索したキーワード一覧。
 
     完全除外(食品・医薬品/化粧品・刃物)・フィギュア・メディア(本/DVD/CD)・
@@ -1940,7 +1917,7 @@ def build_daily_digest_message(
         lines.append("検索は行われませんでした。")
 
     if not candidates:
-        lines.append("優先度Tier S/A/B+ の候補はありませんでした。")
+        lines.append("優先度Tier S/A+/A-/B+ の候補はありませんでした。")
     else:
         tier_counts = ' / '.join(
             f"{tier}: {sum(1 for c in candidates if c.get('priority_tier') == tier)}件"
@@ -2057,7 +2034,6 @@ def persist_agent_run(
                 item.get('unit_profit_usd'),
                 item.get('margin_pct'),
                 qualified_flag,
-                item.get('tier'),
                 item.get('reason'),
                 json.dumps(item, ensure_ascii=False),
                 created_at,
@@ -2079,10 +2055,10 @@ def persist_agent_run(
                     us_price_usd, jp_cost_jpy, sales_rank, review_count, monthly_sold, price_volatility_90d,
                     weight_kg, weight_estimated, fee_estimated,
                     price_diff_rate_gross, unit_profit_usd, margin_pct,
-                    qualified, tier, reason, data_json, created_at,
+                    qualified, reason, data_json, created_at,
                     source_type, seller_id, seller_name, seed_asin,
                     priority_tier, excluded_kind, is_figure
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''',
                 rows,
             )

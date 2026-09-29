@@ -34,12 +34,11 @@ from netsea_client import BATCH_SIZE, NetseaError, get_items, get_suppliers
 from ops_finance import (
     DB_PATH,
     DEFAULT_WEIGHT_KG_FALLBACK,
-    MIN_MARGIN_PCT,
-    MIN_ROI_PCT,
     _apply_priority_fields,
-    _classify_tier,
+    _priority_rejection_reason,
     calc_unit_profit,
     init_ops_tables,
+    is_qualified_priority_tier,
     log_agent_run,
     new_agent_run_id,
     normalize_jp_cost_for_tax,
@@ -174,8 +173,6 @@ def find_jan_matched_candidates(
     price_range_from: Optional[int] = None,
     price_range_to: Optional[int] = None,
     exchange_rate: float = 150.0,
-    min_margin_pct: float = MIN_MARGIN_PCT,
-    min_roi_pct: float = MIN_ROI_PCT,
     wait_for_tokens: bool = False,
     run_id: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -352,14 +349,11 @@ def find_jan_matched_candidates(
             "wholesale_cost_jpy": wholesale_cost_jpy,
             "jp_amazon_cost_jpy": jp_amazon_cost_jpy,
         }
-        entry["tier"] = _classify_tier(
-            profit["margin_pct"], profit["roi_pct"], profit["us_price_usd"], profit["jp_cost_usd"],
-            min_margin_pct, min_roi_pct, entry["demand_signal"],
-        )
         entry["category"] = f"NETSEA卸仕入れ({meta['category_label']})"
         _apply_priority_fields(entry)
+        is_qualified = is_qualified_priority_tier(entry["priority_tier"])
 
-        if entry["tier"] == "pass":
+        if is_qualified:
             # 合格候補のみ在庫情報を追加取得(トークンコストがあるため合格分のみ、
             # 既存のenrich_qualified_candidates_with_offer_details()の制約通り)。
             # 以前はカテゴリー単位でまとめて呼んでいたが、保存の粒度を1件単位に
@@ -367,10 +361,7 @@ def find_jan_matched_candidates(
             enrich_qualified_candidates_with_offer_details([entry], wait_for_tokens=wait_for_tokens)
             qualified.append(entry)
         else:
-            entry["reason"] = (
-                f"実質利益率 {profit['margin_pct']:.1%}(閾値{min_margin_pct:.0%}) / "
-                f"ROI {profit['roi_pct']:.0%}(閾値{min_roi_pct:.0%}) が基準未満"
-            )
+            entry["reason"] = _priority_rejection_reason(entry)
             rejected.append(entry)
 
         # CEO: 「すくなくとも細かく結果を保存する形にして」— JAN1件処理するたびに
@@ -378,7 +369,7 @@ def find_jan_matched_candidates(
         # ここまでの分は残る。
         persist_agent_run(
             entry["category"],
-            {"qualified": [entry]} if entry["tier"] == "pass" else {"rejected": [entry]},
+            {"qualified": [entry]} if is_qualified else {"rejected": [entry]},
             run_id=run_id,
             source_type="netsea",
         )

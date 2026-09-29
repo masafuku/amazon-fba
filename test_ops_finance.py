@@ -8,15 +8,15 @@ import ops_finance
 from ops_finance import (
     _apply_priority_fields,
     _classify_priority_tier,
-    _classify_tier,
     _excluded_kind,
     _gated_brand,
     _is_media,
-    _has_minimum_demand_evidence,
+    _priority_rejection_reason,
     _is_searchable_keyword,
     _shipping_cost_jpy_for_weight,
     calc_unit_profit,
     evaluate_mcp_candidates,
+    is_qualified_priority_tier,
     normalize_jp_cost_for_tax,
     build_daily_digest_message,
     load_asins_needing_listing_check,
@@ -99,101 +99,43 @@ class TestCalcUnitProfitRoi(unittest.TestCase):
         self.assertEqual(result['roi_pct'], 0.0)
 
 
-class TestClassifyTier(unittest.TestCase):
-    """合格ラインの多段階化(CEO: 「合格ラインは何段階かに分けてください」)。
-    _classify_tier() の境界値を確認する。
+class TestIsQualifiedPriorityTier(unittest.TestCase):
+    """2026-09-28、tier(pass/consider/reference/reject)をpriority_tierに統合。
+    qualified = priority_tier in (S/A+/A-/B+/B-/C+)。C-(赤字)・D(実売証拠なし)・
+    None(完全除外品)は不合格。"""
 
-    CEO: 「輸出ビジネスだと利益率よりも、ROIの方が適切な指標では？」「利益率は
-    15%にしましょう」— ROI(投下資本利益率)を主な合格基準、実質利益率15%を
-    安全弁とする二段階ゲート(両方満たして初めてpass)。デフォルトは
-    MIN_MARGIN_PCT=0.15, MIN_ROI_PCT=0.50。
-    """
+    def test_qualified_tiers(self):
+        for tier in ('S', 'A+', 'A-', 'B+', 'B-', 'C+'):
+            self.assertTrue(is_qualified_priority_tier(tier), tier)
 
-    def test_exactly_at_both_thresholds_passes(self):
-        self.assertEqual(_classify_tier(0.15, 0.50, 100, 50), 'pass')
-
-    def test_margin_below_threshold_with_good_roi_is_consider_not_pass(self):
-        # ROIは基準を満たすが、利益率という安全弁を割っているのでpassにしない
-        self.assertEqual(_classify_tier(0.1499, 0.90, 100, 50), 'consider')
-
-    def test_roi_below_threshold_with_good_margin_is_consider_not_pass(self):
-        # 利益率は十分だが、ROI(主な合格基準)が基準未満ならpassにしない
-        self.assertEqual(_classify_tier(0.30, 0.4999, 100, 50), 'consider')
-
-    def test_roi_none_does_not_pass_even_with_good_margin(self):
-        self.assertEqual(_classify_tier(0.30, None, 100, 50), 'consider')
-
-    def test_exactly_zero_margin(self):
-        self.assertEqual(_classify_tier(0.0, 0.50, 100, 50), 'consider')
-
-    def test_just_below_zero_margin_with_nonneg_gross(self):
-        # margin_pctはマイナスだが、手数料を一切引かない粗差(US-JP)はちょうど0
-        self.assertEqual(_classify_tier(-0.01, None, 100, 100), 'reference')
-
-    def test_negative_margin_negative_gross(self):
-        self.assertEqual(_classify_tier(-0.01, None, 90, 100), 'reject')
-
-    def test_no_price_data(self):
-        self.assertEqual(_classify_tier(None, None, None, None), 'reject')
-
-    def test_custom_thresholds(self):
-        self.assertEqual(
-            _classify_tier(0.10, 0.30, 100, 50, min_margin_pct=0.10, min_roi_pct=0.30), 'pass',
-        )
-        self.assertEqual(
-            _classify_tier(0.09, 0.30, 100, 50, min_margin_pct=0.10, min_roi_pct=0.30), 'consider',
-        )
-
-    def test_demand_signal_not_passed_does_not_gate(self):
-        # 後方互換: demand_signal省略時は従来通り需要データを見ずに合格させる
-        self.assertEqual(_classify_tier(0.15, 0.50, 100, 50), 'pass')
-
-    def test_no_demand_evidence_demotes_pass_to_consider(self):
-        # CEO: 「需要シグナルを加味する」— NETSEA本実行で実際に発生した誤検知
-        # (売上ランクも月間販売数も無いのに利益率・ROIは基準を満たす)の実例に
-        # 基づく。不合格にはせず要検討に格下げする。
-        no_demand = {'sales_rank': None, 'monthly_sold': None}
-        self.assertEqual(_classify_tier(0.15, 0.50, 100, 50, demand_signal=no_demand), 'consider')
-
-    def test_sales_rank_present_is_enough_even_without_monthly_sold(self):
-        has_rank_only = {'sales_rank': 36158, 'monthly_sold': None}
-        self.assertEqual(_classify_tier(0.15, 0.50, 100, 50, demand_signal=has_rank_only), 'pass')
-
-    def test_monthly_sold_present_is_enough_even_without_sales_rank(self):
-        has_monthly_only = {'sales_rank': None, 'monthly_sold': 200}
-        self.assertEqual(_classify_tier(0.15, 0.50, 100, 50, demand_signal=has_monthly_only), 'pass')
-
-    def test_demand_gate_does_not_affect_non_pass_tiers(self):
-        # 需要データが無くても、そもそもmargin/roiで合格していない場合は
-        # 従来通りconsider/reference/rejectのまま(格下げの対象はpassのみ)
-        no_demand = {'sales_rank': None, 'monthly_sold': None}
-        self.assertEqual(_classify_tier(0.10, 0.30, 100, 50, demand_signal=no_demand), 'consider')
+    def test_unqualified_tiers(self):
+        for tier in ('C-', 'D', None):
+            self.assertFalse(is_qualified_priority_tier(tier), tier)
 
 
-class TestHasMinimumDemandEvidence(unittest.TestCase):
-    """CEO: 「需要シグナルを加味する」— NETSEA本実行で4件連続発生した誤検知
-    (B001AI0MDQ/B001AI6DJ8/B0779MLPPK/B07GSDKMPCいずれも売上ランク・月間販売数
-    ともに無し、出品者1件のみ)を踏まえた足切り判定。"""
+class TestPriorityRejectionReason(unittest.TestCase):
+    """不合格理由の文言。利益率には一切言及しない(2026-09-28、安全弁廃止)。"""
 
-    def test_none_demand_signal_means_not_gated(self):
-        # 呼び出し元がまだdemand_signalを渡していない場合は判定不能 -> 従来通り
-        self.assertTrue(_has_minimum_demand_evidence(None))
+    def test_qualified_entry_has_no_reason(self):
+        entry = {'priority_tier': 'C+', 'roi_pct': 0.1}
+        self.assertIsNone(_priority_rejection_reason(entry))
 
-    def test_both_missing_returns_false(self):
-        self.assertFalse(_has_minimum_demand_evidence({'sales_rank': None, 'monthly_sold': None}))
+    def test_negative_roi_mentions_deficit(self):
+        entry = {'priority_tier': 'C-', 'roi_pct': -0.2}
+        reason = _priority_rejection_reason(entry)
+        self.assertIn('赤字', reason)
+        self.assertNotIn('利益率', reason)
 
-    def test_sales_rank_drops_30_zero_alone_is_not_enough(self):
-        # sales_rank_drops_30が0(値としては存在)だけでは需要の裏付けにしない -
-        # 実際の誤検知4件は全てdrops_30=0だった
-        self.assertFalse(_has_minimum_demand_evidence(
-            {'sales_rank': None, 'monthly_sold': None, 'sales_rank_drops_30': 0}
-        ))
+    def test_no_evidence_mentions_sales_basis(self):
+        entry = {'priority_tier': 'D', 'roi_pct': 0.5, 'monthly_sold': 10, 'sales_rank_drops_30': None}
+        reason = _priority_rejection_reason(entry)
+        self.assertIn('実売の根拠なし', reason)
+        self.assertNotIn('利益率', reason)
 
-    def test_sales_rank_present_is_sufficient(self):
-        self.assertTrue(_has_minimum_demand_evidence({'sales_rank': 36158, 'monthly_sold': None}))
-
-    def test_monthly_sold_present_is_sufficient(self):
-        self.assertTrue(_has_minimum_demand_evidence({'sales_rank': None, 'monthly_sold': 200}))
+    def test_roi_none_mentions_calculation_failure(self):
+        entry = {'priority_tier': 'D', 'roi_pct': None}
+        reason = _priority_rejection_reason(entry)
+        self.assertIn('計算できない', reason)
 
 
 class TestNormalizeJpCostForTax(unittest.TestCase):
@@ -316,7 +258,7 @@ class TestEvaluateMcpCandidatesExclusions(unittest.TestCase):
         entry = entries[0]
         self.assertTrue(entry['is_figure'])
         self.assertIsNone(entry['excluded_kind'])
-        self.assertIn(entry['priority_tier'], ('S', 'A', 'B+', 'B-', 'C'))
+        self.assertIn(entry['priority_tier'], ('S', 'A+', 'A-', 'B+', 'B-', 'C+', 'C-', 'D'))
         self.assertNotEqual(entry.get('reason'), 'figure_or_collectible')
 
     def test_ordinary_stationery_candidate_is_not_flagged(self):
@@ -343,76 +285,153 @@ class TestEvaluateMcpCandidatesExclusions(unittest.TestCase):
             self.assertIsNone(entry['priority_tier'], title)
 
 
+class TestEvaluateMcpCandidatesQualifiedBoundary(unittest.TestCase):
+    """2026-09-28、qualifiedはpriority_tierから導出する形に統合された。
+    利益率(margin_pct)は一切合否に関与しない(旧・安全弁は廃止)。"""
+
+    def _candidate(self, price, jp_cost, monthly_sold=100, asin='B0TEST0002'):
+        return {
+            'sell': {
+                'asin': asin, 'title': 'Ordinary Stationery Item', 'price': price, 'weight_kg': 0.1,
+                'referral_fee_percent': 15.0, 'fba_pickpack_fee': 3.0,
+                'monthly_sold': monthly_sold, 'sales_rank': 5000,
+            },
+            'cost': {'price': jp_cost, 'asin': 'JP123'},
+            'price_diff_rate': 0.5,
+        }
+
+    def test_low_margin_high_roi_with_sales_evidence_is_qualified(self):
+        # 利益率13.8%(旧15%安全弁を割っている)だが、ROI27.5%(>=20%)・強い実売(100件)
+        # があるので合格する(旧ロジックならmarginで弾かれconsiderだった組み合わせ)
+        result = evaluate_mcp_candidates({'candidates': [self._candidate(price=20.0, jp_cost=1500.0)]})
+        self.assertEqual(len(result['qualified']), 1)
+        self.assertLess(result['qualified'][0]['margin_pct'], 0.15)
+        self.assertEqual(result['qualified'][0]['priority_tier'], 'A+')
+
+    def test_no_sales_evidence_is_rejected_regardless_of_roi(self):
+        result = evaluate_mcp_candidates({
+            'candidates': [self._candidate(price=100.0, jp_cost=1000.0, monthly_sold=None)],
+        })
+        self.assertEqual(result['qualified'], [])
+        self.assertEqual(len(result['rejected']), 1)
+        self.assertEqual(result['rejected'][0]['priority_tier'], 'D')
+        self.assertIn('実売の根拠なし', result['rejected'][0]['reason'])
+
+    def test_negative_roi_is_rejected(self):
+        result = evaluate_mcp_candidates({'candidates': [self._candidate(price=10.0, jp_cost=100000.0)]})
+        self.assertEqual(result['qualified'], [])
+        self.assertEqual(result['rejected'][0]['priority_tier'], 'C-')
+        self.assertIn('赤字', result['rejected'][0]['reason'])
+
+    def test_qualified_list_sorted_by_tier_then_roi(self):
+        # 強い実売+高ROI(S) > 強い実売+低ROI(C+程度)の順にはならず、qualifiedのみ抽出、
+        # Tier順(S>A+>...)で並ぶことを確認
+        low_roi = self._candidate(price=30.0, jp_cost=2500.0, asin='B0LOWROI01')  # 実売あり、ROI低め
+        high_roi = self._candidate(price=200.0, jp_cost=3000.0, asin='B0HIGHROI1')  # 実売あり、ROI高め
+        result = evaluate_mcp_candidates({'candidates': [low_roi, high_roi]})
+        asins = [e['asin'] for e in result['qualified']]
+        self.assertEqual(asins[0], 'B0HIGHROI1')
+
+    def test_coarse_skip_never_qualifies_even_with_good_tier(self):
+        # 粗選別で落ちた行は、価格が両方揃ってpriority_tierが合格範囲になっても
+        # qualifiedには入らない(evaluate_mcp_candidates()の意図的な例外)
+        skip = {
+            'asin': 'B0SKIPPED1', 'title': 'Skipped Item', 'price': 200.0, 'jp_price': 3000.0,
+            'weight_kg': 0.1, 'monthly_sold': 100, 'sales_rank': 5000,
+            'reason': 'price diff rate too low',
+        }
+        result = evaluate_mcp_candidates({'candidates': [], 'skipped': [skip]})
+        self.assertEqual(result['qualified'], [])
+        self.assertEqual(len(result['rejected']), 1)
+        self.assertTrue(result['rejected'][0]['reason'].startswith('粗選別で除外'))
+
+
 class TestClassifyPriorityTier(unittest.TestCase):
-    """発注の優先度Tier。期待値は _shared/fba-sourcing-candidates.md の
-    「Tier 確定版」(2026-09-21)にある実例に合わせている。"""
+    """発注の優先度Tier(S/A+/A-/B+/B-/C+/C-/D、2026-09-28再設計、ROI分割は
+    2026-09-28にCEO判断で50%から20%へ引き下げ)。
+    新シグネチャ: _classify_priority_tier(roi_pct, monthly_sold, sales_rank_drops_30)。
+    「実売の確度」(強い実売>=100件 / 実売あり30-99件 / ランク変動のみ>=10回 / 実売なし)と
+    「ROI水準」(>=100% / 20-100% / 0-20% / 赤字)の4x4マトリクスで決まる。"""
 
-    def test_s_strong_demand_high_profit_high_roi(self):
-        # 万能分別はさみ B0014IP9L2 (先月100、粗利$33、ROI 656%)
-        self.assertEqual(_classify_priority_tier(33.2, 6.56, 100, 52527), 'S')
-        # クリップ ダークフォグ B0C7Z94VS4 (先月100、$3.64、ROI 157%)
-        self.assertEqual(_classify_priority_tier(3.64, 1.57, 100, None), 'S')
+    # --- 4x4マトリクスの全16セル ---
+    def test_strong_evidence_row(self):
+        self.assertEqual(_classify_priority_tier(1.5, 150, None), 'S')
+        self.assertEqual(_classify_priority_tier(0.7, 150, None), 'A+')
+        self.assertEqual(_classify_priority_tier(0.1, 150, None), 'C+')
+        self.assertEqual(_classify_priority_tier(-0.3, 150, None), 'C-')
 
-    def test_strong_demand_but_profit_under_3_dollars_is_a(self):
-        # レターセット589152 キティ (先月100、$2.09、ROI 100%)
-        self.assertEqual(_classify_priority_tier(2.09, 1.00, 100, None), 'A')
+    def test_real_evidence_row(self):
+        self.assertEqual(_classify_priority_tier(1.5, 50, None), 'A+')
+        self.assertEqual(_classify_priority_tier(0.7, 50, None), 'A-')
+        self.assertEqual(_classify_priority_tier(0.1, 50, None), 'C+')
+        self.assertEqual(_classify_priority_tier(-0.3, 50, None), 'C-')
 
-    def test_a_moderate_demand_high_roi(self):
-        # シール&ケース マイメロディ (先月50、$3.59、ROI 234%)
-        self.assertEqual(_classify_priority_tier(3.59, 2.34, 50, None), 'A')
+    def test_rank_evidence_row(self):
+        self.assertEqual(_classify_priority_tier(1.5, None, 15), 'B+')
+        self.assertEqual(_classify_priority_tier(0.7, None, 15), 'B-')
+        self.assertEqual(_classify_priority_tier(0.1, None, 15), 'C+')
+        self.assertEqual(_classify_priority_tier(-0.3, None, 15), 'C-')
 
-    def test_a_via_sales_rank_when_monthly_sold_missing(self):
-        # B7リングノート キティ B0D1KSNXKV (先月空欄、BSR#13,301・単独、$3.88、ROI 257%)
-        self.assertEqual(_classify_priority_tier(3.88, 2.57, None, 13301), 'A')
+    def test_no_evidence_row_is_always_d(self):
+        # 実売なしはROIがどれだけ良くてもD
+        self.assertEqual(_classify_priority_tier(1.5, None, None), 'D')
+        self.assertEqual(_classify_priority_tier(0.7, None, None), 'D')
+        self.assertEqual(_classify_priority_tier(0.1, None, None), 'D')
+        self.assertEqual(_classify_priority_tier(-0.3, None, None), 'D')
 
-    def test_b_plus_and_b_minus_split_at_roi_50_percent(self):
-        # ペンスタンド B09LRPK9CX (先月100、$3.81、ROI 76%) / 着物キーホルダー (ROI 64%)
-        self.assertEqual(_classify_priority_tier(3.81, 0.76, 100, None), 'B+')
-        self.assertEqual(_classify_priority_tier(2.94, 0.64, 100, None), 'B+')
-        self.assertEqual(_classify_priority_tier(2.0, 0.50, 50, None), 'B+')
-        self.assertEqual(_classify_priority_tier(2.0, 0.4999, 50, None), 'B-')
-        self.assertEqual(_classify_priority_tier(0.5, 0.10, 100, None), 'B-')
+    # --- 実売の確度の境界値 ---
+    def test_monthly_sold_boundary_100_is_strong_99_is_real(self):
+        self.assertEqual(_classify_priority_tier(0.7, 100, None), 'A+')  # strong+50-100% -> A+
+        self.assertEqual(_classify_priority_tier(0.7, 99, None), 'A-')   # real+50-100% -> A-
 
-    def test_boundary_roi_100_percent_is_a_not_b_plus(self):
-        self.assertEqual(_classify_priority_tier(2.0, 1.0, 50, None), 'A')
-        self.assertEqual(_classify_priority_tier(2.0, 0.9999, 50, None), 'B+')
+    def test_monthly_sold_boundary_30_is_real_29_is_no_evidence(self):
+        self.assertEqual(_classify_priority_tier(3.0, 30, None), 'A+')
+        self.assertEqual(_classify_priority_tier(3.0, 29, None), 'D')
 
-    def test_no_demand_evidence_is_c(self):
-        # 先月の購入が空欄でBSRも60,000位より下(または無し)
-        self.assertEqual(_classify_priority_tier(5.0, 3.0, None, 250000), 'C')
-        self.assertEqual(_classify_priority_tier(5.0, 3.0, None, None), 'C')
-        # monthly_soldがあるが50未満のときは需要ありとみなさない
-        self.assertEqual(_classify_priority_tier(5.0, 3.0, 20, 10000), 'C')
+    def test_rank_drops_boundary_10_is_evidence_9_is_not(self):
+        self.assertEqual(_classify_priority_tier(1.5, None, 10), 'B+')
+        self.assertEqual(_classify_priority_tier(1.5, None, 9), 'D')
 
-    def test_sales_rank_boundary_is_60000(self):
-        self.assertEqual(_classify_priority_tier(3.0, 2.0, None, 60000), 'A')
-        self.assertEqual(_classify_priority_tier(3.0, 2.0, None, 60001), 'C')
+    def test_real_monthly_sold_below_30_does_not_fall_back_to_rank(self):
+        # monthly_soldが実数値(20)である以上、たとえsales_rank_drops_30が高くても
+        # ランク推定にはフォールバックしない(実数値の方を優先して「実売なし」扱い)
+        self.assertEqual(_classify_priority_tier(3.0, 20, 50), 'D')
 
-    def test_missing_or_non_positive_profit_is_c(self):
-        self.assertEqual(_classify_priority_tier(None, None, 100, 1000), 'C')
-        self.assertEqual(_classify_priority_tier(0.0, 0.0, 100, 1000), 'C')
-        self.assertEqual(_classify_priority_tier(-1.0, -0.2, 100, 1000), 'C')
+    # --- ROIの境界値 ---
+    def test_roi_boundary_100_percent(self):
+        self.assertEqual(_classify_priority_tier(1.0, 150, None), 'S')
+        self.assertEqual(_classify_priority_tier(0.9999, 150, None), 'A+')
 
+    def test_roi_boundary_20_percent(self):
+        self.assertEqual(_classify_priority_tier(0.2, 150, None), 'A+')
+        self.assertEqual(_classify_priority_tier(0.1999, 150, None), 'C+')
 
-class TestClassifyPriorityTierForMedia(unittest.TestCase):
-    """メディア(本・DVD/BD・CD)は、BSRの近似を使わず、先月の購入かランク変動(10回以上)が必要。"""
+    def test_roi_boundary_zero(self):
+        self.assertEqual(_classify_priority_tier(0.0, 150, None), 'C+')
+        self.assertEqual(_classify_priority_tier(-0.0001, 150, None), 'C-')
 
-    def test_media_rank_alone_is_not_demand(self):
-        # 雑貨ならBSR 6万位以内で「需要あり」(A)だが、メディアはC
-        self.assertEqual(_classify_priority_tier(8.0, 2.7, None, 5000), 'A')
-        self.assertEqual(_classify_priority_tier(8.0, 2.7, None, 5000, is_media=True), 'C')
+    def test_roi_none_is_d(self):
+        self.assertEqual(_classify_priority_tier(None, 150, None), 'D')
+        self.assertEqual(_classify_priority_tier(None, None, None), 'D')
 
-    def test_media_with_monthly_sold_or_rank_drops_has_demand(self):
-        self.assertEqual(_classify_priority_tier(8.0, 2.7, 50, 5000, is_media=True), 'A')
-        self.assertEqual(_classify_priority_tier(8.0, 2.7, None, 5000, is_media=True, sales_rank_drops_30=10), 'A')
-        self.assertEqual(_classify_priority_tier(8.0, 2.7, None, 5000, is_media=True, sales_rank_drops_30=9), 'C')
-        self.assertEqual(_classify_priority_tier(8.0, 2.7, 100, 5000, is_media=True), 'S')
+    # --- Sの利益$3フロアが撤廃されたことの確認 ---
+    def test_s_has_no_profit_floor_anymore(self):
+        # 強い実売+ROI>=100%であれば、利益額そのものは判定に一切関与しない
+        self.assertEqual(_classify_priority_tier(1.2, 100, None), 'S')
 
-    def test_apply_priority_fields_detects_media(self):
-        entry = {'asin': '4088737687', 'title': 'One Piece Vol 36 (Japanese Edition)', 'unit_profit_usd': 8.9,
-                 'roi_pct': 2.77, 'monthly_sold': None, 'sales_rank': 30000, 'sales_rank_drops_30': 0}
+    # --- メディアの特別扱いが撤廃されたことの確認(is_media引数自体が無い) ---
+    def test_apply_priority_fields_no_longer_special_cases_media(self):
+        entry = {'asin': '4088737687', 'title': 'One Piece Vol 36 (Japanese Edition)',
+                 'roi_pct': 2.77, 'monthly_sold': None, 'sales_rank_drops_30': 0}
         _apply_priority_fields(entry)
-        self.assertEqual(entry['priority_tier'], 'C')
+        # ランク変動0回は基準(>=10)未満なので実売なし扱い -> D(メディアだから、ではない)
+        self.assertEqual(entry['priority_tier'], 'D')
+
+        entry2 = {'asin': '4088737688', 'title': 'One Piece Vol 37 (Japanese Edition)',
+                  'roi_pct': 2.77, 'monthly_sold': None, 'sales_rank_drops_30': 15}
+        _apply_priority_fields(entry2)
+        # メディアでもランク変動15回(>=10)あれば、雑貨と同じくB系として扱われる
+        self.assertEqual(entry2['priority_tier'], 'B+')
 
 
 class TestExcludedKind(unittest.TestCase):
@@ -573,8 +592,8 @@ class TestIsMedia(unittest.TestCase):
 
 
 class TestLoadDigestWindow(unittest.TestCase):
-    """朝/夜のLINE通知: 優先度Tier S/A/B+ だけを、メディア・出品制限ブランド・フィギュア・
-    完全除外を除いて、Tier順に並べる(CEO指示 2026-09-27)。"""
+    """朝/夜のLINE通知: 優先度Tier S/A+/A-/B+ だけを、メディア・出品制限ブランド・フィギュア・
+    完全除外を除いて、Tier順に並べる(2026-09-28 Tier再設計後)。"""
 
     def _insert(self, conn, asin, title, priority_tier, roi, tier='pass', is_figure=0, excluded_kind=None, brand=None):
         conn.execute(
@@ -592,18 +611,18 @@ class TestLoadDigestWindow(unittest.TestCase):
                 with sqlite3.connect(db_path) as conn:
                     self._insert(conn, 'B0AAAAAAA1', 'Stationery Pen', 'B+', 0.8)
                     self._insert(conn, 'B0AAAAAAA2', 'Kitchen Peeler', 'S', 1.5)
-                    self._insert(conn, 'B0AAAAAAA3', 'Desk Ruler', 'A', 2.0)
-                    self._insert(conn, 'B0AAAAAAA4', 'Desk Tape', 'A', 1.2)
-                    self._insert(conn, 'B0AAAAAAA5', 'Some CD (Bonus Track)', 'A', 3.0)            # メディア
-                    self._insert(conn, '4088737687', 'One Piece Vol 36', 'A', 2.7)                  # 本(ISBN)
+                    self._insert(conn, 'B0AAAAAAA3', 'Desk Ruler', 'A+', 2.0)
+                    self._insert(conn, 'B0AAAAAAA4', 'Desk Tape', 'A-', 1.2)
+                    self._insert(conn, 'B0AAAAAAA5', 'Some CD (Bonus Track)', 'A+', 3.0)            # メディア
+                    self._insert(conn, '4088737687', 'One Piece Vol 36', 'A+', 2.7)                  # 本(ISBN)
                     self._insert(conn, 'B0AAAAAAA6', 'Hario V60 Kettle', 'S', 2.0, brand='HARIO')  # 出品制限ブランド
-                    self._insert(conn, 'B0AAAAAAA7', 'Anime Figure', 'A', 2.0, is_figure=1)         # フィギュア
-                    self._insert(conn, 'B0AAAAAAA8', 'Kitchen Knife', 'A', 2.0, excluded_kind='knife')  # 完全除外
+                    self._insert(conn, 'B0AAAAAAA7', 'Anime Figure', 'A+', 2.0, is_figure=1)         # フィギュア
+                    self._insert(conn, 'B0AAAAAAA8', 'Kitchen Knife', 'A+', 2.0, excluded_kind='knife')  # 完全除外
                     self._insert(conn, 'B0AAAAAAA9', 'Low Tier Thing', 'B-', 0.2)                   # 対象Tier外
-                    self._insert(conn, 'B0AAAAAA10', 'C Tier Thing', 'C', 9.0)                      # 対象Tier外
+                    self._insert(conn, 'B0AAAAAA10', 'C Tier Thing', 'C+', 9.0)                      # 対象Tier外
                 candidates, _keywords, _since = load_digest_window('2026-09-26T00:00:00+00:00')
         self.assertEqual([c['asin'] for c in candidates], ['B0AAAAAAA2', 'B0AAAAAAA3', 'B0AAAAAAA4', 'B0AAAAAAA1'])
-        self.assertEqual([c['priority_tier'] for c in candidates], ['S', 'A', 'A', 'B+'])
+        self.assertEqual([c['priority_tier'] for c in candidates], ['S', 'A+', 'A-', 'B+'])
 
 
 class TestListingStatus(unittest.TestCase):
@@ -625,11 +644,11 @@ class TestListingStatus(unittest.TestCase):
             with mock.patch.object(ops_finance, 'DB_PATH', db_path):
                 ops_finance.init_ops_tables()
                 with sqlite3.connect(db_path) as conn:
-                    self._insert(conn, 'B0AAAAAAA1', 'Pen', 'A')                                 # 未確認 -> 対象
+                    self._insert(conn, 'B0AAAAAAA1', 'Pen', 'A+')                                # 未確認 -> 対象
                     self._insert(conn, 'B0AAAAAAA2', 'Ruler', 'S', 'ok', stale)                  # 古い -> 対象
-                    self._insert(conn, 'B0AAAAAAA3', 'Tape', 'A', 'ok', fresh)                   # 新しい -> 対象外
+                    self._insert(conn, 'B0AAAAAAA3', 'Tape', 'A+', 'ok', fresh)                   # 新しい -> 対象外
                     self._insert(conn, 'B0AAAAAAA4', 'Low', 'B-')                                # Tier対象外
-                    self._insert(conn, '4088737687', 'Book', 'A')                                # メディア
+                    self._insert(conn, '4088737687', 'Book', 'A+')                                # メディア
                     self._insert(conn, 'B0AAAAAAA5', 'Hario Kettle', 'S', brand='HARIO')        # 出品制限ブランド
                 asins = load_asins_needing_listing_check(limit=10, max_age_days=7)
         self.assertEqual(asins, ['B0AAAAAAA2', 'B0AAAAAAA1'])   # S が先
@@ -674,8 +693,8 @@ class TestListingStatus(unittest.TestCase):
             with mock.patch.object(ops_finance, 'DB_PATH', db_path):
                 ops_finance.init_ops_tables()
                 with sqlite3.connect(db_path) as conn:
-                    self._insert(conn, 'B0AAAAAAA1', 'Listable Pen', 'A', 'ok')
-                    self._insert(conn, 'B0AAAAAAA2', 'Unchecked Ruler', 'A')
+                    self._insert(conn, 'B0AAAAAAA1', 'Listable Pen', 'A+', 'ok')
+                    self._insert(conn, 'B0AAAAAAA2', 'Unchecked Ruler', 'A+')
                     self._insert(conn, 'B0AAAAAAA3', 'Brand Approval Only', 'S', 'approval_required')
                     self._insert(conn, 'B0AAAAAAA4', 'Not Eligible', 'S', 'not_eligible')
                     self._insert(conn, 'B0AAAAAAA5', 'Needs Transparency', 'S', 'product_approval_required')
@@ -696,17 +715,17 @@ class TestBuildDailyDigestMessage(unittest.TestCase):
             'asin': 'B09KTQ28X5', 'title': 'Shimomura ASC-733 Sharp Cabbage Peeler', 'us_url': 'https://www.amazon.com/dp/B09KTQ28X5',
             'jp_url': None, 'us_price_usd': 21.38, 'jp_cost_jpy': 1001.0, 'sales_rank': 69765, 'review_count': 9,
             'margin_pct': 0.333, 'unit_profit_usd': 7.13, 'weight_estimated': False, 'category': 'kw', 'tier': 'pass',
-            'priority_tier': 'A', 'monthly_sold': 50, 'roi_pct': 1.07, 'competitor_seller_count': 34,
+            'priority_tier': 'A+', 'monthly_sold': 50, 'roi_pct': 1.07, 'competitor_seller_count': 34,
         }
         message = build_daily_digest_message([item], ['Muji pen case'], '朝の')
-        self.assertIn('【Tier A】', message)
+        self.assertIn('【Tier A+】', message)
         self.assertIn('ROI: 107%', message)
         self.assertIn('先月の購入: 50 / 競合(出品者): 34', message)
-        self.assertIn('S: 0件 / A: 1件 / B+: 0件', message)
+        self.assertIn('S: 0件 / A+: 1件 / A-: 0件 / B+: 0件', message)
         self.assertNotIn('【合格】', message)
 
     def test_empty_message(self):
-        self.assertIn('優先度Tier S/A/B+ の候補はありませんでした', build_daily_digest_message([], [], '朝の'))
+        self.assertIn('優先度Tier S/A+/A-/B+ の候補はありませんでした', build_daily_digest_message([], [], '朝の'))
 
 
 class TestApplyPriorityFields(unittest.TestCase):

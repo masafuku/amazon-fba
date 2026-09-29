@@ -21,18 +21,19 @@ class TestAddManualSupplier(unittest.TestCase):
     def _db(self, tmp):
         return mock.patch.object(ops_finance, 'DB_PATH', Path(tmp) / 'test.sqlite3')
 
-    def _insert_candidate(self, conn, asin='B0012ORKN8', jp_cost=309.0, created_at='2026-09-27T00:00:00+00:00'):
+    def _insert_candidate(self, conn, asin='B0012ORKN8', jp_cost=309.0, created_at='2026-09-27T00:00:00+00:00',
+                          qualified=1, priority_tier='A+', roi_pct=1.0):
         data = {
             'us_price_usd': 11.63, 'jp_cost_usd': round(jp_cost / 150, 2), 'jp_cost_jpy': jp_cost,
             'amazon_fee_usd': 1.5, 'fba_fee_usd': 4.09, 'weight_kg': 0.17,
-            'roi_pct': 1.0, 'monthly_sold': 200, 'sales_rank': 79798, 'brand': 'サラサーティ',
+            'roi_pct': roi_pct, 'monthly_sold': 200, 'sales_rank': 79798, 'brand': 'サラサーティ',
         }
         conn.execute(
             "INSERT INTO agent_candidates (run_id, category, asin, title, qualified, tier, priority_tier, "
             "monthly_sold, sales_rank, us_price_usd, jp_cost_jpy, weight_kg, margin_pct, unit_profit_usd, "
-            "data_json, created_at) VALUES ('r1', 'kw', ?, 'Sarasaty Lingerie Detergent', 1, 'pass', 'A', "
+            "data_json, created_at) VALUES ('r1', 'kw', ?, 'Sarasaty Lingerie Detergent', ?, 'pass', ?, "
             "200, 79798, 11.63, ?, 0.17, 0.3, 3.0, ?, ?)",
-            (asin, jp_cost, json.dumps(data), created_at),
+            (asin, qualified, priority_tier, jp_cost, json.dumps(data), created_at),
         )
 
     def test_returns_not_matched_when_asin_unknown(self):
@@ -141,6 +142,75 @@ class TestAddManualSupplier(unittest.TestCase):
                 after_netsea = conn.execute('SELECT jp_cost_jpy FROM agent_candidates WHERE id=?', (row_id,)).fetchone()[0]
         self.assertTrue(netsea_result['recalculated'])
         self.assertAlmostEqual(after_netsea, 198 * 1.1, places=1)
+
+    def test_sd_wins_tie_over_existing_netsea_cost(self):
+        """2026-09-28: CEO「netseaとsdが同じ値段ならsdを優先して」。
+        NETSEA由来の原価と同額のSD仕入れ先が見つかった場合、金額は変わらないが
+        jp_cost_source(採用元の記録)がsdに差し替わることを確認する。"""
+        with tempfile.TemporaryDirectory() as tmp, self._db(tmp):
+            ops_finance.init_ops_tables()
+            with sqlite3.connect(ops_finance.DB_PATH) as conn:
+                self._insert_candidate(conn, jp_cost=600.0)
+                row_id = conn.execute('SELECT id FROM agent_candidates').fetchone()[0]
+            netsea_result = ops_finance.apply_wholesale_result(
+                row_id, {'shop_name': 'エムディーエス', 'product_url': 'https://example.test/', 'unit_price_jpy': 276.0},
+            )
+            self.assertTrue(netsea_result['recalculated'])
+            with sqlite3.connect(ops_finance.DB_PATH) as conn:
+                data = json.loads(conn.execute('SELECT data_json FROM agent_candidates WHERE id=?', (row_id,)).fetchone()[0])
+            self.assertEqual(data['jp_cost_source'], 'netsea')
+            netsea_cost = data['jp_cost_jpy']
+
+            # SDが同額(税抜276円換算)を提示 -> 金額は変わらないがsdに差し替わる
+            sd_result = ops_finance.add_manual_supplier('B0012ORKN8', 'sd', 'ハリマ共和物産', 276)
+            self.assertTrue(sd_result['recalculated'])
+            with sqlite3.connect(ops_finance.DB_PATH) as conn:
+                jp_cost, data_json = conn.execute(
+                    'SELECT jp_cost_jpy, data_json FROM agent_candidates WHERE id=?', (row_id,)
+                ).fetchone()
+            self.assertAlmostEqual(jp_cost, netsea_cost, places=1)
+            self.assertEqual(json.loads(data_json)['jp_cost_source'], 'sd')
+
+    def test_netsea_does_not_override_existing_sd_cost_on_tie(self):
+        """逆方向: 既にSDが採用元として記録されている場合、同額のNETSEA結果が来ても
+        sdのままにする(SD優先、NETSEAへの後戻りはしない)。"""
+        with tempfile.TemporaryDirectory() as tmp, self._db(tmp):
+            ops_finance.init_ops_tables()
+            with sqlite3.connect(ops_finance.DB_PATH) as conn:
+                self._insert_candidate(conn, jp_cost=600.0)
+                row_id = conn.execute('SELECT id FROM agent_candidates').fetchone()[0]
+            ops_finance.add_manual_supplier('B0012ORKN8', 'sd', 'ハリマ共和物産', 276)
+            with sqlite3.connect(ops_finance.DB_PATH) as conn:
+                data = json.loads(conn.execute('SELECT data_json FROM agent_candidates WHERE id=?', (row_id,)).fetchone()[0])
+            self.assertEqual(data['jp_cost_source'], 'sd')
+
+            netsea_result = ops_finance.apply_wholesale_result(
+                row_id, {'shop_name': 'エムディーエス', 'product_url': 'https://example.test/', 'unit_price_jpy': 276.0},
+            )
+            self.assertFalse(netsea_result['recalculated'])
+            with sqlite3.connect(ops_finance.DB_PATH) as conn:
+                data = json.loads(conn.execute('SELECT data_json FROM agent_candidates WHERE id=?', (row_id,)).fetchone()[0])
+            self.assertEqual(data['jp_cost_source'], 'sd')
+
+    def test_recalculation_updates_qualified_and_reason(self):
+        # 2026-09-28: tier/qualifiedがpriority_tierへ統合されたことで生まれた非同期
+        # バグの修正確認。赤字(C-, qualified=0)だった候補が、安い仕入れ先の追加で
+        # qualified=1に切り替わることを確認する。
+        with tempfile.TemporaryDirectory() as tmp, self._db(tmp):
+            ops_finance.init_ops_tables()
+            with sqlite3.connect(ops_finance.DB_PATH) as conn:
+                self._insert_candidate(conn, jp_cost=3000.0, qualified=0, priority_tier='C-', roi_pct=-0.5)
+            result = ops_finance.add_manual_supplier('B0012ORKN8', 'sd', 'ハリマ共和物産', 276)
+            with sqlite3.connect(ops_finance.DB_PATH) as conn:
+                qualified, reason, priority_tier = conn.execute(
+                    'SELECT qualified, reason, priority_tier FROM agent_candidates'
+                ).fetchone()
+        self.assertTrue(result['recalculated'])
+        self.assertEqual(result['qualified_before'], 0)
+        self.assertEqual(result['qualified_after'], 1)
+        self.assertEqual(qualified, 1)
+        self.assertIsNone(reason)
+        self.assertIn(priority_tier, ('S', 'A+', 'A-', 'B+', 'B-', 'C+'))
 
 
 if __name__ == '__main__':
