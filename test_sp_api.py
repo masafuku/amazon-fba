@@ -3,6 +3,8 @@
 Keepaからの独立性を保つ設計を検証する意図も込めて、これらのテストは
 keepa_mcp/keepa関連のものを一切importしない。
 """
+import json
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -326,6 +328,108 @@ class TestShipmentPnl(unittest.TestCase):
         self.assertEqual(result["FBA-NEW"]["unitsSold"], 5)
         self.assertAlmostEqual(result["FBA-OLD"]["revenueUsd"], 7.49 * 10, places=2)
         self.assertAlmostEqual(result["FBA-NEW"]["revenueUsd"], 7.49 * 5, places=2)
+
+
+class TestPurchaseAndSupplierViews(unittest.TestCase):
+    """出品者フィードバック対応: 仕入れ一覧/詳細、納品便詳細への仕入れ紐付け、
+    仕入れ先ごとの未発注候補一覧(find_candidates_by_supplier)。"""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._original_db_path = of.DB_PATH
+        of.DB_PATH = Path(self._tmpdir.name) / "test.sqlite3"
+        of.init_ops_tables()
+
+    def tearDown(self):
+        of.DB_PATH = self._original_db_path
+        self._tmpdir.cleanup()
+
+    def test_list_and_get_purchase_record(self):
+        of.upsert_jp_purchase_record({
+            "orderDate": "2026-09-22", "sdReceptionNo": "R100", "supplierName": "ハリマ共和物産",
+            "sdProductNo": "SD1", "productName": "毎日香", "janCode": "JAN100", "variant": None,
+            "unitPriceJpy": 288, "quantity": 10, "amountJpy": 2880,
+        })
+        of.upsert_jp_purchase_record({
+            "orderDate": "2026-09-22", "sdReceptionNo": "R101", "supplierName": "中三エス・ティ",
+            "sdProductNo": "SD2", "productName": "万能分別はさみ", "janCode": "JAN101", "variant": None,
+            "unitPriceJpy": 756, "quantity": 10, "amountJpy": 7560,
+        })
+
+        all_purchases = of.list_jp_purchase_records()
+        self.assertEqual(len(all_purchases), 2)
+
+        filtered = of.list_jp_purchase_records(supplier_name="ハリマ")
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered[0]["sdReceptionNo"], "R100")
+
+        detail = of.get_jp_purchase_record("R101")
+        self.assertEqual(detail["productName"], "万能分別はさみ")
+        self.assertEqual(detail["quantity"], 10)
+
+        self.assertIsNone(of.get_jp_purchase_record("does-not-exist"))
+
+    def test_shipment_detail_links_purchase_records(self):
+        of.set_asin_jan_map("B0RULER", "JAN200")
+        of.upsert_jp_purchase_record({
+            "orderDate": "2026-08-26", "sdReceptionNo": "R200", "supplierName": "丸進",
+            "sdProductNo": "SD3", "productName": "定規", "janCode": "JAN200", "variant": None,
+            "unitPriceJpy": 195, "quantity": 30, "amountJpy": 5850,
+        })
+        of.upsert_sp_inbound_shipment(
+            {
+                "shipmentId": "sh200", "planId": "plan200", "shipmentConfirmationId": "FBA200",
+                "status": "READY_TO_SHIP", "destinationFc": "HIA1",
+                "deliveryWindowStart": "2026-10-18T00:00Z", "deliveryWindowEnd": "2026-10-24T23:59Z",
+                "createdAt": "2026-09-29T00:00:00Z",
+            },
+            [{"asin": "B0RULER", "sku": "SKU200", "quantity": 30}],
+        )
+        detail = of.get_shipment_detail("sh200")
+        self.assertIsNotNone(detail)
+        self.assertEqual(detail["shipmentConfirmationId"], "FBA200")
+        self.assertIn("B0RULER", detail["purchasesByAsin"])
+        self.assertEqual(detail["purchasesByAsin"]["B0RULER"][0]["sdReceptionNo"], "R200")
+
+        self.assertIsNone(of.get_shipment_detail("does-not-exist"))
+
+    def test_find_candidates_by_supplier_matches_netsea_and_manual(self):
+        with sqlite3.connect(of.DB_PATH) as conn:
+            conn.execute(
+                '''
+                INSERT INTO agent_candidates
+                    (run_id, category, asin, title, qualified, priority_tier, jp_cost_jpy,
+                     data_json, created_at)
+                VALUES ('r1', 'kw', 'B0NETSEA', 'Netsea Matched Item', 1, 'A+', 300,
+                        ?, '2026-09-01T00:00:00Z')
+                ''',
+                (json.dumps({"netsea_shop_name": "ハリマ共和物産(卸)"}),),
+            )
+            conn.execute(
+                '''
+                INSERT INTO agent_candidates
+                    (run_id, category, asin, title, qualified, priority_tier, jp_cost_jpy,
+                     data_json, created_at)
+                VALUES ('r1', 'kw', 'B0MANUAL', 'Manually Sourced Item', 1, 'B+', 400,
+                        ?, '2026-09-02T00:00:00Z')
+                ''',
+                (json.dumps({"manual_suppliers": [{"source": "sd", "shop_name": "ハリマ共和物産"}]}),),
+            )
+            conn.execute(
+                '''
+                INSERT INTO agent_candidates
+                    (run_id, category, asin, title, qualified, priority_tier, jp_cost_jpy,
+                     data_json, created_at)
+                VALUES ('r1', 'kw', 'B0OTHER', 'Unrelated Supplier Item', 1, 'C+', 500,
+                        ?, '2026-09-03T00:00:00Z')
+                ''',
+                (json.dumps({"netsea_shop_name": "別の卸会社"}),),
+            )
+
+        result = of.find_candidates_by_supplier("ハリマ")
+        asins = {r["asin"] for r in result}
+        self.assertEqual(asins, {"B0NETSEA", "B0MANUAL"})
+        self.assertNotIn("B0OTHER", asins)
 
 
 if __name__ == "__main__":

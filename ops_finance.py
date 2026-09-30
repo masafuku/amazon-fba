@@ -2914,6 +2914,146 @@ def get_shipment_pnl(usd_to_jpy: float = 150.0) -> list:
             'costUsd': round(total_cost_usd, 2),
             'revenueUsd': round(total_revenue_usd, 2),
             'netProfitUsd': round(net_profit_usd, 2),
+            'items': shipment['items'],
+        })
+    return result
+
+
+def list_jp_purchase_records(supplier_name: str | None = None, limit: int = 200) -> list:
+    """仕入れ一覧。supplier_nameを指定すると部分一致でフィルタする
+    (仕入れ先詳細ページ用)。"""
+    init_ops_tables()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        if supplier_name:
+            rows = conn.execute(
+                '''
+                SELECT id, order_date, sd_reception_no, supplier_name, sd_product_no, product_name,
+                       jan_code, variant, unit_price_jpy, quantity, amount_jpy, asin, shipping_cost_jpy
+                FROM jp_purchase_records WHERE supplier_name LIKE ? ORDER BY order_date DESC LIMIT ?
+                ''',
+                (f'%{supplier_name}%', limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                '''
+                SELECT id, order_date, sd_reception_no, supplier_name, sd_product_no, product_name,
+                       jan_code, variant, unit_price_jpy, quantity, amount_jpy, asin, shipping_cost_jpy
+                FROM jp_purchase_records ORDER BY order_date DESC LIMIT ?
+                ''',
+                (limit,),
+            ).fetchall()
+    return [
+        {
+            'id': r['id'], 'orderDate': r['order_date'], 'sdReceptionNo': r['sd_reception_no'],
+            'supplierName': r['supplier_name'], 'sdProductNo': r['sd_product_no'],
+            'productName': r['product_name'], 'janCode': r['jan_code'], 'variant': r['variant'],
+            'unitPriceJpy': r['unit_price_jpy'], 'quantity': r['quantity'], 'amountJpy': r['amount_jpy'],
+            'asin': r['asin'], 'shippingCostJpy': r['shipping_cost_jpy'],
+        }
+        for r in rows
+    ]
+
+
+def get_jp_purchase_record(sd_reception_no: str) -> dict | None:
+    """仕入れ詳細ページ用: 受付番号1件分の全項目。"""
+    init_ops_tables()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            '''
+            SELECT id, order_date, sd_reception_no, supplier_name, sd_product_no, product_name,
+                   jan_code, variant, unit_price_jpy, quantity, amount_jpy, asin, shipping_cost_jpy
+            FROM jp_purchase_records WHERE sd_reception_no = ?
+            ''',
+            (sd_reception_no,),
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        'id': row['id'], 'orderDate': row['order_date'], 'sdReceptionNo': row['sd_reception_no'],
+        'supplierName': row['supplier_name'], 'sdProductNo': row['sd_product_no'],
+        'productName': row['product_name'], 'janCode': row['jan_code'], 'variant': row['variant'],
+        'unitPriceJpy': row['unit_price_jpy'], 'quantity': row['quantity'], 'amountJpy': row['amount_jpy'],
+        'asin': row['asin'], 'shippingCostJpy': row['shipping_cost_jpy'],
+    }
+
+
+def get_shipment_detail(shipment_id: str) -> dict | None:
+    """納品便詳細ページ用: 1便分のP&L + その便の各ASINに紐づく仕入れ記録一覧。"""
+    all_shipments = get_shipment_pnl()
+    shipment = next((s for s in all_shipments if s['shipmentId'] == shipment_id), None)
+    if shipment is None:
+        return None
+    asins = [item['asin'] for item in shipment['items'] if item.get('asin')]
+    purchases_by_asin: dict = {}
+    if asins:
+        init_ops_tables()
+        placeholders = ','.join('?' for _ in asins)
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            for row in conn.execute(
+                f'''
+                SELECT asin, sd_reception_no, order_date, supplier_name, product_name, unit_price_jpy, quantity
+                FROM jp_purchase_records WHERE asin IN ({placeholders}) ORDER BY order_date DESC
+                ''',
+                asins,
+            ):
+                purchases_by_asin.setdefault(row['asin'], []).append({
+                    'sdReceptionNo': row['sd_reception_no'], 'orderDate': row['order_date'],
+                    'supplierName': row['supplier_name'], 'productName': row['product_name'],
+                    'unitPriceJpy': row['unit_price_jpy'], 'quantity': row['quantity'],
+                })
+    return {**shipment, 'purchasesByAsin': purchases_by_asin}
+
+
+def find_candidates_by_supplier(supplier_name: str) -> list:
+    """仕入れ先詳細ページ用: この仕入れ先(部分一致)がnetsea_shop_nameまたは
+    manual_suppliersのshop_nameに含まれるagent_candidatesを、ASINごとに最新1件だけ返す。
+    「まだ発注していない仕入れ候補」を一覧するためのもの(実際の発注実績は
+    list_jp_purchase_recordsが別に持つ)。"""
+    init_ops_tables()
+    needle = supplier_name.strip()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            '''
+            SELECT id, asin, title, jp_cost_jpy, us_price_usd, unit_profit_usd, margin_pct,
+                   priority_tier, qualified, data_json, created_at
+            FROM agent_candidates
+            ORDER BY created_at DESC
+            '''
+        ).fetchall()
+
+    seen_asins: set = set()
+    result = []
+    for row in rows:
+        asin = row['asin']
+        if not asin or asin in seen_asins:
+            continue
+        try:
+            data = json.loads(row['data_json']) if row['data_json'] else {}
+        except (TypeError, ValueError):
+            data = {}
+        matched_supplier = None
+        netsea_shop = data.get('netsea_shop_name')
+        if netsea_shop and needle in netsea_shop:
+            matched_supplier = netsea_shop
+        if matched_supplier is None:
+            for s in (data.get('manual_suppliers') or []):
+                shop_name = s.get('shop_name') or ''
+                if needle in shop_name:
+                    matched_supplier = shop_name
+                    break
+        seen_asins.add(asin)  # 最新行しか見ないので、マッチ有無に関わらずこのASINは以後スキップ
+        if matched_supplier is None:
+            continue
+        result.append({
+            'asin': asin, 'title': row['title'], 'jpCostJpy': row['jp_cost_jpy'],
+            'usPriceUsd': row['us_price_usd'], 'unitProfitUsd': row['unit_profit_usd'],
+            'marginPct': row['margin_pct'], 'roiPct': data.get('roi_pct'),
+            'priorityTier': row['priority_tier'], 'qualified': bool(row['qualified']),
+            'matchedSupplierName': matched_supplier,
         })
     return result
 

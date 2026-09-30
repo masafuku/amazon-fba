@@ -9,6 +9,9 @@ import SellerMiningPage from './SellerMiningPage.jsx';
 import CandidateDetailPage from './CandidateDetailPage.jsx';
 import SellerDetailPage from './SellerDetailPage.jsx';
 import FinancePage from './FinancePage.jsx';
+import PurchaseDetailPage from './PurchaseDetailPage.jsx';
+import ShipmentDetailPage from './ShipmentDetailPage.jsx';
+import SupplierDetailPage from './SupplierDetailPage.jsx';
 import './index.css';
 
 function Root() {
@@ -34,7 +37,14 @@ function Root() {
     // CEO: 「セラーサーチで見つけたセラーの結果をもう少しみやすくしたい。少なくとも、
     // そのセラーのページを一枚作ること。」
     const sellerId = hash.startsWith('#seller/') ? decodeURIComponent(hash.slice('#seller/'.length)) : null;
-    const isDashboard = !isFinder && !isFavorites && !isAgent && !isKeywords && !isSellerMining && !isFinance && !candidateAsin && !sellerId;
+    // #purchase/<sdReceptionNo>, #shipment/<shipmentId>, #supplier/<名前>: 収支ページ
+    // (FinancePage)の仕入れ一覧・納品便一覧からのクリック遷移のみが導線の詳細ページ
+    // (CEO フィードバック: 「各仕入れや納品の詳細ページが欲しい」「仕入れ先の詳細ページが欲しい」)。
+    const purchaseReceptionNo = hash.startsWith('#purchase/') ? decodeURIComponent(hash.slice('#purchase/'.length)) : null;
+    const shipmentId = hash.startsWith('#shipment/') ? decodeURIComponent(hash.slice('#shipment/'.length)) : null;
+    const supplierName = hash.startsWith('#supplier/') ? decodeURIComponent(hash.slice('#supplier/'.length)) : null;
+    const isDashboard = !isFinder && !isFavorites && !isAgent && !isKeywords && !isSellerMining && !isFinance
+        && !candidateAsin && !sellerId && !purchaseReceptionNo && !shipmentId && !supplierName;
 
     return (
         <div className="min-h-screen bg-slate-950 text-slate-100">
@@ -87,6 +97,12 @@ function Root() {
                     <CandidateDetailPage asin={candidateAsin} onBack={() => { window.location.hash = '#agent'; }} />
                 ) : sellerId ? (
                     <SellerDetailPage sellerId={sellerId} onBack={() => { window.location.hash = '#seller-mining'; }} />
+                ) : purchaseReceptionNo ? (
+                    <PurchaseDetailPage sdReceptionNo={purchaseReceptionNo} onBack={() => { window.location.hash = '#finance'; }} />
+                ) : shipmentId ? (
+                    <ShipmentDetailPage shipmentId={shipmentId} onBack={() => { window.location.hash = '#finance'; }} />
+                ) : supplierName ? (
+                    <SupplierDetailPage supplierName={supplierName} onBack={() => { window.location.hash = '#finance'; }} />
                 ) : isFinder ? (
                     <KeepaFinderPage />
                 ) : isFavorites ? (

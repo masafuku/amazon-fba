@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { BarChart3, Package, RefreshCw, Truck } from 'lucide-react';
+import { BarChart3, Package, RefreshCw, ShoppingCart, Truck } from 'lucide-react';
 import {
     Bar,
     BarChart,
@@ -12,6 +12,7 @@ import {
 import {
     loadFinanceInventory,
     loadFinanceOrders,
+    loadFinancePurchases,
     loadFinanceProductPnl,
     loadFinanceShipments,
     loadFinanceSummary,
@@ -29,6 +30,27 @@ function usd(value) {
     return `$${Number(value).toFixed(2)}`;
 }
 
+// ASIN/仕入先名を、既存の商品詳細ページ(#candidate/{ASIN})・仕入先詳細ページ
+// (#supplier/{名前})へのリンクにする小さなヘルパー。SellerDetailPage.jsx等と同じく、
+// 共通モジュール化はせずページごとにローカルコピーを持つ既存の規約に合わせる。
+function AsinLink({ asin }) {
+    if (!asin) return <span>-</span>;
+    return (
+        <a href={`#candidate/${encodeURIComponent(asin)}`} className="font-mono text-xs text-cyan-400 hover:underline">
+            {asin}
+        </a>
+    );
+}
+
+function SupplierLink({ name }) {
+    if (!name) return <span>-</span>;
+    return (
+        <a href={`#supplier/${encodeURIComponent(name)}`} className="text-cyan-400 hover:underline">
+            {name}
+        </a>
+    );
+}
+
 export default function FinancePage() {
     const [days, setDays] = useState(30);
     const [summary, setSummary] = useState(null);
@@ -36,6 +58,7 @@ export default function FinancePage() {
     const [inventory, setInventory] = useState([]);
     const [products, setProducts] = useState([]);
     const [shipments, setShipments] = useState([]);
+    const [purchases, setPurchases] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
 
@@ -43,18 +66,20 @@ export default function FinancePage() {
         setLoading(true);
         setError('');
         try {
-            const [summaryData, ordersData, inventoryData, productsData, shipmentsData] = await Promise.all([
+            const [summaryData, ordersData, inventoryData, productsData, shipmentsData, purchasesData] = await Promise.all([
                 loadFinanceSummary(days),
                 loadFinanceOrders(days),
                 loadFinanceInventory(),
                 loadFinanceProductPnl(days),
                 loadFinanceShipments(),
+                loadFinancePurchases(),
             ]);
             setSummary(summaryData);
             setOrders(ordersData);
             setInventory(inventoryData);
             setProducts(productsData);
             setShipments(shipmentsData);
+            setPurchases(purchasesData);
         } catch (loadError) {
             setError(loadError?.message || '収支データの読み込みに失敗しました。');
         } finally {
@@ -229,7 +254,7 @@ export default function FinancePage() {
                             <tbody>
                                 {inventory.map((item) => (
                                     <tr key={item.asin} className="border-t border-slate-800">
-                                        <td className="px-2 py-2 font-mono text-xs">{item.asin}</td>
+                                        <td className="px-2 py-2"><AsinLink asin={item.asin} /></td>
                                         <td className="px-2 py-2 text-xs">{item.sku}</td>
                                         <td className="px-2 py-2">{item.fulfillableQuantity}</td>
                                         <td className="px-2 py-2">{item.soldLast30d}</td>
@@ -265,7 +290,7 @@ export default function FinancePage() {
                             <tbody>
                                 {products.map((row) => (
                                     <tr key={row.asin} className="border-t border-slate-800">
-                                        <td className="px-2 py-2 font-mono text-xs">{row.asin}</td>
+                                        <td className="px-2 py-2"><AsinLink asin={row.asin} /></td>
                                         <td className="px-2 py-2">{row.units}</td>
                                         <td className="px-2 py-2">{usd(row.revenueUsd)}</td>
                                         <td className="px-2 py-2">{usd(row.feesUsd)}</td>
@@ -290,7 +315,7 @@ export default function FinancePage() {
                 </h2>
                 <p className="mb-3 text-xs text-slate-500">
                     どの納品便から売れたかは正確には分からないため、納品便を納品期間の古い順に並べ、
-                    売上を数量ベースでFIFO(先入れ先出し)的に割り当てた概算です。
+                    売上を数量ベースでFIFO(先入れ先出し)的に割り当てた概算です。行をクリックすると詳細を確認できます。
                 </p>
                 {shipments.length === 0 ? (
                     <p className="text-sm text-slate-500">納品便データがありません。</p>
@@ -312,8 +337,14 @@ export default function FinancePage() {
                             </thead>
                             <tbody>
                                 {shipments.map((row) => (
-                                    <tr key={row.shipmentId} className="border-t border-slate-800">
-                                        <td className="px-2 py-2 font-mono text-xs">{row.shipmentConfirmationId || row.shipmentId}</td>
+                                    <tr
+                                        key={row.shipmentId}
+                                        className="cursor-pointer border-t border-slate-800 hover:bg-slate-800/40"
+                                        onClick={() => { window.location.hash = `#shipment/${encodeURIComponent(row.shipmentId)}`; }}
+                                    >
+                                        <td className="px-2 py-2 font-mono text-xs text-cyan-400 hover:underline">
+                                            {row.shipmentConfirmationId || row.shipmentId}
+                                        </td>
                                         <td className="px-2 py-2 text-xs">{row.status}</td>
                                         <td className="px-2 py-2 text-xs">{row.destinationFc}</td>
                                         <td className="px-2 py-2 text-xs">
@@ -327,6 +358,51 @@ export default function FinancePage() {
                                         <td className={`px-2 py-2 font-semibold ${row.netProfitUsd >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                                             {usd(row.netProfitUsd)}
                                         </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                )}
+            </div>
+
+            <div className="rounded-xl bg-slate-900 p-4">
+                <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-300">
+                    <ShoppingCart size={16} /> 仕入れ一覧
+                </h2>
+                {purchases.length === 0 ? (
+                    <p className="text-sm text-slate-500">仕入れデータがありません。</p>
+                ) : (
+                    <div className="overflow-x-auto">
+                        <table className="w-full text-left text-sm">
+                            <thead>
+                                <tr className="text-slate-400">
+                                    <th className="px-2 py-2">発注日</th>
+                                    <th className="px-2 py-2">仕入先</th>
+                                    <th className="px-2 py-2">商品名</th>
+                                    <th className="px-2 py-2">ASIN</th>
+                                    <th className="px-2 py-2">数量</th>
+                                    <th className="px-2 py-2">単価</th>
+                                    <th className="px-2 py-2">金額</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {purchases.map((row) => (
+                                    <tr key={row.sdReceptionNo} className="border-t border-slate-800">
+                                        <td className="px-2 py-2 text-xs">{row.orderDate}</td>
+                                        <td className="px-2 py-2"><SupplierLink name={row.supplierName} /></td>
+                                        <td className="px-2 py-2">
+                                            <a
+                                                href={`#purchase/${encodeURIComponent(row.sdReceptionNo)}`}
+                                                className="text-cyan-400 hover:underline"
+                                            >
+                                                {row.productName}
+                                            </a>
+                                        </td>
+                                        <td className="px-2 py-2"><AsinLink asin={row.asin} /></td>
+                                        <td className="px-2 py-2">{row.quantity}</td>
+                                        <td className="px-2 py-2">¥{Number(row.unitPriceJpy).toLocaleString('ja-JP')}</td>
+                                        <td className="px-2 py-2">¥{Number(row.amountJpy).toLocaleString('ja-JP')}</td>
                                     </tr>
                                 ))}
                             </tbody>
@@ -355,7 +431,7 @@ export default function FinancePage() {
                                 {orders.map((order) => (
                                     <tr key={order.orderId} className="border-t border-slate-800">
                                         <td className="px-2 py-2 text-xs">{formatDateTime(order.purchaseDate)}</td>
-                                        <td className="px-2 py-2 font-mono text-xs">{order.asin || '-'}</td>
+                                        <td className="px-2 py-2"><AsinLink asin={order.asin} /></td>
                                         <td className="px-2 py-2">{order.quantity}</td>
                                         <td className="px-2 py-2">{usd(order.itemPriceUsd)}</td>
                                         <td className="px-2 py-2 text-xs">{order.orderStatus}</td>

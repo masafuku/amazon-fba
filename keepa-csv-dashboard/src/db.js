@@ -396,3 +396,36 @@ export const loadFinanceShipments = async () => {
     const json = await response.json();
     return json.shipments ?? [];
 };
+
+export const loadFinanceShipmentDetail = async (shipmentId) => {
+    const params = new URLSearchParams({ shipmentId });
+    const response = await fetch(`${API_BASE}/api/finance/shipment?${params.toString()}`);
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    const json = await response.json();
+    return json.shipment ?? null;
+};
+
+export const loadFinancePurchases = async (supplierName) => {
+    const params = new URLSearchParams();
+    if (supplierName) params.set('supplierName', supplierName);
+    const response = await fetch(`${API_BASE}/api/finance/purchases?${params.toString()}`);
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    const json = await response.json();
+    return json.purchases ?? [];
+};
+
+export const loadFinancePurchaseDetail = async (sdReceptionNo) => {
+    const params = new URLSearchParams({ sdReceptionNo });
+    const response = await fetch(`${API_BASE}/api/finance/purchase?${params.toString()}`);
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    const json = await response.json();
+    return json.purchase ?? null;
+};
+
+export const loadFinanceSupplierCandidates = async (supplierName) => {
+    const params = new URLSearchParams({ supplierName });
+    const response = await fetch(`${API_BASE}/api/finance/supplier-candidates?${params.toString()}`);
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    const json = await response.json();
+    return json.candidates ?? [];
+};

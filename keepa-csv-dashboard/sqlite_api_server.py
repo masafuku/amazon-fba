@@ -1827,6 +1827,138 @@ def load_finance_shipments(usd_to_jpy: float = 150.0):
             'costUsd': round(total_cost_usd, 2),
             'revenueUsd': round(total_revenue_usd, 2),
             'netProfitUsd': round(net_profit_usd, 2),
+            'items': shipment['items'],
+        })
+    return result
+
+
+def load_jp_purchase_records(supplier_name=None, limit=200):
+    """仕入れ一覧。ops_finance.pyのlist_jp_purchase_records()と同一ロジック。"""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        if supplier_name:
+            rows = conn.execute(
+                '''
+                SELECT id, order_date, sd_reception_no, supplier_name, sd_product_no, product_name,
+                       jan_code, variant, unit_price_jpy, quantity, amount_jpy, asin, shipping_cost_jpy
+                FROM jp_purchase_records WHERE supplier_name LIKE ? ORDER BY order_date DESC LIMIT ?
+                ''',
+                (f'%{supplier_name}%', limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                '''
+                SELECT id, order_date, sd_reception_no, supplier_name, sd_product_no, product_name,
+                       jan_code, variant, unit_price_jpy, quantity, amount_jpy, asin, shipping_cost_jpy
+                FROM jp_purchase_records ORDER BY order_date DESC LIMIT ?
+                ''',
+                (limit,),
+            ).fetchall()
+    return [
+        {
+            'id': r['id'], 'orderDate': r['order_date'], 'sdReceptionNo': r['sd_reception_no'],
+            'supplierName': r['supplier_name'], 'sdProductNo': r['sd_product_no'],
+            'productName': r['product_name'], 'janCode': r['jan_code'], 'variant': r['variant'],
+            'unitPriceJpy': r['unit_price_jpy'], 'quantity': r['quantity'], 'amountJpy': r['amount_jpy'],
+            'asin': r['asin'], 'shippingCostJpy': r['shipping_cost_jpy'],
+        }
+        for r in rows
+    ]
+
+
+def load_jp_purchase_record(sd_reception_no):
+    """仕入れ詳細ページ用。ops_finance.pyのget_jp_purchase_record()と同一ロジック。"""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            '''
+            SELECT id, order_date, sd_reception_no, supplier_name, sd_product_no, product_name,
+                   jan_code, variant, unit_price_jpy, quantity, amount_jpy, asin, shipping_cost_jpy
+            FROM jp_purchase_records WHERE sd_reception_no = ?
+            ''',
+            (sd_reception_no,),
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        'id': row['id'], 'orderDate': row['order_date'], 'sdReceptionNo': row['sd_reception_no'],
+        'supplierName': row['supplier_name'], 'sdProductNo': row['sd_product_no'],
+        'productName': row['product_name'], 'janCode': row['jan_code'], 'variant': row['variant'],
+        'unitPriceJpy': row['unit_price_jpy'], 'quantity': row['quantity'], 'amountJpy': row['amount_jpy'],
+        'asin': row['asin'], 'shippingCostJpy': row['shipping_cost_jpy'],
+    }
+
+
+def load_shipment_detail(shipment_id):
+    """納品便詳細ページ用。ops_finance.pyのget_shipment_detail()と同一ロジック。"""
+    all_shipments = load_finance_shipments()
+    shipment = next((s for s in all_shipments if s['shipmentId'] == shipment_id), None)
+    if shipment is None:
+        return None
+    asins = [item['asin'] for item in shipment['items'] if item.get('asin')]
+    purchases_by_asin = {}
+    if asins:
+        placeholders = ','.join('?' for _ in asins)
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            for row in conn.execute(
+                f'''
+                SELECT asin, sd_reception_no, order_date, supplier_name, product_name, unit_price_jpy, quantity
+                FROM jp_purchase_records WHERE asin IN ({placeholders}) ORDER BY order_date DESC
+                ''',
+                asins,
+            ):
+                purchases_by_asin.setdefault(row['asin'], []).append({
+                    'sdReceptionNo': row['sd_reception_no'], 'orderDate': row['order_date'],
+                    'supplierName': row['supplier_name'], 'productName': row['product_name'],
+                    'unitPriceJpy': row['unit_price_jpy'], 'quantity': row['quantity'],
+                })
+    return {**shipment, 'purchasesByAsin': purchases_by_asin}
+
+
+def load_candidates_by_supplier(supplier_name):
+    """仕入れ先詳細ページ用。ops_finance.pyのfind_candidates_by_supplier()と同一ロジック。"""
+    needle = supplier_name.strip()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            '''
+            SELECT id, asin, title, jp_cost_jpy, us_price_usd, unit_profit_usd, margin_pct,
+                   priority_tier, qualified, data_json, created_at
+            FROM agent_candidates
+            ORDER BY created_at DESC
+            '''
+        ).fetchall()
+
+    seen_asins = set()
+    result = []
+    for row in rows:
+        asin = row['asin']
+        if not asin or asin in seen_asins:
+            continue
+        try:
+            data = json.loads(row['data_json']) if row['data_json'] else {}
+        except (TypeError, ValueError):
+            data = {}
+        matched_supplier = None
+        netsea_shop = data.get('netsea_shop_name')
+        if netsea_shop and needle in netsea_shop:
+            matched_supplier = netsea_shop
+        if matched_supplier is None:
+            for s in (data.get('manual_suppliers') or []):
+                shop_name = s.get('shop_name') or ''
+                if needle in shop_name:
+                    matched_supplier = shop_name
+                    break
+        seen_asins.add(asin)
+        if matched_supplier is None:
+            continue
+        result.append({
+            'asin': asin, 'title': row['title'], 'jpCostJpy': row['jp_cost_jpy'],
+            'usPriceUsd': row['us_price_usd'], 'unitProfitUsd': row['unit_profit_usd'],
+            'marginPct': row['margin_pct'], 'roiPct': data.get('roi_pct'),
+            'priorityTier': row['priority_tier'], 'qualified': bool(row['qualified']),
+            'matchedSupplierName': matched_supplier,
         })
     return result
 
@@ -2639,6 +2771,41 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == '/api/finance/shipments':
             try:
                 self._send_json(200, {'ok': True, 'shipments': load_finance_shipments()})
+            except Exception as exc:
+                self._send_json(500, {'error': str(exc)})
+            return
+
+        if parsed.path == '/api/finance/shipment':
+            shipment_id = (params.get('shipmentId') or [''])[0]
+            try:
+                detail = load_shipment_detail(shipment_id) if shipment_id else None
+                self._send_json(200, {'ok': True, 'shipment': detail})
+            except Exception as exc:
+                self._send_json(500, {'error': str(exc)})
+            return
+
+        if parsed.path == '/api/finance/purchases':
+            supplier_name = (params.get('supplierName') or [None])[0]
+            try:
+                self._send_json(200, {'ok': True, 'purchases': load_jp_purchase_records(supplier_name=supplier_name)})
+            except Exception as exc:
+                self._send_json(500, {'error': str(exc)})
+            return
+
+        if parsed.path == '/api/finance/purchase':
+            reception_no = (params.get('sdReceptionNo') or [''])[0]
+            try:
+                purchase = load_jp_purchase_record(reception_no) if reception_no else None
+                self._send_json(200, {'ok': True, 'purchase': purchase})
+            except Exception as exc:
+                self._send_json(500, {'error': str(exc)})
+            return
+
+        if parsed.path == '/api/finance/supplier-candidates':
+            supplier_name = (params.get('supplierName') or [''])[0]
+            try:
+                candidates = load_candidates_by_supplier(supplier_name) if supplier_name else []
+                self._send_json(200, {'ok': True, 'candidates': candidates})
             except Exception as exc:
                 self._send_json(500, {'error': str(exc)})
             return
