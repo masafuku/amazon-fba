@@ -126,6 +126,71 @@ class TestSdEmailParser(unittest.TestCase):
         self.assertEqual(records[0]["amountJpy"], 12345.0)
 
 
+class TestSdEmailParserOrderDate(unittest.TestCase):
+    """2026-09-30: order_dateが実行日固定になっていたバグの修正確認。"""
+
+    def test_extracts_order_date_from_body(self):
+        body = "何か\n[ 発注日 ] 2026/09/08(火)18:37\nそれ以外の本文"
+        self.assertEqual(sd_email_parser.extract_order_date(body), "2026-09-08")
+
+    def test_returns_none_when_order_date_missing(self):
+        self.assertIsNone(sd_email_parser.extract_order_date("発注日の記載がない本文"))
+
+
+class TestSdEmailParserShippingAndCoupon(unittest.TestCase):
+    """2026-09-30: 送料(見込み)・クーポン利用の抽出と、ブロックごとの実質送料計算。
+    CEOへの提案通り「クーポンで無料なら反映不要」(net_shipping<=0なら0を返す)を確認する。"""
+
+    def _body(self, supplier, shipping_line, coupon_line=""):
+        return (
+            f"■出展企業(問い合わせ先)：{supplier}\n"
+            "----------------------------------------------------------------------\n"
+            "[　受付番号　]　90000001\n"
+            "[　 SD品番 　]　SD1\n"
+            "[　 商品名 　]　テスト商品\n"
+            "[ JANコード　]　1111111111111\n"
+            "[　注文点数　]　10点\n"
+            "[　注文単価　]　\\100\n"
+            "[　注文金額　]　\\1,000\n"
+            "----------------------------------------------------------------------\n"
+            "[お支払い方法]Paid（掛け）\n"
+            "[　商品小計　] \\1,000\n"
+            f"{shipping_line}\n"
+            "[小計(税抜き)] \\1,000\n"
+            f"{coupon_line}\n"
+        )
+
+    def test_shipping_with_no_coupon_is_kept_in_full(self):
+        body = self._body("Zoomy BUNGU", "[送料(見込み)] \\1,100")
+        records = sd_email_parser.parse_email_body(body)
+        self.assertEqual(records[0]["netShippingJpy"], 1100.0)
+
+    def test_shipping_fully_offset_by_coupon_is_zero(self):
+        # 実例(2026-09-08、Zoomy BUNGU): 送料1,100円がクーポン1,210円で相殺され
+        # 実質0円 -> 反映不要(2026-09-30、CEOとの合意通り)。
+        body = self._body("Zoomy BUNGU", "[送料(見込み)] \\1,100", "[ クーポン利用 ] -1,210")
+        records = sd_email_parser.parse_email_body(body)
+        self.assertEqual(records[0]["netShippingJpy"], 0.0)
+
+    def test_shipping_partially_offset_by_coupon(self):
+        body = self._body("丸進", "[送料(見込み)] \\1,000", "[ クーポン利用 ] -300")
+        records = sd_email_parser.parse_email_body(body)
+        self.assertEqual(records[0]["netShippingJpy"], 700.0)
+
+    def test_no_shipping_no_coupon_is_zero(self):
+        body = self._body("ハリマ共和物産", "[送料(見込み)] \\0")
+        records = sd_email_parser.parse_email_body(body)
+        self.assertEqual(records[0]["netShippingJpy"], 0.0)
+
+    def test_two_supplier_blocks_get_independent_shipping(self):
+        body = self._body("丸進", "[送料(見込み)] \\1,000") + self._body("コモライフ", "[送料(見込み)] \\0")
+        records = sd_email_parser.parse_email_body(body)
+        self.assertEqual(len(records), 2)
+        by_supplier = {r["supplierName"]: r["netShippingJpy"] for r in records}
+        self.assertEqual(by_supplier["丸進"], 1000.0)
+        self.assertEqual(by_supplier["コモライフ"], 0.0)
+
+
 class TestSdEmailParserGuard(unittest.TestCase):
     def test_run_once_skips_without_gmail_credentials(self):
         with patch.object(sd_email_parser.gmail, "configured", return_value=False), \
