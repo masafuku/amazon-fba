@@ -403,6 +403,31 @@ def _fetch_sell_products(
     return sell_products, sell_cache_meta, budget
 
 
+def _should_exclude_by_us_title(title: str) -> bool:
+    """US側タイトルで除外判定（JP取得前に実施し、トークンを節約）。
+    食品・医薬品・電子機器・本・DVD・CD・出品制限ブランドを除外。"""
+    excluded_keywords = {
+        # 食品
+        'snack', 'candy', 'chocolate', 'green tea', 'matcha',
+        # 医薬品・化粧品
+        'supplement', 'shampoo', 'skincare', 'cosmetic',
+        # 包丁・危険物
+        'knife', 'glass coating',
+        # 電子機器・カメラ
+        'laptop', 'desktop', 'pc', 'smartphone', 'iphone',
+        'gaming console', 'xbox', 'playstation',
+        'camera', 'lens', 'dslr', 'mirrorless',
+        # 大型家電
+        'air conditioner', 'refrigerator', 'washing machine',
+        # 本・CD・DVD
+        'dvd', 'blu-ray', 'cd', 'soundtrack', 'album', 'ost', 'shm', 'remaster',
+        # 出品制限ブランド
+        'hario', 'takara tomy', 'muji', 'holbein',
+    }
+    lower_title = title.lower()
+    return any(kw in lower_title for kw in excluded_keywords)
+
+
 def _evaluate_sell_products(
     api_key: str,
     sell_products: List[Dict[str, Any]],
@@ -431,6 +456,12 @@ def _evaluate_sell_products(
         volatility = sell_summary["price_volatility_90d"]
         if price_volatility_max is not None and volatility is not None and volatility > price_volatility_max:
             skipped.append({**sell_summary, "reason": f"price volatility {volatility:.2%} exceeds limit"})
+            continue
+
+        # JP取得前の早期除外（トークン削減）
+        title = sell_summary.get("title", "")
+        if title and _should_exclude_by_us_title(title):
+            skipped.append({**sell_summary, "reason": "excluded by title (food/media/electronics/brand)"})
             continue
 
         # ASIN-based cross-domain match: assumes the same ASIN is used on

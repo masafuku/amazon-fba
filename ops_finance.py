@@ -1131,7 +1131,27 @@ GATED_BRAND_TERMS = {
     'タカラトミー': ('takara tomy', 'takaratomy', 'タカラトミー', 'beyblade', 'ベイブレード'),
     # MUJI: 卸ルートが無く、ネットストアの規約が転売目的の購入を禁止(2026-09-27、CEO判断で見送り)。
     '無印良品(MUJI)': ('muji', '無印良品', '良品計画'),
+    # Holbein: ブランド承認＋商品承認要件のため実質出品不可(2026-09-30確認)。
+    'Holbein': ('holbein', 'ホルベイン'),
 }
+
+
+_ELECTRONICS_AND_CAMERA_KEYWORDS = (
+    'laptop', 'desktop', 'pc', 'monitor',
+    'smartphone', 'iphone', 'android',
+    'gaming console', 'xbox', 'playstation',
+    'camera', 'lens', 'dslr', 'mirrorless',
+    'air conditioner', 'refrigerator', 'washing machine',
+    'ノートパソコン', 'デスクトップ', 'スマートフォン',
+    '据え置き型', 'ゲーム機', 'エアコン', '冷蔵庫', '洗濯機',
+    'カメラ', 'レンズ', 'ミラーレス', 'デジタル一眼',
+)
+
+
+def _is_electronics_or_camera_keyword(candidate: str) -> bool:
+    """電子機器・カメラキーワード判定"""
+    lower = candidate.lower()
+    return any(kw in lower for kw in _ELECTRONICS_AND_CAMERA_KEYWORDS)
 
 
 def _gated_brand(*texts) -> str | None:
@@ -1923,8 +1943,7 @@ def load_digest_window(since_iso: str | None):
             data = json.loads(data_json) if data_json else {}
         except Exception:
             data = {}
-        if _is_media(asin, title) or _gated_brand(title, data.get('brand')):
-            continue
+        # メディア・出品制限ブランドはキーワード検索段階で既に除外済み（新規候補に該当しない）
         candidates.append({
             'asin': asin, 'title': title, 'us_url': us_url, 'jp_url': jp_url,
             'us_price_usd': us_price_usd, 'jp_cost_jpy': jp_cost_jpy,
@@ -2002,10 +2021,9 @@ def build_daily_digest_message(
             jp_price_str = f"¥{jp_price:.0f}" if jp_price is not None else '-'
             lines.append(f"US: {us_price_str} / JP: {jp_price_str}")
             lines.append(f"ランキング: {item['sales_rank']} / レビュー数: {item['review_count']}{weight_note}")
-            if item['us_url']:
-                lines.append(f"US: {item['us_url']}")
-            if item['jp_url']:
-                lines.append(f"JP: {item['jp_url']}")
+            asin = item['asin']
+            lines.append(f"🔗 Amazon.com: https://amazon.com/dp/{asin}")
+            lines.append(f"🔗 Amazon.co.jp: https://amazon.co.jp/dp/{asin}")
 
         if len(candidates) > max_items:
             lines.append(f"他 {len(candidates) - max_items} 件")
@@ -2379,6 +2397,12 @@ def _is_searchable_keyword(candidate: str) -> bool:
         return False
     # 出品制限ブランド(HARIO・タカラトミーなど)は、検索しても出品できないので外す。
     if _gated_brand(stripped):
+        return False
+    # 本・CD・DVDなどメディアは販売が困難なため外す。
+    if _is_media(asin=None, title=stripped):
+        return False
+    # 電子機器・カメラなどは販売が困難なため外す。
+    if _is_electronics_or_camera_keyword(stripped):
         return False
     return True
 
