@@ -414,6 +414,15 @@ export const loadFinancePurchases = async (supplierName) => {
     return json.purchases ?? [];
 };
 
+export const loadFinancePurchaseOrders = async (supplierName) => {
+    const params = new URLSearchParams();
+    if (supplierName) params.set('supplierName', supplierName);
+    const response = await fetch(`${API_BASE}/api/finance/purchase-orders?${params.toString()}`);
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    const json = await response.json();
+    return json.purchaseOrders ?? [];
+};
+
 export const loadFinancePurchaseDetail = async (sdReceptionNo) => {
     const params = new URLSearchParams({ sdReceptionNo });
     const response = await fetch(`${API_BASE}/api/finance/purchase?${params.toString()}`);

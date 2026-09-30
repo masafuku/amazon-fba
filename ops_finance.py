@@ -2955,6 +2955,34 @@ def list_jp_purchase_records(supplier_name: str | None = None, limit: int = 200)
     ]
 
 
+def list_purchase_orders(supplier_name: str | None = None, limit: int = 200) -> list:
+    """仕入れ一覧を「伝票」(発注日+仕入先の組)単位でグルーピングして返す。
+    CEO: 「仕入れが商品単位になってますが、一回の仕入れ伝票あたりにしたほうが
+    まとまりがある」(2026-09-30) — SuperDeliveryの注文確認メールも、1回の発注内で
+    出展企業(仕入先)ごとに商品小計・送料・消費税のブロックが分かれているため、
+    この単位でグルーピングするのがデータの実態に合う。原価計算(商品別P&L等)は
+    引き続きlist_jp_purchase_records()の行単位(ASIN別)で行うため、こちらは
+    一覧表示専用の集計ビュー。"""
+    records = list_jp_purchase_records(supplier_name=supplier_name, limit=limit)
+    groups: dict = {}
+    order = []
+    for r in records:
+        key = (r['orderDate'], r['supplierName'])
+        if key not in groups:
+            groups[key] = {
+                'orderDate': r['orderDate'], 'supplierName': r['supplierName'],
+                'itemCount': 0, 'totalQuantity': 0, 'totalAmountJpy': 0.0, 'items': [],
+            }
+            order.append(key)
+        g = groups[key]
+        g['itemCount'] += 1
+        g['totalQuantity'] += r['quantity'] or 0
+        g['totalAmountJpy'] += r['amountJpy'] or 0
+        g['items'].append(r)
+    # list_jp_purchase_records自体が既にorder_date DESCなので、初出順を保つだけでよい
+    return [groups[key] for key in order]
+
+
 def get_jp_purchase_record(sd_reception_no: str) -> dict | None:
     """仕入れ詳細ページ用: 受付番号1件分の全項目。"""
     init_ops_tables()

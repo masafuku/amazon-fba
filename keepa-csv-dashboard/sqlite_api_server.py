@@ -1866,6 +1866,28 @@ def load_jp_purchase_records(supplier_name=None, limit=200):
     ]
 
 
+def load_purchase_orders(supplier_name=None, limit=200):
+    """仕入れ一覧を伝票(発注日+仕入先)単位でグルーピング。ops_finance.pyの
+    list_purchase_orders()と同一ロジック。"""
+    records = load_jp_purchase_records(supplier_name=supplier_name, limit=limit)
+    groups = {}
+    order = []
+    for r in records:
+        key = (r['orderDate'], r['supplierName'])
+        if key not in groups:
+            groups[key] = {
+                'orderDate': r['orderDate'], 'supplierName': r['supplierName'],
+                'itemCount': 0, 'totalQuantity': 0, 'totalAmountJpy': 0.0, 'items': [],
+            }
+            order.append(key)
+        g = groups[key]
+        g['itemCount'] += 1
+        g['totalQuantity'] += r['quantity'] or 0
+        g['totalAmountJpy'] += r['amountJpy'] or 0
+        g['items'].append(r)
+    return [groups[key] for key in order]
+
+
 def load_jp_purchase_record(sd_reception_no):
     """仕入れ詳細ページ用。ops_finance.pyのget_jp_purchase_record()と同一ロジック。"""
     with sqlite3.connect(DB_PATH) as conn:
@@ -2788,6 +2810,14 @@ class Handler(BaseHTTPRequestHandler):
             supplier_name = (params.get('supplierName') or [None])[0]
             try:
                 self._send_json(200, {'ok': True, 'purchases': load_jp_purchase_records(supplier_name=supplier_name)})
+            except Exception as exc:
+                self._send_json(500, {'error': str(exc)})
+            return
+
+        if parsed.path == '/api/finance/purchase-orders':
+            supplier_name = (params.get('supplierName') or [None])[0]
+            try:
+                self._send_json(200, {'ok': True, 'purchaseOrders': load_purchase_orders(supplier_name=supplier_name)})
             except Exception as exc:
                 self._send_json(500, {'error': str(exc)})
             return
