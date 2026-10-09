@@ -9,10 +9,10 @@ class TestComputeBounds(unittest.TestCase):
     def test_min_price_is_break_even(self):
         minimum, maximum = pricing_rule.compute_bounds(unit_cost_jpy=300, current_price_usd=9.99)
         cost_usd = 300 / 150
-        profit_at_min = minimum * (1 - 0.15) - 3.5 - 0.5 - cost_usd * 0.125 - cost_usd
+        profit_at_min = minimum * (1 - 0.15) - 3.5 - pricing_rule.INTL_SHIPPING_USD - cost_usd * 0.125 - cost_usd
         self.assertGreaterEqual(profit_at_min, 0)
         self.assertLess(profit_at_min, 0.02)
-        profit_below = (minimum - 0.05) * (1 - 0.15) - 3.5 - 0.5 - cost_usd * 0.125 - cost_usd
+        profit_below = (minimum - 0.05) * (1 - 0.15) - 3.5 - pricing_rule.INTL_SHIPPING_USD - cost_usd * 0.125 - cost_usd
         self.assertLess(profit_below, 0)
         self.assertEqual(maximum, 19.98)
 
@@ -26,7 +26,7 @@ class TestActualFees(unittest.TestCase):
         fee_fn = lambda price: {"referral": price * 0.15, "fba": 2.52, "other": 0.0}
         minimum, _ = pricing_rule.compute_bounds(326, 7.49, fee_fn)
         cost_usd = 326 / 150
-        other = 0.5 + cost_usd * 0.125 + cost_usd
+        other = pricing_rule.INTL_SHIPPING_USD + cost_usd * 0.125 + cost_usd
         self.assertAlmostEqual(minimum, (2.52 + other) / 0.85, delta=0.011)
         self.assertGreaterEqual(minimum - minimum * 0.15 - 2.52 - other, 0)
 
