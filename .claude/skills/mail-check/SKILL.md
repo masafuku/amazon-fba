@@ -38,6 +38,7 @@ after:<since> (from:raccoon.ne.jp OR from:superdelivery.com OR from:globalbrand.
 | `TNK Logisticsからのお知らせ: 貨物を発送しました` | 国際便発送（FedEx番号・実重量） |
 | `Brand Approval Request for` | ブランド承認／却下 |
 | `Amazon Listing Created -` | 出品作成 |
+| `FBA Inbound Shipment Checked-In / Receiving / Closed (FBA…)` | FBA着荷・受領開始・受領完了 |
 
 SDの「新着・プライスダウン情報」、ログイン通知、Amazonの「新しい返信先アドレスが追加されました」は対象外。
 

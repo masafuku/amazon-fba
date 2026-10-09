@@ -40,6 +40,7 @@ BRAND_APPROVED = 'brand_approved'
 BRAND_REJECTED = 'brand_rejected'
 BRAND_PENDING = 'brand_pending'
 LISTING_CREATED = 'listing_created'
+FBA_CHECKED_IN = 'fba_checked_in'
 FBA_RECEIVING = 'fba_receiving'
 FBA_CLOSED = 'fba_closed'
 FBA_IN_STOCK = 'fba_in_stock'
@@ -72,6 +73,7 @@ COUPON = re.compile(r'クーポン利用\s*\]\s*(-?[0-9,]+)')
 TNK_FIELD = re.compile(r'^\s*([^:\n]+?)\s*:\s*(.+?)\s*$', re.MULTILINE)
 BRAND_SUBJECT = re.compile(r'Brand Approval Request for (.+?)\s*$')
 LISTING_SUBJECT = re.compile(r'Amazon Listing Created - (\S+)')
+FBA_INBOUND_SUBJECT = re.compile(r'FBA Inbound Shipment (Checked-In|Receiving|Closed) \((FBA\w+)\)')
 
 
 def _now() -> str:
@@ -107,6 +109,8 @@ def classify(subject: str) -> str | None:
         return 'brand'
     if LISTING_SUBJECT.search(subject):
         return LISTING_CREATED
+    if FBA_INBOUND_SUBJECT.search(subject):
+        return 'fba_inbound'
     return None
 
 
@@ -277,6 +281,13 @@ def ingest_email(email: dict) -> list:
             if _record_event(conn, source_id, event_type, received_on, brand, {'subject': email['subject']}):
                 new_events.append({BRAND_APPROVED: 'ブランド承認', BRAND_REJECTED: 'ブランド却下', BRAND_PENDING: 'ブランド審査中'}[event_type] + f' {brand}')
 
+    elif kind == 'fba_inbound':
+        step, shipment_id = FBA_INBOUND_SUBJECT.search(email['subject']).groups()
+        event_type = {'Checked-In': FBA_CHECKED_IN, 'Receiving': FBA_RECEIVING, 'Closed': FBA_CLOSED}[step]
+        with sqlite3.connect(of.DB_PATH) as conn:
+            if _record_event(conn, source_id, event_type, received_on, shipment_id, {'via': 'email'}):
+                new_events.append({FBA_CHECKED_IN: 'FBA着荷', FBA_RECEIVING: 'FBA受領開始', FBA_CLOSED: 'FBA受領完了'}[event_type] + f' {shipment_id}')
+
     elif kind == LISTING_CREATED:
         sku = LISTING_SUBJECT.search(email['subject']).group(1)
         with sqlite3.connect(of.DB_PATH) as conn:
@@ -418,9 +429,9 @@ def set_sd_product_asin(sd_product_no: str, asin: str) -> None:
 
 
 def _shipment_stage(conn, confirmation_id: str | None, sp_status: str | None) -> str:
-    if (sp_status or '').upper() in FC_RECEIVED_STATUSES:
-        return 'fc_received'
     events = {row[0] for row in conn.execute('SELECT event_type FROM ops_events WHERE ref = ?', (confirmation_id,))}
+    if (sp_status or '').upper() in FC_RECEIVED_STATUSES or events & {FBA_CHECKED_IN, FBA_RECEIVING, FBA_CLOSED}:
+        return 'fc_received'
     if TNK_SHIPPED in events:
         return 'intl_transit'
     if TNK_ARRIVED in events:
@@ -571,6 +582,8 @@ def build_ledger_digest(since_iso: str | None, today: str | None = None) -> str:
                 add((event_type, ref), f"TNK入庫 {ref}（{detail.get('boxes')}箱）")
             elif event_type == TNK_SHIPPED:
                 add((event_type, ref), f"国際発送 {ref}（{detail.get('courier')} {detail.get('trackingNo')} 実重量{detail.get('actualKg')}kg）")
+            elif event_type == FBA_CHECKED_IN:
+                add((event_type, ref), f'FBA着荷 {ref}')
             elif event_type == FBA_RECEIVING:
                 add((event_type, ref), f'FBA受領開始 {ref}')
             elif event_type == FBA_CLOSED:

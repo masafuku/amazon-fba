@@ -231,6 +231,16 @@ class TestIngest(StockLedgerTestCase):
         self.assertIn('国内輸送4日経過', text)
         self.assertIn('▲発注目安 スリム定規15cm シナモロール FBA6 在庫6.0日', text)
 
+    def test_fba_inbound_emails_mark_shipment_received(self):
+        with sqlite3.connect(ops_finance.DB_PATH) as conn:
+            conn.execute("INSERT INTO sp_inbound_shipments (shipment_id, shipment_confirmation_id, status) VALUES ('sh1', 'FBA19RGV6RMN', 'SHIPPED')")
+            conn.execute("INSERT INTO sp_inbound_shipment_items (shipment_id, asin, sku, quantity) VALUES ('sh1', 'A1', 'S', 10)")
+        self.assertEqual(sl.stock_pipeline()[0]['intl_transit'] + sl.stock_pipeline()[0]['planned'], 10)
+        events = sl.ingest_email({'id': 'f1', 'subject': 'FBA Inbound Shipment Checked-In (FBA19RGV6RMN)', 'date': '2026-10-09T07:32:51Z', 'body': ''})
+        self.assertEqual(events, ['FBA着荷 FBA19RGV6RMN'])
+        row = sl.stock_pipeline()[0]
+        self.assertEqual((row['planned'], row['intl_transit'], row['fc_received_inbound']), (0, 0, 10))
+
     def test_days_of_cover_uses_30_day_sales(self):
         with sqlite3.connect(ops_finance.DB_PATH) as conn:
             conn.execute("INSERT INTO sp_fba_inventory (asin, sku, fulfillable_quantity) VALUES ('A1', 'S', 20)")
