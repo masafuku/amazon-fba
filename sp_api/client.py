@@ -275,9 +275,15 @@ def get_fees_estimate(asin: str, price_usd: float) -> Dict[str, float]:
         "Identifier": f"{asin}-{price_usd}",
         "PriceToEstimateFees": {"ListingPrice": {"CurrencyCode": "USD", "Amount": price_usd}},
     }}
-    result = _request(f"/products/fees/v0/items/{asin}/feesEstimate", method="POST", body=body)
-    estimate = result["payload"]["FeesEstimateResult"]
-    if estimate.get("Status") != "Success":
+    for attempt in range(4):
+        result = _request(f"/products/fees/v0/items/{asin}/feesEstimate", method="POST", body=body)
+        estimate = result["payload"]["FeesEstimateResult"]
+        if estimate.get("Status") == "Success":
+            break
+        # 200で返ってくる内部エラー(InternalError)は一時的なので待って再試行する
+        if (estimate.get("Error") or {}).get("Code") == "InternalError" and attempt < 3:
+            time.sleep(3 * (attempt + 1))
+            continue
         raise SpApiError(f"手数料見積もり失敗 {asin}: {estimate.get('Error')}")
     amounts = {d["FeeType"]: float(d["FeeAmount"]["Amount"]) for d in estimate["FeesEstimate"]["FeeDetailList"]}
     total = float(estimate["FeesEstimate"]["TotalFeesEstimate"]["Amount"])

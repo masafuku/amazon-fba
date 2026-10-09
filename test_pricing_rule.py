@@ -74,6 +74,16 @@ class TestFeesEstimate(unittest.TestCase):
         with mock.patch.object(client, "_request", return_value=payload):
             self.assertEqual(client.get_fees_estimate("B0X", 7.59), {"referral": 1.14, "fba": 2.52, "total": 3.66, "other": 0.0})
 
+    def test_retries_transient_internal_error(self):
+        error = {"payload": {"FeesEstimateResult": {"Status": "ServerError", "Error": {"Code": "InternalError"}}}}
+        ok = {"payload": {"FeesEstimateResult": {"Status": "Success", "FeesEstimate": {
+            "TotalFeesEstimate": {"Amount": 3.66},
+            "FeeDetailList": [{"FeeType": "ReferralFee", "FeeAmount": {"Amount": 1.14}},
+                              {"FeeType": "FBAFees", "FeeAmount": {"Amount": 2.52}}]}}}}
+        with mock.patch.object(client, "_request", side_effect=[error, ok]) as request, mock.patch.object(client.time, "sleep"):
+            self.assertEqual(client.get_fees_estimate("B0X", 7.59)["fba"], 2.52)
+        self.assertEqual(request.call_count, 2)
+
     def test_failure_raises(self):
         with mock.patch.object(client, "_request", return_value={"payload": {"FeesEstimateResult": {"Status": "ClientError", "Error": {"Message": "x"}}}}):
             with self.assertRaises(client.SpApiError):
