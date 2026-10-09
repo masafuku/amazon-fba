@@ -1248,12 +1248,13 @@ def _contains_any_term(haystack: str, terms) -> bool:
 
 # 電気製品(タイトル判定用)。英字の語は前後が英数字でないときだけ一致。
 # 「電気製品は除外」(CEO 2026-10-10)。電卓・フラッシュライトなど判断が分かれるものは入れていない。
+# laptop / smartphone は、リュック・ラップデスク・ペンケース等の対応機種の記載で誤検知するため入れない。
 _ELECTRONICS_TITLE_TERMS = (
     'electric', 'electronic', 'electronics', 'cordless', 'rechargeable', 'bluetooth', 'wireless', 'usb',
     'battery', 'batteries', 'charger', 'power bank', 'led light', 'led lamp',
     'shaver', 'shavers', 'trimmer', 'trimmers', 'hair dryer', 'hairdryer', 'massager',
     'headphone', 'headphones', 'earphone', 'earphones', 'earbuds', 'headset', 'speaker', 'speakers',
-    'camera', 'cameras', 'laptop', 'smartphone', 'projector', 'monitor',
+    'camera', 'cameras', 'projector', 'monitor',
     'rice cooker', 'humidifier', 'air purifier', 'vacuum cleaner',
     '電動', '電気', '充電', 'コードレス', 'ヘッドホン', 'イヤホン', 'シェーバー', 'バリカン', 'ドライヤー', '炊飯器', '電子',
 )

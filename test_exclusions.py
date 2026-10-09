@@ -25,7 +25,8 @@ class TestExclusionKinds(unittest.TestCase):
 
     def test_stationery_and_goods_are_not_excluded(self):
         for title in ('Kokuyo Campus Slide Binder B5', 'Uni Kuru Toga Mechanical Pencil Metal', "Midori Traveler's Notebook Passport Size",
-                      'Zojirushi Stainless Water Bottle 500ml', 'Tea Kettle Stainless Steel', 'Sanrio Slim Ruler 15cm Kitty'):
+                      'Zojirushi Stainless Water Bottle 500ml', 'Tea Kettle Stainless Steel', 'Sanrio Slim Ruler 15cm Kitty',
+                      'JanSport Right Pack Backpack, Padded Laptop Sleeve', 'Lap Desk for Laptop Bed Tray', 'Pen Case for Smartphone Accessories'):
             self.assertIsNone(kind(title), title)
 
     def test_cosmetics_still_excluded(self):
