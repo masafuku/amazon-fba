@@ -355,8 +355,32 @@ def init_ops_tables():
                 PRIMARY KEY (supplier_id, product_id, direct_item_id)
             );
             CREATE INDEX IF NOT EXISTS idx_netsea_catalog_jan ON netsea_catalog(jan_code);
+
+            -- 在庫台帳(stock_ledger.py)。メール1通(またはCEOの口頭報告1件)=1イベント。
+            -- ref は種別ごとの参照キー(SD受付番号/FBAシップメントID/ブランド名/SKU)。
+            CREATE TABLE IF NOT EXISTS ops_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_id TEXT NOT NULL,       -- Gmailメッセージ番号、または manual:<日時>
+                event_type TEXT NOT NULL,
+                occurred_on TEXT,              -- YYYY-MM-DD (JST)
+                ref TEXT,
+                detail TEXT,                   -- JSON
+                recorded_at TEXT
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_ops_events_dedupe ON ops_events(source_id, event_type, IFNULL(ref, ''));
+            CREATE INDEX IF NOT EXISTS idx_ops_events_ref ON ops_events(ref);
+
+            -- SD品番(バリエーション単位で一意、例 15913004S3)->ASIN。サンリオ等JANが無い商品用。
+            CREATE TABLE IF NOT EXISTS sd_product_asin_map (
+                sd_product_no TEXT PRIMARY KEY,
+                asin TEXT NOT NULL
+            );
             '''
         )
+        purchase_columns = {row[1] for row in conn.execute('PRAGMA table_info(jp_purchase_records)').fetchall()}
+        for column in ('expected_ship_date', 'supplier_shipped_at', 'carrier', 'tracking_no', 'received_at'):
+            if column not in purchase_columns:
+                conn.execute(f'ALTER TABLE jp_purchase_records ADD COLUMN {column} TEXT')
         # 既存DBに対する後方互換マイグレーション(CREATE TABLE IF NOT EXISTSは
         # 既存テーブルに新カラムを追加してくれないため)。
         agent_candidates_columns = {row[1] for row in conn.execute('PRAGMA table_info(agent_candidates)').fetchall()}
