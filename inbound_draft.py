@@ -4,7 +4,7 @@
 対象のSKUは、(1) FBAになっている (2) 出品にエラーがない (3) 数量が1以上(手元＋輸送中)。
 数量は在庫台帳(AWSの stock_ledger.py stock --json)の「手元＋国内輸送中」。FNSKUが未割当のSKUも含めて
 試し、Amazonが受け付けなければ、その理由を表示する(--only-with-fnsku でFNSKUがあるものだけにできる)。
-出荷元は、直近の既存プランの出荷元(TNKの住所)をそのまま使う。
+出荷元は板橋区の住所(郵便番号173-0003)を標準にする。住所の中身は、その郵便番号の既存プランから取る。
 
 使い方(SP-APIの認証情報があるマシンで):
     inbound_draft.py --stock stock.json                  # 対象を表示するだけ
@@ -44,10 +44,18 @@ def eligible_items(stock: dict, only_with_fnsku: bool = False) -> tuple[list, li
     return items, skipped
 
 
-def latest_source_address() -> dict:
-    plans = client.get_inbound_plans().get("inboundPlans", [])
-    newest = max(plans, key=lambda p: p.get("createdAt", ""))
-    return client.get_inbound_plan(newest["inboundPlanId"])["sourceAddress"]
+# 出荷元は板橋区の住所を標準にする(CEO指示 2026-10-10: 「今後も発送元は板橋区の住所」)。
+# 住所の中身(電話番号なども)は、その郵便番号の既存プラン(第一便など)から取る。
+DEFAULT_SOURCE_POSTAL_CODE = "173-0003"
+
+
+def source_address(postal_code: str = DEFAULT_SOURCE_POSTAL_CODE) -> dict:
+    plans = sorted(client.get_inbound_plans().get("inboundPlans", []), key=lambda p: p.get("createdAt", ""), reverse=True)
+    for plan in plans:
+        address = client.get_inbound_plan(plan["inboundPlanId"]).get("sourceAddress", {})
+        if address.get("postalCode") == postal_code:
+            return address
+    raise SystemExit(f"郵便番号{postal_code}を出荷元にした既存プランが見つかりません。--source-postal で指定してください。")
 
 
 def wait_for_operation(operation_id: str, timeout_seconds: int = 120) -> dict:
@@ -65,6 +73,7 @@ def main() -> None:
     parser.add_argument("--create", action="store_true", help="実際にプランを作る(省略時は対象の表示のみ)")
     parser.add_argument("--name", default="第二便(仮)")
     parser.add_argument("--only-with-fnsku", action="store_true")
+    parser.add_argument("--source-postal", default=DEFAULT_SOURCE_POSTAL_CODE, help="出荷元の郵便番号(既定: 板橋区 173-0003)")
     args = parser.parse_args()
 
     with open(args.stock, encoding="utf-8") as f:
@@ -78,7 +87,8 @@ def main() -> None:
     if not args.create or not items:
         return
 
-    source = latest_source_address()
+    source = source_address(args.source_postal)
+    print(f"出荷元: {source.get('name')} / {source.get('addressLine1')} {source.get('city')} {source.get('postalCode')}")
     rejected_all = []
     for _ in range(6):
         try:
