@@ -257,14 +257,14 @@ def put_listing_item(
     asin: str,
     product_type: str,
     price_usd: float,
-    quantity: int = 0,
     condition: str = "new_new",
     seller_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Listings Items API: putListingsItem - 既存ASINへの出品オファーを作成/更新する。
+    """Listings Items API: putListingsItem - 既存ASINへの出品オファーをFBAで作成/更新する。
 
-    FBA出品のため quantity は 0 (在庫はAmazon倉庫管理)。
-    price_usd はドル建て価格。自動価格設定は Seller Central から別途設定。
+    FBAの出荷元(AMAZON_NA)には数量を付けない。数量を付けるとAmazonに「在庫タイプをサポートしていません」
+    (12998)と扱われ、自己発送の数量0の出品になってFNSKUが付かず、納品に使えない(2026-10-10に12件で発生)。
+    price_usd はドル建て価格。自動価格設定は pricing_rule.py で別途設定。
     """
     seller = seller_id or settings.seller_id
     if not seller:
@@ -286,7 +286,6 @@ def put_listing_item(
             }],
             "fulfillment_availability": [{
                 "fulfillment_channel_code": "AMAZON_NA",
-                "quantity": quantity,
                 "marketplace_id": settings.marketplace_id,
             }],
             "batteries_required": [{"value": False, "marketplace_id": settings.marketplace_id}],

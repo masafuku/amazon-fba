@@ -65,6 +65,18 @@ class TestMarketFloor(unittest.TestCase):
             self.assertIsNone(client.get_buy_box_price("B0X"))
 
 
+class TestPutListingItem(unittest.TestCase):
+    def test_fba_listing_has_no_quantity(self):
+        with mock.patch.object(client.settings, "seller_id", "A1SELLER"), \
+                mock.patch.object(client, "_request", return_value={"status": "ACCEPTED"}) as request:
+            client.put_listing_item("SKU1", "B0X", "STATIONERY", 9.99)
+        attrs = request.call_args[1]["body"]["attributes"]
+        channel = attrs["fulfillment_availability"][0]
+        self.assertEqual(channel["fulfillment_channel_code"], "AMAZON_NA")
+        self.assertNotIn("quantity", channel)
+        self.assertEqual(request.call_args[1]["method"], "PUT")
+
+
 class TestConvertToFba(unittest.TestCase):
     def test_fba_channel_has_no_quantity_and_required_attributes_are_sent(self):
         with mock.patch.object(client.settings, "seller_id", "A1SELLER"), \
