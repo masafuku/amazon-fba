@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 
+import stock_ledger
 from config import Settings
 from notify_line import send_line_message
 from ops_finance import (
@@ -54,7 +55,9 @@ def main() -> None:
     budget_alerts = check_budget_alert(this_month)
 
     period_label = f"{args.period}候補" if args.period else "候補"
-    message = build_daily_digest_message(candidates, keywords, period_label, budget_alerts=budget_alerts)
+    candidate_message = build_daily_digest_message(candidates, keywords, period_label, budget_alerts=budget_alerts)
+    # 在庫・物流を先頭に置く(LINEの文字数上限で切れるのは候補リスト側になるように)
+    message = stock_ledger.build_ledger_digest(since_iso) + "\n\n" + candidate_message
 
     print(f"[INFO] 対象期間: {effective_since} 〜 現在 (前回送信: {since_iso or 'なし(初回)'})")
     print(f"[INFO] 検索キーワード: {len(keywords)}件 / 合格候補: {len(candidates)}件(重複除く)")

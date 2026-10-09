@@ -206,6 +206,31 @@ class TestIngest(StockLedgerTestCase):
         self.assertTrue(any(a.startswith('ブランド審査中: SUN-STAR') for a in found))
         self.assertFalse(any('国内輸送' in a for a in found))
 
+    def test_sp_changes_first_run_is_baseline_then_diffs(self):
+        with sqlite3.connect(ops_finance.DB_PATH) as conn:
+            conn.execute("INSERT INTO sp_inbound_shipments (shipment_id, shipment_confirmation_id, status) VALUES ('sh1', 'FBA1', 'SHIPPED')")
+            conn.execute("INSERT INTO sp_fba_inventory (asin, sku, fulfillable_quantity) VALUES ('A1', 'S1', 0), ('A2', 'S2', 5)")
+        self.assertEqual(sl.record_sp_changes(), [])
+        with sqlite3.connect(ops_finance.DB_PATH) as conn:
+            conn.execute("UPDATE sp_inbound_shipments SET status = 'RECEIVING'")
+            conn.execute("UPDATE sp_fba_inventory SET fulfillable_quantity = 30 WHERE asin = 'A1'")
+            conn.execute("UPDATE sp_fba_inventory SET fulfillable_quantity = 0 WHERE asin = 'A2'")
+        self.assertEqual(sorted(sl.record_sp_changes()), ['fba_in_stock A1', 'fba_receiving FBA1', 'fba_stock_out A2'])
+        self.assertEqual(sl.record_sp_changes(), [])
+
+    def test_ledger_digest_groups_movements(self):
+        sl.set_sd_product_asin('11916786S3', 'B0CNKDP9WP')
+        sl.ingest_email({'id': 'm2', 'subject': '＜SD＞出荷完了いたしました(丸進)', 'date': '2026-10-08T06:05:01Z', 'body': SHIPPED_EMAIL})
+        with sqlite3.connect(ops_finance.DB_PATH) as conn:
+            conn.execute("INSERT INTO sp_fba_inventory (asin, sku, fulfillable_quantity) VALUES ('B0CNKDP9WP', 'S', 6)")
+            conn.execute("INSERT INTO sp_orders (order_id, purchase_date, order_status) VALUES ('o1', '2026-10-09T00:00:00Z', 'Shipped')")
+            conn.execute("INSERT INTO sp_order_items (order_id, asin, quantity, item_price_usd) VALUES ('o1', 'B0CNKDP9WP', 30, 299.70)")
+        text = sl.build_ledger_digest('2000-01-01T00:00:00+00:00', today='2026-10-12')
+        self.assertIn('・仕入先出荷 丸進（佐川急便 140418920994） 2品27個', text)
+        self.assertIn('■販売\n・30個 $299.70', text)
+        self.assertIn('国内輸送4日経過', text)
+        self.assertIn('▲発注目安 スリム定規15cm シナモロール FBA6 在庫6.0日', text)
+
     def test_days_of_cover_uses_30_day_sales(self):
         with sqlite3.connect(ops_finance.DB_PATH) as conn:
             conn.execute("INSERT INTO sp_fba_inventory (asin, sku, fulfillable_quantity) VALUES ('A1', 'S', 20)")

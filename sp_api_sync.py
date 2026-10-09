@@ -28,6 +28,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 import ops_finance as of
+import stock_ledger
 from sp_api import client as sp_client
 from sp_api.config import settings as sp_settings
 
@@ -211,6 +212,9 @@ def run_once(lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> None:
     sync_inbound_shipments()
     of.set_sp_sync_state(inbound_synced_at=now_iso)
     logger.info("FBA納品便(Inbound Shipments)同期完了")
+
+    changes = stock_ledger.record_sp_changes()
+    logger.info(f"在庫台帳イベント: {changes or 'なし'}")
 
 
 def main() -> None:

@@ -40,6 +40,13 @@ BRAND_APPROVED = 'brand_approved'
 BRAND_REJECTED = 'brand_rejected'
 BRAND_PENDING = 'brand_pending'
 LISTING_CREATED = 'listing_created'
+FBA_RECEIVING = 'fba_receiving'
+FBA_CLOSED = 'fba_closed'
+FBA_IN_STOCK = 'fba_in_stock'
+FBA_STOCK_OUT = 'fba_stock_out'
+
+# 在庫日数がこれを下回ったら発注の目安(SD発注->FBA到着の実績が約10〜14日)
+REORDER_COVER_DAYS = 14
 
 # SP-APIのshipment statusのうち「FCが受け取った」もの
 FC_RECEIVED_STATUSES = {'DELIVERED', 'CHECKED_IN', 'RECEIVING', 'CLOSED'}
@@ -483,6 +490,152 @@ def stock_pipeline(today: str | None = None) -> list:
     return result
 
 
+def record_sp_changes() -> list:
+    """sp_api_sync.pyの最後に呼ぶ。前回同期との差分(FBA受領・在庫化・在庫切れ)をイベントにする。
+    初回は基準となるスナップショットを保存するだけ。"""
+    of.init_ops_tables()
+    today = datetime.now(JST).date().isoformat()
+    source_id = f'sp_sync:{_now()}'
+    new_events = []
+    with sqlite3.connect(of.DB_PATH) as conn:
+        shipments = {cid: (status or '').upper() for cid, status in
+                     conn.execute('SELECT shipment_confirmation_id, status FROM sp_inbound_shipments')}
+        inventory = {asin: qty or 0 for asin, qty in conn.execute('SELECT asin, fulfillable_quantity FROM sp_fba_inventory')}
+        previous = _get_state(conn, 'sp_snapshot')
+        _set_state(conn, 'sp_snapshot', json.dumps({'shipments': shipments, 'inventory': inventory}))
+        if previous is None:
+            return []
+        previous = json.loads(previous)
+        for cid, status in shipments.items():
+            if status == previous['shipments'].get(cid):
+                continue
+            if status == 'CLOSED':
+                event_type = FBA_CLOSED
+            elif status in FC_RECEIVED_STATUSES:
+                event_type = FBA_RECEIVING
+            else:
+                continue
+            if _record_event(conn, source_id, event_type, today, cid, {'status': status}):
+                new_events.append(f'{event_type} {cid}')
+        for asin, qty in inventory.items():
+            before = previous['inventory'].get(asin, 0)
+            if before > 0 and qty == 0:
+                event_type, detail = FBA_STOCK_OUT, {'before': before}
+            elif before == 0 and qty > 0:
+                event_type, detail = FBA_IN_STOCK, {'qty': qty}
+            else:
+                continue
+            if _record_event(conn, source_id, event_type, today, asin, detail):
+                new_events.append(f'{event_type} {asin}')
+    return new_events
+
+
+def _short(name: str | None, length: int = 18) -> str:
+    name = re.sub(r'【[^】]*】', '', name or '').strip()
+    return name if len(name) <= length else name[:length] + '…'
+
+
+def build_ledger_digest(since_iso: str | None, today: str | None = None) -> str:
+    """LINEダイジェスト冒頭の「在庫・物流」欄。前回通知以降の動き・販売・要対応・在庫。"""
+    of.init_ops_tables()
+    since_iso = since_iso or (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    pipeline = stock_pipeline(today=today)
+    names = {r['asin']: r['name'] for r in pipeline}
+    groups = {}
+
+    def add(key, label, qty=0, items=None):
+        group = groups.setdefault(key, {'label': label, 'qty': 0, 'items': set()})
+        group['qty'] += qty or 0
+        if items:
+            group['items'].add(items)
+
+    with sqlite3.connect(of.DB_PATH) as conn:
+        purchases = {r[0]: r[1:] for r in conn.execute(
+            'SELECT sd_reception_no, supplier_name, quantity, amount_jpy, carrier, tracking_no FROM jp_purchase_records')}
+        for event_type, occurred_on, ref, detail in conn.execute(
+            'SELECT event_type, occurred_on, ref, detail FROM ops_events WHERE recorded_at > ? ORDER BY id', (since_iso,)
+        ):
+            detail = json.loads(detail or '{}')
+            supplier, qty, amount, carrier, tracking = purchases.get(ref, (None, None, None, None, None))
+            if event_type == SD_ORDERED:
+                add((event_type, supplier), f'発注 {supplier}', qty, ref)
+                groups[(event_type, supplier)].setdefault('amount', 0)
+                groups[(event_type, supplier)]['amount'] += amount or 0
+            elif event_type == SD_SHIP_SCHEDULED:
+                add((event_type, supplier, occurred_on), f'出荷予定 {supplier} {occurred_on}', qty, ref)
+            elif event_type == SD_SHIPPED:
+                add((event_type, supplier, tracking), f'仕入先出荷 {supplier}（{carrier} {tracking}）', qty, ref)
+            elif event_type == HOME_RECEIVED:
+                add((event_type, supplier), f'自宅着 {supplier}', qty, ref)
+            elif event_type == TNK_ARRIVED:
+                add((event_type, ref), f"TNK入庫 {ref}（{detail.get('boxes')}箱）")
+            elif event_type == TNK_SHIPPED:
+                add((event_type, ref), f"国際発送 {ref}（{detail.get('courier')} {detail.get('trackingNo')} 実重量{detail.get('actualKg')}kg）")
+            elif event_type == FBA_RECEIVING:
+                add((event_type, ref), f'FBA受領開始 {ref}')
+            elif event_type == FBA_CLOSED:
+                add((event_type, ref), f'FBA受領完了 {ref}')
+            elif event_type == FBA_IN_STOCK:
+                add((event_type, ref), f"FBA在庫化 {_short(names.get(ref))} {detail.get('qty')}個")
+            elif event_type == FBA_STOCK_OUT:
+                add((event_type, ref), f'在庫切れ {_short(names.get(ref))}')
+            elif event_type in (BRAND_APPROVED, BRAND_REJECTED, BRAND_PENDING):
+                label = {BRAND_APPROVED: '承認', BRAND_REJECTED: '却下', BRAND_PENDING: '審査中'}[event_type]
+                add((event_type, ref), f'ブランド{label} {ref}')
+            elif event_type == LISTING_CREATED:
+                add((event_type, ref), f'出品作成 {ref}')
+
+        sales = conn.execute(
+            '''SELECT i.asin, SUM(i.quantity), SUM(i.item_price_usd) FROM sp_order_items i
+               JOIN sp_orders o ON o.order_id = i.order_id
+               WHERE o.purchase_date > ? AND IFNULL(o.order_status, '') != 'Canceled'
+               GROUP BY i.asin ORDER BY SUM(i.quantity) DESC''', (since_iso,)
+        ).fetchall()
+
+    lines = ['【在庫・物流】', '■動き']
+    for group in groups.values():
+        text = group['label']
+        if group['items']:
+            text += f" {len(group['items'])}品{group['qty']}個"
+        if group.get('amount'):
+            text += f" ¥{group['amount']:,.0f}"
+        lines.append(f'・{text}')
+    if len(lines) == 2:
+        lines.append('・なし')
+
+    if sales:
+        units = sum(r[1] or 0 for r in sales)
+        revenue = sum(r[2] or 0 for r in sales)
+        top = '、'.join(f'{_short(names.get(a), 12)} {q}' for a, q, _ in sales[:3])
+        lines += ['■販売', f'・{units}個 ${revenue:,.2f}（{top}）']
+
+    found = alerts(today=today)
+    if found:
+        lines.append('■要対応')
+        lines += [f'・{a}' for a in found]
+
+    stock_lines = []
+    for row in pipeline:
+        inbound = row['planned'] + row['at_tnk'] + row['intl_transit'] + row['fc_received_inbound']
+        if not (row['fba_available'] or inbound or row['at_home']):
+            continue
+        parts = []
+        if row['fba_available']:
+            parts.append(f"FBA{row['fba_available']}")
+        if inbound:
+            parts.append(f'納品中{inbound}')
+        if row['at_home']:
+            parts.append(f"自宅{row['at_home']}")
+        cover = row['days_of_cover']
+        mark = '▲発注目安 ' if cover is not None and cover < REORDER_COVER_DAYS else ''
+        cover_text = f' 在庫{cover}日' if cover is not None else ''
+        stock_lines.append(f"・{mark}{_short(row['name'])} {'/'.join(parts)}{cover_text}")
+    if stock_lines:
+        lines.append('■在庫')
+        lines += stock_lines
+    return '\n'.join(lines)
+
+
 def format_pipeline(rows: list) -> str:
     columns = [('awaiting_supplier', '未出荷'), ('domestic_transit', '国内輸送'), ('at_home', '自宅'),
                ('planned', '納品プラン'), ('at_tnk', 'TNK'), ('intl_transit', '国際輸送'),
@@ -502,6 +655,8 @@ def main() -> None:
     ingest.add_argument('path', nargs='?')
     sub.add_parser('since', help='次回Gmail検索の開始日(YYYY/MM/DD)')
     sub.add_parser('alerts')
+    digest = sub.add_parser('digest', help='LINEダイジェストの在庫・物流欄をプレビュー')
+    digest.add_argument('--since', help='ISO日時(省略時は前回のダイジェスト送信時刻)')
     brand = sub.add_parser('brand', help='メール以外で分かったブランド状況を登録')
     brand.add_argument('name')
     brand.add_argument('status', choices=['approved', 'rejected', 'pending'])
@@ -533,6 +688,8 @@ def main() -> None:
         print(gmail_since())
     elif args.command == 'alerts':
         print('\n'.join(alerts()) or 'なし')
+    elif args.command == 'digest':
+        print(build_ledger_digest(args.since or of.get_last_digest_sent_at()))
     elif args.command == 'brand':
         record_brand_status(args.name, args.status, args.note)
         print('ok')
