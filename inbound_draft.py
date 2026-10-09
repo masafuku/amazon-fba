@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """「Amazonへ納品」のプラン(下書き)をSP-APIで作る。作るのはプランまで。梱包・配送の確定はしない。
 
-対象のSKUは、(1) FBAになっている (2) 出品にエラーがない (3) 数量が1以上(手元＋輸送中)。
+対象のSKUは、(1) FBAになっている (2) 出品にエラーがない(--include-errors で、カタログ側のエラーが残るSKUも含める) (3) 数量が1以上(手元＋輸送中)。
 数量は在庫台帳(AWSの stock_ledger.py stock --json)の「手元＋国内輸送中」。FNSKUが未割当のSKUも含めて
 試し、Amazonが受け付けなければ、その理由を表示する(--only-with-fnsku でFNSKUがあるものだけにできる)。
 出荷元は板橋区の住所(郵便番号173-0003)を標準にする。住所の中身は、その郵便番号の既存プランから取る。
@@ -22,7 +22,7 @@ import pricing_rule as pr
 from sp_api import client
 
 
-def eligible_items(stock: dict, only_with_fnsku: bool = False) -> tuple[list, list]:
+def eligible_items(stock: dict, only_with_fnsku: bool = False, include_errors: bool = False) -> tuple[list, list]:
     """(対象[{msku, asin, quantity, fnsku}], 除外[(msku, 理由)])"""
     seller, mp = client.settings.seller_id, client.settings.marketplace_id
     items, skipped = [], []
@@ -35,7 +35,7 @@ def eligible_items(stock: dict, only_with_fnsku: bool = False) -> tuple[list, li
         errors = sum(i["severity"] == "ERROR" for i in r.get("issues", []))
         row = stock.get(listing["asin"], {})
         quantity = (row.get("at_home") or 0) + (row.get("domestic_transit") or 0)
-        reason = (None if fba else "FBAではない") or (f"出品にエラー{errors}件" if errors else None) \
+        reason = (None if fba else "FBAではない") or (f"出品にエラー{errors}件" if errors and not include_errors else None) \
             or (None if quantity > 0 else "数量0") or ("FNSKU未割当" if only_with_fnsku and not summary.get("fnSku") else None)
         if reason:
             skipped.append((listing["sku"], reason))
@@ -81,12 +81,13 @@ def main() -> None:
     parser.add_argument("--create", action="store_true", help="実際にプランを作る(省略時は対象の表示のみ)")
     parser.add_argument("--name", default="第二便(仮)")
     parser.add_argument("--only-with-fnsku", action="store_true")
+    parser.add_argument("--include-errors", action="store_true", help="商品情報のエラーが残るSKUも含める(カタログ側のエラーは納品を止めない。Amazonが拒否すれば作成時に分かる)")
     parser.add_argument("--source-postal", default=DEFAULT_SOURCE_POSTAL_CODE, help="出荷元の郵便番号(既定: 板橋区 173-0003)")
     args = parser.parse_args()
 
     with open(args.stock, encoding="utf-8") as f:
         stock = {r["asin"]: r for r in json.load(f)}
-    items, skipped = eligible_items(stock, args.only_with_fnsku)
+    items, skipped = eligible_items(stock, args.only_with_fnsku, args.include_errors)
     print(f"対象 {len(items)}件 / 合計{sum(i['quantity'] for i in items)}個")
     for i in items:
         print(f"  {i['msku']:<22} ×{i['quantity']:<3} FNSKU={i['fnsku'] or '未割当'}")
