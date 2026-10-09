@@ -285,6 +285,17 @@ def get_fees_estimate(asin: str, price_usd: float) -> Dict[str, float]:
     return {"referral": referral, "fba": fba, "total": total, "other": round(total - referral - fba, 4)}
 
 
+def get_buy_box_price(asin: str) -> Optional[float]:
+    """Product Pricing API: getItemOffers - 新品のバイボックス価格(USD)。出品者がいなければNone。
+    上限は毎秒0.5回なので、連続で呼ぶ側が2秒以上空ける。"""
+    result = _request(
+        f"/products/pricing/v0/items/{asin}/offers",
+        {"MarketplaceId": settings.marketplace_id, "ItemCondition": "New", "CustomerType": "Consumer"},
+    )
+    prices = (result.get("payload", {}).get("Summary") or {}).get("BuyBoxPrices") or []
+    return float(prices[0]["ListingPrice"]["Amount"]) if prices else None
+
+
 def get_pricing_rule_ids(product_type: str) -> list:
     """この出品者が使える自動価格設定ルールのID一覧(商品タイプ定義の seller 固有 enum)。"""
     definition = _request(

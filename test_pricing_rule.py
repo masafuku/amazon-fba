@@ -6,7 +6,15 @@ from sp_api import client
 
 
 class TestComputeBounds(unittest.TestCase):
-    def test_min_price_is_break_even(self):
+    def test_min_price_includes_target_roi(self):
+        minimum, _ = pricing_rule.compute_bounds(unit_cost_jpy=300, current_price_usd=9.99)
+        cost_usd = 300 / 150
+        profit_at_min = minimum * (1 - 0.15) - 3.5 - pricing_rule.INTL_SHIPPING_USD - cost_usd * 0.125 - cost_usd
+        self.assertGreaterEqual(profit_at_min / cost_usd, pricing_rule.MIN_ROI)
+        self.assertLess(profit_at_min / cost_usd, pricing_rule.MIN_ROI + 0.02)
+
+    @mock.patch.object(pricing_rule, "MIN_ROI", 0.0)
+    def test_min_price_is_break_even_when_roi_is_zero(self):
         minimum, maximum = pricing_rule.compute_bounds(unit_cost_jpy=300, current_price_usd=9.99)
         cost_usd = 300 / 150
         profit_at_min = minimum * (1 - 0.15) - 3.5 - pricing_rule.INTL_SHIPPING_USD - cost_usd * 0.125 - cost_usd
@@ -22,6 +30,7 @@ class TestComputeBounds(unittest.TestCase):
 
 
 class TestActualFees(unittest.TestCase):
+    @mock.patch.object(pricing_rule, "MIN_ROI", 0.0)
     def test_uses_actual_fba_fee_and_reaches_break_even(self):
         fee_fn = lambda price: {"referral": price * 0.15, "fba": 2.52, "other": 0.0}
         minimum, _ = pricing_rule.compute_bounds(326, 7.49, fee_fn)
@@ -35,6 +44,25 @@ class TestActualFees(unittest.TestCase):
         fee_fn = lambda price: {"referral": price * 0.15, "fba": 2.0 if price <= 10 else 5.0, "other": 0.0}
         minimum, _ = pricing_rule.compute_bounds(300, 20.0, fee_fn)
         self.assertLessEqual(minimum, 10)
+
+
+class TestMarketFloor(unittest.TestCase):
+    def test_midpoint_of_buy_box_and_break_even_rounded_up(self):
+        self.assertEqual(pricing_rule.market_floor(roi_floor=6.87, break_even=6.36, buy_box=7.49 + 0.0), 6.93)
+
+    def test_never_below_roi_floor(self):
+        # キティシールの例: 真ん中(7.13)がROI下限(7.37)を下回る -> ROI下限
+        self.assertEqual(pricing_rule.market_floor(roi_floor=7.37, break_even=6.78, buy_box=7.48), 7.37)
+
+    def test_no_buy_box_falls_back_to_roi_floor(self):
+        self.assertEqual(pricing_rule.market_floor(roi_floor=5.51, break_even=5.2, buy_box=None), 5.51)
+
+    def test_get_buy_box_price(self):
+        payload = {"payload": {"Summary": {"BuyBoxPrices": [{"ListingPrice": {"Amount": 7.49}}]}}}
+        with mock.patch.object(client, "_request", return_value=payload):
+            self.assertEqual(client.get_buy_box_price("B0X"), 7.49)
+        with mock.patch.object(client, "_request", return_value={"payload": {"Summary": {}}}):
+            self.assertIsNone(client.get_buy_box_price("B0X"))
 
 
 class TestFeesEstimate(unittest.TestCase):
