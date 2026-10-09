@@ -5,7 +5,7 @@ description: 出品中の全SKUをAmazonの自動価格設定(ダイナミック
 
 # 自動価格設定ルールの設定・更新
 
-SP-APIの認証情報はローカルの`.env`にしかないため、**ローカルで実行**する。仕入れ原価の正本はAWSのDB。
+SP-APIの認証情報はローカルの`.env`とAWSの`.env`の両方にある（AWSは3時間ごとの同期に使用）。現在の手順はローカルで実行し、原価だけAWSのDBから取る。仕入れ原価の正本はAWSのDB。
 ルールそのものはAPIで作れない（Seller Centralで作る）。使えるルールは`get_pricing_rule_ids`で取れる
 （現在は `1293652560402-COMPETITIVE_BUYBOX`＝Amazonの競争力のある価格ルール1つ）。
 
