@@ -225,6 +225,23 @@ def create_inbound_plan(
     return _request("/inbound/fba/2024-03-20/inboundPlans", method="POST", body=body)
 
 
+def set_prep_details(prep_details: list) -> Dict[str, Any]:
+    """setPrepDetails - SKUごとの梱包分類を設定する。
+    prep_details: [{"msku", "prepCategory"(NONE/SMALL/...), "prepTypes"(ITEM_NO_PREP/ITEM_POLYBAGGING/...)}]。
+    返り値: {"operationId"}。成否は get_inbound_operation で見る。"""
+    return _request(
+        "/inbound/fba/2024-03-20/items/prepDetails",
+        method="POST",
+        body={"marketplaceId": settings.marketplace_id, "mskuPrepDetails": prep_details},
+    )
+
+
+def list_prep_details(mskus: list) -> Dict[str, Any]:
+    """listPrepDetails - SKUごとの現在の梱包分類。"""
+    return _request("/inbound/fba/2024-03-20/items/prepDetails",
+                    {"marketplaceId": settings.marketplace_id, "mskus": ",".join(mskus)})
+
+
 def get_inbound_operation(operation_id: str) -> Dict[str, Any]:
     """getInboundOperationStatus - 非同期処理の結果(SUCCESS/FAILED/IN_PROGRESS と問題の一覧)。"""
     return _request(f"/inbound/fba/2024-03-20/operations/{operation_id}")
