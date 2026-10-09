@@ -1043,6 +1043,8 @@ def _priority_rejection_reason(entry: dict) -> str | None:
 EXCLUDED_FOOD = 'food'
 EXCLUDED_DRUG_COSMETIC = 'drug_cosmetic'
 EXCLUDED_KNIFE = 'knife'
+EXCLUDED_ELECTRONICS = 'electronics'   # 電気製品(CEO指示 2026-10-10: エージェントの候補から外す)
+EXCLUDED_MUJI = 'muji'                 # 無印良品(卸ルートなし・ネットストア規約で転売目的の購入禁止。CEO指示 2026-10-10)
 EXCLUDED_HAZMAT = 'hazmat'   # 危険物(引火性液体等)。国際輸送・FBAの審査を通せないため完全除外
                              # (CEO確認 2026-09-27: SOFT99 ガラコ ロールオンのSDSで引火性液体H225を確認)
 
@@ -1166,6 +1168,11 @@ def _excluded_kind(text: str | None, is_title: bool = False) -> str | None:
                 return EXCLUDED_DRUG_COSMETIC
             if _COSMETIC_TITLE_ONLY_BRAND_PATTERN.search(lowered):
                 return EXCLUDED_DRUG_COSMETIC
+        # 食品・化粧品に当たらなかったもののうち、無印良品と電気製品を除外する(「Muji 化粧水」は化粧品のまま)。
+        if _contains_any_term(lowered, _MUJI_TERMS):
+            return EXCLUDED_MUJI
+        if _is_electronics_title(lowered):
+            return EXCLUDED_ELECTRONICS
         if _KNIFE_PATTERN.search(lowered) and not _KNIFE_ACCESSORY_PATTERN.search(lowered):
             return EXCLUDED_KNIFE
         return None
@@ -1223,13 +1230,44 @@ def _gated_brand(*texts) -> str | None:
     if not haystack:
         return None
     for label, terms in GATED_BRAND_TERMS.items():
-        for term in terms:
-            if term.isascii():
-                if re.search(r'(?<![a-z0-9])' + re.escape(term) + r'(?![a-z0-9])', haystack):
-                    return label
-            elif term in haystack:
-                return label
+        if _contains_any_term(haystack, terms):
+            return label
     return None
+
+
+def _contains_any_term(haystack: str, terms) -> bool:
+    """英字の語は前後が英数字でないときだけ、日本語の語は部分一致で当たりとする。"""
+    for term in terms:
+        if term.isascii():
+            if re.search(r'(?<![a-z0-9])' + re.escape(term) + r'(?![a-z0-9])', haystack):
+                return True
+        elif term in haystack:
+            return True
+    return False
+
+
+# 電気製品(タイトル判定用)。英字の語は前後が英数字でないときだけ一致。
+# 「電気製品は除外」(CEO 2026-10-10)。電卓・フラッシュライトなど判断が分かれるものは入れていない。
+_ELECTRONICS_TITLE_TERMS = (
+    'electric', 'electronic', 'electronics', 'cordless', 'rechargeable', 'bluetooth', 'wireless', 'usb',
+    'battery', 'batteries', 'charger', 'power bank', 'led light', 'led lamp',
+    'shaver', 'shavers', 'trimmer', 'trimmers', 'hair dryer', 'hairdryer', 'massager',
+    'headphone', 'headphones', 'earphone', 'earphones', 'earbuds', 'headset', 'speaker', 'speakers',
+    'camera', 'cameras', 'laptop', 'smartphone', 'projector', 'monitor',
+    'rice cooker', 'humidifier', 'air purifier', 'vacuum cleaner',
+    '電動', '電気', '充電', 'コードレス', 'ヘッドホン', 'イヤホン', 'シェーバー', 'バリカン', 'ドライヤー', '炊飯器', '電子',
+)
+_MUJI_TERMS = ('muji', '無印良品', '良品計画')
+
+
+def _is_electronics_title(title: str | None) -> bool:
+    return bool(title) and _contains_any_term(title.lower(), _ELECTRONICS_TITLE_TERMS)
+
+
+def candidate_excluded_kind(title: str | None, brand: str | None = None) -> str | None:
+    """候補の完全除外の種別。タイトルの判定(_excluded_kind)に加え、ブランド欄の無印良品も見る。"""
+    return _excluded_kind(title, is_title=True) or (
+        EXCLUDED_MUJI if _contains_any_term(f'{title or ""} {brand or ""}'.lower(), _MUJI_TERMS) else None)
 
 
 _MEDIA_TITLE_PATTERN = re.compile(
@@ -1254,7 +1292,7 @@ def _apply_priority_fields(entry: dict) -> dict:
     フィギュアのフラグ(is_figure)を付ける(in-place。entryを返す)。
     完全除外に当たる候補は priority_tier を付けない。"""
     title = entry.get('title') or ''
-    kind = _excluded_kind(title, is_title=True)
+    kind = candidate_excluded_kind(title, entry.get('brand'))
     entry['excluded_kind'] = kind
     entry['is_figure'] = bool(_is_figure_or_collectible_keyword(title))
     entry['priority_tier'] = None if kind else _classify_priority_tier(

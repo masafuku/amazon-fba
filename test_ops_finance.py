@@ -523,10 +523,12 @@ class TestExcludedKind(unittest.TestCase):
         # 現在の広い語のリストをそのままタイトルに当てると誤検知していた実例
         for title in (
             'Puozult Digital Kitchen Scale 30kg Large Food Scale', 'RETTBERG Tea Kettle for Stovetop Induction',
-            'Acrylic Floating Shelves Shower Shelf Shampoo Conditioner Holder', 'Yamazen Rice Cooker 0.5-1.5 go',
+            'Acrylic Floating Shelves Shower Shelf Shampoo Conditioner Holder',
             'Kureha Seaguar Fluorocarbon Fishing Line',
         ):
             self.assertIsNone(_excluded_kind(title, is_title=True), title)
+        # 炊飯器は食品としては除外しないが、電気製品として除外する(CEO 2026-10-10)
+        self.assertEqual(_excluded_kind('Yamazen Rice Cooker 0.5-1.5 go', is_title=True), 'electronics')
 
     def test_keyword_mode_uses_broad_food_list(self):
         self.assertEqual(_excluded_kind('Japan snacks'), 'food')
