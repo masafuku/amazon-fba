@@ -25,6 +25,7 @@ import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 
+import market_prices
 import ops_finance as of
 import sd_email_parser as sdp
 
@@ -417,6 +418,7 @@ def alerts(today: str | None = None) -> list:
             (TNK_SHIPPED, intl_limit, *FC_RECEIVED_STATUSES),
         ):
             result.append(f'FBA受領待ち{(today_date - datetime.fromisoformat(shipped_on).date()).days}日: {confirmation_id}（TNK発送{shipped_on}）。Seller Centralで受領状況を確認')
+    result += market_prices.roi_alerts()
     return result
 
 

@@ -376,6 +376,18 @@ def init_ops_tables():
                 asin TEXT NOT NULL
             );
 
+            -- 相場の最新スナップショット(market_prices.pyが3時間ごとに更新。読み取りのみで価格は動かさない)。
+            CREATE TABLE IF NOT EXISTS market_prices (
+                asin TEXT PRIMARY KEY,
+                buy_box_usd REAL,
+                lowest_fba_usd REAL,
+                offer_count INTEGER,
+                referral_fee_usd REAL,
+                fba_fee_usd REAL,
+                other_fee_usd REAL,
+                fetched_at TEXT
+            );
+
             -- 在庫台帳の取り込み位置など(key-value)。
             CREATE TABLE IF NOT EXISTS ledger_state (
                 key TEXT PRIMARY KEY,

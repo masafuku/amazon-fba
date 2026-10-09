@@ -28,6 +28,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 import ops_finance as of
+import market_prices
 import stock_ledger
 from sp_api import client as sp_client
 from sp_api.config import settings as sp_settings
@@ -215,6 +216,12 @@ def run_once(lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> None:
 
     changes = stock_ledger.record_sp_changes()
     logger.info(f"在庫台帳イベント: {changes or 'なし'}")
+
+    # 相場(バイボックス・手数料)は読み取りだけ。失敗しても他の同期結果は残す。
+    try:
+        logger.info(f"相場取得: {market_prices.refresh()}")
+    except Exception as exc:
+        logger.warning(f"相場取得に失敗: {exc}")
 
 
 def main() -> None:

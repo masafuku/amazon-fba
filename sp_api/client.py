@@ -291,15 +291,26 @@ def get_fees_estimate(asin: str, price_usd: float) -> Dict[str, float]:
     return {"referral": referral, "fba": fba, "total": total, "other": round(total - referral - fba, 4)}
 
 
-def get_buy_box_price(asin: str) -> Optional[float]:
-    """Product Pricing API: getItemOffers - 新品のバイボックス価格(USD)。出品者がいなければNone。
-    上限は毎秒0.5回なので、連続で呼ぶ側が2秒以上空ける。"""
+def get_offers_summary(asin: str) -> Dict[str, Any]:
+    """Product Pricing API: getItemOffers - 新品のバイボックス価格・FBA最安値・出品数(USD)。
+    バイボックス/最安値は出品者がいなければNone。上限は毎秒0.5回なので、連続で呼ぶ側が2秒以上空ける。"""
     result = _request(
         f"/products/pricing/v0/items/{asin}/offers",
         {"MarketplaceId": settings.marketplace_id, "ItemCondition": "New", "CustomerType": "Consumer"},
     )
-    prices = (result.get("payload", {}).get("Summary") or {}).get("BuyBoxPrices") or []
-    return float(prices[0]["ListingPrice"]["Amount"]) if prices else None
+    summary = result.get("payload", {}).get("Summary") or {}
+    prices = summary.get("BuyBoxPrices") or []
+    fba = [float(p["ListingPrice"]["Amount"]) for p in summary.get("LowestPrices", []) if p.get("fulfillmentChannel") == "Amazon"]
+    return {
+        "buy_box": float(prices[0]["ListingPrice"]["Amount"]) if prices else None,
+        "lowest_fba": min(fba) if fba else None,
+        "offers": sum(int(n.get("OfferCount", 0)) for n in summary.get("NumberOfOffers", [])),
+    }
+
+
+def get_buy_box_price(asin: str) -> Optional[float]:
+    """新品のバイボックス価格(USD)。出品者がいなければNone。"""
+    return get_offers_summary(asin)["buy_box"]
 
 
 def get_pricing_rule_ids(product_type: str) -> list:
