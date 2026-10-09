@@ -652,7 +652,7 @@ def build_ledger_digest(since_iso: str | None, today: str | None = None) -> str:
 def format_pipeline(rows: list) -> str:
     columns = [('awaiting_supplier', '未出荷'), ('domestic_transit', '国内輸送'), ('at_home', '自宅'),
                ('planned', '納品プラン'), ('at_tnk', 'TNK'), ('intl_transit', '国際輸送'),
-               ('fba_available', 'FBA在庫'), ('sold_30d', '30日販売')]
+               ('fc_received_inbound', 'FC受領中'), ('fba_available', 'FBA在庫'), ('sold_30d', '30日販売')]
     lines = []
     for row in rows:
         parts = [f'{label}{row[key]}' for key, label in columns if row[key]]
