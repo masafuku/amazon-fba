@@ -49,10 +49,18 @@ def eligible_items(stock: dict, only_with_fnsku: bool = False) -> tuple[list, li
 DEFAULT_SOURCE_POSTAL_CODE = "173-0003"
 
 
+# 第一便(出荷済み)のプラン。出荷済みのプランは一覧には出ないが、IDを指定すれば読める。
+# 下書きをすべて取り消した後でも、板橋区の住所(電話番号などを含む)を取れるようにする予備の参照先。
+FIRST_SHIPMENT_PLAN_ID = "wfa1b90a69-cc3e-412d-a641-5ef2bb15fda8"
+
+
 def source_address(postal_code: str = DEFAULT_SOURCE_POSTAL_CODE) -> dict:
     plans = sorted(client.get_inbound_plans().get("inboundPlans", []), key=lambda p: p.get("createdAt", ""), reverse=True)
-    for plan in plans:
-        address = client.get_inbound_plan(plan["inboundPlanId"]).get("sourceAddress", {})
+    for plan_id in [p["inboundPlanId"] for p in plans] + [FIRST_SHIPMENT_PLAN_ID]:
+        try:
+            address = client.get_inbound_plan(plan_id).get("sourceAddress", {})
+        except client.SpApiError:
+            continue
         if address.get("postalCode") == postal_code:
             return address
     raise SystemExit(f"郵便番号{postal_code}を出荷元にした既存プランが見つかりません。--source-postal で指定してください。")
