@@ -1026,6 +1026,9 @@ _DRUG_COSMETIC_KEYWORDS = _QUASI_DRUG_KEYWORDS + (
     'shampoo', 'conditioner', 'toothpaste', 'mouthwash', 'lotion', 'serum', 'sunscreen',
     'face mask', 'facial mask', 'moisturizer', 'moisturizing cream', 'cleansing oil',
     'cleansing foam', 'eye drops', 'hair dye', 'hair color', 'lip balm', 'lipstick',
+    'foundation', 'concealer', 'blush', 'highlighter', 'eyeliner', 'mascara', 'eyeshadow',
+    'toner', 'essence', 'emulsion', 'micellar water', 'body lotion', 'hand cream',
+    'whip wash', 'facial wash', 'face wash', 'pearl glow', 'hyaluronic',
 )
 _KNIFE_KEYWORDS = (
     'knife', 'knives', 'santoku', 'gyuto', 'nakiri', 'deba', 'yanagiba', 'kiritsuke',
@@ -1067,12 +1070,26 @@ _FOOD_TITLE_PATTERN = _build_word_pattern(_FOOD_TITLE_KEYWORDS)
 _DRUG_COSMETIC_PATTERN = _build_word_pattern(_DRUG_COSMETIC_KEYWORDS)
 _KNIFE_PATTERN = _build_word_pattern(_KNIFE_KEYWORDS)
 _HAZMAT_PATTERN = _build_word_pattern(_HAZMAT_KEYWORDS)
+# 化粧品専業ブランドのうち、他カテゴリの商品がほぼ存在しないもの。
+# タイトル判定・キーワード判定の両方で使う(_COSMETIC_TITLE_ONLY_BRAND_PATTERN)。
+_COSMETIC_TITLE_ONLY_BRAND_KEYWORDS = (
+    'canmake', 'cezanne', 'kate tokyo', 'integrate', 'majolica majorca', 'excel tokyo',
+    'flowfushi', 'uzu', 'ettusais', 'lululun', 'milbon', 'bihada ichizoku',
+    'decorte', 'albion', 'pola', 'orbis', 'fancl', 'attenir', 'minon',
+    'perfect whip',
+)
+_COSMETIC_TITLE_ONLY_BRAND_PATTERN = _build_word_pattern(_COSMETIC_TITLE_ONLY_BRAND_KEYWORDS)
+
 # 化粧品・ヘアケアのブランド名。検索キーワードに使うと、結果は全件が化粧品(完全除外)で
 # 弾かれ、Keepaのトークンを無駄にするため、キーワード判定(is_title=False)でだけ使う。
-# (タイトル判定には使わない: ブランド名だけでは化粧品と限らない商品が混ざるため)
-_COSMETIC_BRAND_KEYWORDS = (
+# (タイトル判定: _COSMETIC_TITLE_ONLY_BRAND_PATTERNで専業ブランドのみ対応)
+_COSMETIC_BRAND_KEYWORDS = _COSMETIC_TITLE_ONLY_BRAND_KEYWORDS + (
     'dhc', 'biore', 'canmake', 'hada labo', 'kanebo', 'kose', 'sk-ii', 'sk ii', 'skii',
     'bihada ichizoku', 'shiseido', 'kracie', 'lululun', 'milbon', 'senka', 'rohto',
+    'cezanne', 'kate tokyo', 'integrate', 'majolica majorca', 'excel tokyo',
+    'flowfushi', 'uzu', 'ettusais', 'decorte', 'albion', 'pola', 'orbis',
+    'fancl', 'attenir', 'minon', 'curel', 'neutrogena japan', 'bioderma',
+    'perfect whip', 'cleansing oil', 'bb cream',
 )
 _COSMETIC_BRAND_PATTERN = _build_word_pattern(_COSMETIC_BRAND_KEYWORDS)
 _NON_CONSUMABLE_PATTERN = _build_word_pattern(_NON_CONSUMABLE_HINTS)
@@ -1104,6 +1121,8 @@ def _excluded_kind(text: str | None, is_title: bool = False) -> str | None:
             if _FOOD_TITLE_PATTERN.search(lowered):
                 return EXCLUDED_FOOD
             if _DRUG_COSMETIC_PATTERN.search(lowered):
+                return EXCLUDED_DRUG_COSMETIC
+            if _COSMETIC_TITLE_ONLY_BRAND_PATTERN.search(lowered):
                 return EXCLUDED_DRUG_COSMETIC
         if _KNIFE_PATTERN.search(lowered) and not _KNIFE_ACCESSORY_PATTERN.search(lowered):
             return EXCLUDED_KNIFE
