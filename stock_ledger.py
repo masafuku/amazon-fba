@@ -276,8 +276,9 @@ def ingest_email(email: dict) -> list:
     return new_events
 
 
-def mark_received(*, tracking_no: str | None = None, reception_nos: list | None = None, on: str | None = None) -> int:
-    """自宅着の口頭報告を登録する。送り状番号か受付番号で指定。"""
+def mark_received(*, tracking_no: str | None = None, reception_nos: list | None = None, on: str | None = None,
+                  undo: bool = False) -> int:
+    """自宅着の口頭報告を登録する(undo=Trueで取り消し)。送り状番号か受付番号で指定。"""
     of.init_ops_tables()
     on = on or datetime.now(JST).date().isoformat()
     with sqlite3.connect(of.DB_PATH) as conn:
@@ -287,8 +288,12 @@ def mark_received(*, tracking_no: str | None = None, reception_nos: list | None 
         else:
             rows = [(r,) for r in reception_nos or []]
         for (reception_no,) in rows:
-            conn.execute('UPDATE jp_purchase_records SET received_at = ? WHERE sd_reception_no = ?', (on, reception_no))
-            _record_event(conn, f'manual:{_now()}', HOME_RECEIVED, on, reception_no, {'tracking_no': tracking_no})
+            conn.execute('UPDATE jp_purchase_records SET received_at = ? WHERE sd_reception_no = ?',
+                         (None if undo else on, reception_no))
+            if undo:
+                conn.execute('DELETE FROM ops_events WHERE event_type = ? AND ref = ?', (HOME_RECEIVED, reception_no))
+            else:
+                _record_event(conn, f'manual:{_now()}', HOME_RECEIVED, on, reception_no, {'tracking_no': tracking_no})
     return len(rows)
 
 
@@ -395,6 +400,7 @@ def main() -> None:
     received.add_argument('--tracking')
     received.add_argument('--reception', nargs='*')
     received.add_argument('--on')
+    received.add_argument('--undo', action='store_true')
     mapping = sub.add_parser('map-sd')
     mapping.add_argument('sd_product_no')
     mapping.add_argument('asin')
@@ -408,7 +414,8 @@ def main() -> None:
         rows = stock_pipeline()
         print(json.dumps(rows, ensure_ascii=False, indent=1) if args.json else format_pipeline(rows))
     elif args.command == 'received':
-        print(f'{mark_received(tracking_no=args.tracking, reception_nos=args.reception, on=args.on)}行を自宅着にしました')
+        count = mark_received(tracking_no=args.tracking, reception_nos=args.reception, on=args.on, undo=args.undo)
+        print(f"{count}行の自宅着を{'取り消しました' if args.undo else '登録しました'}")
     elif args.command == 'map-sd':
         set_sd_product_asin(args.sd_product_no, args.asin)
         print('ok')

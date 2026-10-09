@@ -161,6 +161,12 @@ class TestIngest(StockLedgerTestCase):
         self.assertEqual(pipeline['B0CNKDP9WP']['at_home'], 12)
         self.assertEqual(pipeline['(未紐付け:15913004S2)']['at_home'], 15)
 
+        sl.mark_received(reception_nos=['94654547'], undo=True)
+        pipeline = {r['asin']: r for r in sl.stock_pipeline(today='2026-10-10')}
+        self.assertEqual(pipeline['B0CNKDP9WP']['at_home'], 0)
+        self.assertEqual(pipeline['B0CNKDP9WP']['domestic_transit'], 12)
+        self.assertEqual(self.query("SELECT COUNT(*) FROM ops_events WHERE event_type = 'home_received' AND ref = '94654547'"), [(0,)])
+
     def test_reingest_is_idempotent_and_does_not_overwrite(self):
         email = {'id': 'm1', 'subject': '＜SD＞ご注文内容控え(Zoomy BUNGU)', 'date': '2026-10-06T04:56:27Z', 'body': ORDER_EMAIL}
         self.assertEqual(len(sl.ingest_email(email)), 1)
