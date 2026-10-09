@@ -88,23 +88,29 @@ def _request(
     path: str,
     params: Optional[Dict[str, Any]] = None,
     method: str = "GET",
+    body: Optional[Dict[str, Any]] = None,
     max_retries: int = 3,
 ) -> Dict[str, Any]:
     """Call one SP-API REST endpoint, retrying once on 429/5xx per Retry-After."""
     clean_params = {k: v for k, v in (params or {}).items() if v is not None}
     query = f"?{urllib.parse.urlencode(clean_params)}" if clean_params else ""
     url = f"{endpoint()}{path}{query}"
+    body_bytes = json.dumps(body).encode("utf-8") if body is not None else None
 
     last_error: Optional[Exception] = None
     for attempt in range(max_retries):
         access_token = get_access_token()
+        headers = {
+            "x-amz-access-token": access_token,
+            "Accept": "application/json",
+            "Accept-Encoding": "gzip",
+        }
+        if body_bytes is not None:
+            headers["Content-Type"] = "application/json"
         request = urllib.request.Request(
             url,
-            headers={
-                "x-amz-access-token": access_token,
-                "Accept": "application/json",
-                "Accept-Encoding": "gzip",
-            },
+            data=body_bytes,
+            headers=headers,
             method=method,
         )
         try:
@@ -194,6 +200,127 @@ def get_inbound_plan_items(plan_id: str, next_token: Optional[str] = None) -> Di
 def get_inbound_shipment(plan_id: str, shipment_id: str) -> Dict[str, Any]:
     """getShipment - 便ごとの詳細(納品先FC、納品期間、実際のFBA Shipment ID等)。"""
     return _request(f"/inbound/fba/2024-03-20/inboundPlans/{plan_id}/shipments/{shipment_id}")
+
+
+def put_listing_item(
+    sku: str,
+    asin: str,
+    product_type: str,
+    price_usd: float,
+    quantity: int = 0,
+    condition: str = "new_new",
+    seller_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Listings Items API: putListingsItem - 既存ASINへの出品オファーを作成/更新する。
+
+    FBA出品のため quantity は 0 (在庫はAmazon倉庫管理)。
+    price_usd はドル建て価格。自動価格設定は Seller Central から別途設定。
+    """
+    seller = seller_id or settings.seller_id
+    if not seller:
+        raise SpApiError("販売者ID(SP_API_SELLER_ID)が未設定です。")
+
+    # Encode SKU for URL path
+    encoded_sku = urllib.parse.quote(sku, safe="")
+
+    body = {
+        "productType": product_type,
+        "requirements": "LISTING_OFFER_ONLY",
+        "attributes": {
+            "merchant_suggested_asin": [{"value": asin, "marketplace_id": settings.marketplace_id}],
+            "condition_type": [{"value": condition, "marketplace_id": settings.marketplace_id}],
+            "purchasable_offer": [{
+                "currency": "USD",
+                "our_price": [{"schedule": [{"value_with_tax": price_usd}]}],
+                "marketplace_id": settings.marketplace_id,
+            }],
+            "fulfillment_availability": [{
+                "fulfillment_channel_code": "AMAZON_NA",
+                "quantity": quantity,
+                "marketplace_id": settings.marketplace_id,
+            }],
+            "batteries_required": [{"value": False, "marketplace_id": settings.marketplace_id}],
+            "supplier_declared_dg_hz_regulation": [{"value": "not_applicable", "marketplace_id": settings.marketplace_id}],
+        },
+    }
+
+    return _request(
+        f"/listings/2021-08-01/items/{seller}/{encoded_sku}",
+        {"marketplaceIds": settings.marketplace_id},
+        method="PUT",
+        body=body,
+    )
+
+
+def search_listings_items(next_token: Optional[str] = None, page_size: int = 20) -> Dict[str, Any]:
+    """Listings Items API: searchListingsItems - 出品中SKU一覧(価格・状態付き)。"""
+    seller = settings.seller_id
+    if not seller:
+        raise SpApiError("販売者ID(SP_API_SELLER_ID)が未設定です。")
+    params = {
+        "marketplaceIds": settings.marketplace_id,
+        "includedData": "summaries,offers",
+        "pageSize": page_size,
+        "pageToken": next_token,
+    }
+    return _request(f"/listings/2021-08-01/items/{seller}", params)
+
+
+def get_pricing_rule_ids(product_type: str) -> list:
+    """この出品者が使える自動価格設定ルールのID一覧(商品タイプ定義の seller 固有 enum)。"""
+    definition = _request(
+        f"/definitions/2020-09-01/productTypes/{product_type}",
+        {"marketplaceIds": settings.marketplace_id, "requirements": "LISTING_OFFER_ONLY",
+         "locale": "en_US", "sellerId": settings.seller_id},
+    )
+    schema = json.load(urllib.request.urlopen(definition["schema"]["link"]["resource"], timeout=30))
+    rule = (schema["properties"]["purchasable_offer"]["items"]["properties"]
+            ["automated_pricing_merchandising_rule_plan"]["items"]["properties"]["merchandising_rule"]["properties"]["rule_id"])
+    return rule.get("enum") or []
+
+
+def enroll_pricing_rule(
+    sku: str,
+    product_type: str,
+    rule_id: str,
+    current_price_usd: float,
+    min_price_usd: float,
+    max_price_usd: float,
+    validate_only: bool = True,
+) -> Dict[str, Any]:
+    """Listings Items API: patchListingsItem - SKUを自動価格設定ルールに紐付ける。
+
+    purchasable_offer は replace で丸ごと置き換わるため、現在価格(our_price)も一緒に渡す
+    (渡さないと価格が消える)。validate_only=True は VALIDATION_PREVIEW(検証のみで反映しない)。
+    ルールの反映は非同期。確認は get_listing_item 相当(searchListingsItems)で行う。
+    """
+    seller = settings.seller_id
+    if not seller:
+        raise SpApiError("販売者ID(SP_API_SELLER_ID)が未設定です。")
+    marketplace = settings.marketplace_id
+    body = {
+        "productType": product_type,
+        "patches": [{
+            "op": "replace",
+            "path": "/attributes/purchasable_offer",
+            "value": [{
+                "currency": "USD",
+                "audience": "ALL",
+                "marketplace_id": marketplace,
+                "our_price": [{"schedule": [{"value_with_tax": current_price_usd}]}],
+                "minimum_seller_allowed_price": [{"schedule": [{"value_with_tax": min_price_usd}]}],
+                "maximum_seller_allowed_price": [{"schedule": [{"value_with_tax": max_price_usd}]}],
+                "automated_pricing_merchandising_rule_plan": [{"merchandising_rule": {"rule_id": rule_id}}],
+            }],
+        }],
+    }
+    params = {"marketplaceIds": marketplace, "mode": "VALIDATION_PREVIEW" if validate_only else None}
+    return _request(
+        f"/listings/2021-08-01/items/{seller}/{urllib.parse.quote(sku, safe='')}",
+        params,
+        method="PATCH",
+        body=body,
+    )
 
 
 def get_listings_restrictions(
