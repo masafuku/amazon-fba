@@ -1,6 +1,25 @@
 import unittest
+from unittest import mock
 
+import notify_line
 from notify_line import build_line_message
+
+
+class TestSendLineMessage(unittest.TestCase):
+    def test_list_becomes_multiple_bubbles_in_one_broadcast(self):
+        with mock.patch.object(notify_line, "_post") as post:
+            notify_line.send_line_message("token", ["在庫", "", "候補"])
+        path, _, payload = post.call_args[0]
+        self.assertEqual(path, "/broadcast")
+        self.assertEqual(payload["messages"], [{"type": "text", "text": "在庫"}, {"type": "text", "text": "候補"}])
+        self.assertEqual(post.call_count, 1)
+
+    def test_single_string_still_works(self):
+        with mock.patch.object(notify_line, "_post") as post:
+            notify_line.send_line_message("token", "x" * 6000, user_id="U1")
+        path, _, payload = post.call_args[0]
+        self.assertEqual(path, "/push")
+        self.assertEqual(len(payload["messages"][0]["text"]), 5000)
 
 
 class TestNotifyLine(unittest.TestCase):

@@ -27,6 +27,7 @@ API_BASE = "https://api.line.me/v2/bot/message"
 
 # LINEのテキストメッセージは1通あたり最大5000文字。
 _MAX_TEXT_LENGTH = 5000
+_MAX_MESSAGES_PER_REQUEST = 5
 
 
 class LineNotifyError(RuntimeError):
@@ -56,15 +57,18 @@ def _post(path: str, channel_access_token: str, payload: Dict) -> None:
 
 def send_line_message(
     channel_access_token: str,
-    message: str,
+    message: str | List[str],
     user_id: Optional[str] = None,
 ) -> None:
-    """LINEにテキストメッセージを送る。user_idがあればpush、無ければbroadcast。"""
+    """LINEにテキストメッセージを送る。user_idがあればpush、無ければbroadcast。
+    リストを渡すと1回の送信で複数の吹き出しに分ける(最大5通。送信回数は1回分)。"""
     if not channel_access_token:
         raise LineNotifyError("LINE_CHANNEL_ACCESS_TOKEN が未設定です。")
 
-    text = message[:_MAX_TEXT_LENGTH]
-    messages: List[Dict] = [{"type": "text", "text": text}]
+    texts = [message] if isinstance(message, str) else [m for m in message if m]
+    if len(texts) > _MAX_MESSAGES_PER_REQUEST:
+        raise LineNotifyError(f"1回の送信は最大{_MAX_MESSAGES_PER_REQUEST}通です({len(texts)}通指定)。")
+    messages: List[Dict] = [{"type": "text", "text": text[:_MAX_TEXT_LENGTH]} for text in texts]
 
     if user_id:
         _post("/push", channel_access_token, {"to": user_id, "messages": messages})

@@ -56,13 +56,13 @@ def main() -> None:
 
     period_label = f"{args.period}候補" if args.period else "候補"
     candidate_message = build_daily_digest_message(candidates, keywords, period_label, budget_alerts=budget_alerts)
-    # 在庫・物流を先頭に置く(LINEの文字数上限で切れるのは候補リスト側になるように)
-    message = stock_ledger.build_ledger_digest(since_iso) + "\n\n" + candidate_message
+    # 在庫・物流と候補を別の吹き出しにする(1回の送信なので送信数は増えない)
+    messages = [stock_ledger.build_ledger_digest(since_iso), candidate_message]
 
     print(f"[INFO] 対象期間: {effective_since} 〜 現在 (前回送信: {since_iso or 'なし(初回)'})")
     print(f"[INFO] 検索キーワード: {len(keywords)}件 / 合格候補: {len(candidates)}件(重複除く)")
     print("--- 通知内容 ---")
-    print(message)
+    print("\n\n----- (2通目) -----\n\n".join(messages))
 
     if args.dry_run:
         print("[INFO] --dry-run のため送信しません。")
@@ -76,7 +76,7 @@ def main() -> None:
     try:
         send_line_message(
             channel_access_token=settings.line_channel_access_token,
-            message=message,
+            message=messages,
             user_id=settings.line_user_id or None,
         )
         target = settings.line_user_id or "友だち全員へbroadcast"
