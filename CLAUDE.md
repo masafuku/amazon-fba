@@ -16,6 +16,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 在庫・便の中身・次の発注を聞かれたら、メールを探さずAWSで `stock_ledger.py stock` を見る。
 **DBはAWSのもの（`/home/ubuntu/work/amazon-fba/keepa-csv-dashboard/keepa_imports.sqlite3`）が唯一の正本で、ローカルのsqliteは古いコピーなので使わない。**
 
+## 自動価格設定（ダイナミックプライシング）の設定・更新
+
+出品の全SKUを`1293652560402-COMPETITIVE_BUYBOX`ルールに紐付け、最低・最高価格を決める手順は
+`.claude/skills/pricing-rule/SKILL.md`（スキル`pricing-rule`）。ローカルの`pricing_rule.py`で、
+検証→反映→確認の順に行う。最低価格＝バイボックスと損益分岐点の真ん中（CEO合意 2026-10-10）。
+
 ## What this is
 
 A Japan→North America Amazon arbitrage research tool: find products cheap on Amazon.co.jp that
