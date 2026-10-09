@@ -186,6 +186,26 @@ class TestIngest(StockLedgerTestCase):
             conn.execute("UPDATE sp_inbound_shipments SET status = 'RECEIVING'")
         self.assertEqual(sl.stock_pipeline()[0]['intl_transit'], 0)
 
+    def test_since_follows_latest_ingested_email(self):
+        sl.ingest_batch([{'id': 'm1', 'subject': '＜SD＞ご注文内容控え(Zoomy BUNGU)', 'date': '2026-10-06T04:56:27Z', 'body': ORDER_EMAIL},
+                         {'id': 'x', 'subject': '関係ないメール', 'date': '2026-10-08T01:00:00Z', 'body': ''}])
+        self.assertEqual(sl.gmail_since(), '2026/10/07')
+
+    def test_alerts(self):
+        sl.ingest_email({'id': 'm2', 'subject': '＜SD＞出荷完了いたしました(丸進)', 'date': '2026-10-08T06:05:01Z', 'body': SHIPPED_EMAIL})
+        sl.ingest_email({'id': 'b1', 'subject': 'US - Brand Approval Request for SUN-STAR', 'date': '2026-10-07T23:31:01Z',
+                         'body': 'you are not eligible to sell'})
+        found = sl.alerts(today='2026-10-12')
+        self.assertTrue(any(a.startswith('ブランド却下: SUN-STAR') for a in found))
+        self.assertTrue(any('国内輸送4日経過' in a and '140418920994' in a for a in found))
+        self.assertTrue(any('ASIN未紐付け' in a for a in found))
+
+        sl.record_brand_status('SUN-STAR', 'pending', '再申請', on='2026-10-09')
+        sl.mark_received(tracking_no='140418920994', on='2026-10-10')
+        found = sl.alerts(today='2026-10-12')
+        self.assertTrue(any(a.startswith('ブランド審査中: SUN-STAR') for a in found))
+        self.assertFalse(any('国内輸送' in a for a in found))
+
     def test_days_of_cover_uses_30_day_sales(self):
         with sqlite3.connect(ops_finance.DB_PATH) as conn:
             conn.execute("INSERT INTO sp_fba_inventory (asin, sku, fulfillable_quantity) VALUES ('A1', 'S', 20)")

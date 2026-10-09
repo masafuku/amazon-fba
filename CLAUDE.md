@@ -9,6 +9,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `/Users/masaki/local/github/_shared/entity-policy.md`
 - `/Users/masaki/local/github/_shared/corporate-finance.md`
 
+## 「メール確認して」と言われたら
+
+必ず `.claude/skills/mail-check/SKILL.md`（スキル `mail-check`）の手順で、SD・TNK・Amazonのメールを
+在庫台帳（`stock_ledger.py`、AWSのDB）に取り込み、領収書を整理してから報告する。要約だけで終わらせない。
+在庫・便の中身・次の発注を聞かれたら、メールを探さずAWSで `stock_ledger.py stock` を見る。
+**DBはAWSのもの（`/home/ubuntu/work/amazon-fba/keepa-csv-dashboard/keepa_imports.sqlite3`）が唯一の正本で、ローカルのsqliteは古いコピーなので使わない。**
+
 ## What this is
 
 A Japan→North America Amazon arbitrage research tool: find products cheap on Amazon.co.jp that

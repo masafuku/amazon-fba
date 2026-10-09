@@ -375,6 +375,12 @@ def init_ops_tables():
                 sd_product_no TEXT PRIMARY KEY,
                 asin TEXT NOT NULL
             );
+
+            -- 在庫台帳の取り込み位置など(key-value)。
+            CREATE TABLE IF NOT EXISTS ledger_state (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
             '''
         )
         purchase_columns = {row[1] for row in conn.execute('PRAGMA table_info(jp_purchase_records)').fetchall()}

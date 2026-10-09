@@ -7,10 +7,13 @@
 - TNK・Amazonのメールは ops_events にだけ記録し、集計時に参照する
 メールが来ないのは自宅着だけなので mark_received() で口頭報告を登録する。
 
-使い方(AWS上で実行。DBはAWSが正本):
-    stock_ledger.py ingest < emails.json   # [{id, subject, sender, date, body}, ...]
+使い方(AWS上で実行。DBはAWSが正本。手順は .claude/skills/mail-check/SKILL.md):
+    stock_ledger.py since                    # 次回Gmail検索の開始日
+    stock_ledger.py ingest emails.json       # [{id, subject, sender, date, body}, ...] 新しい動き+要対応を表示
     stock_ledger.py stock [--json]
-    stock_ledger.py received --tracking 140418920994 [--on 2026-10-10]
+    stock_ledger.py alerts
+    stock_ledger.py received --tracking 140418920994 [--on 2026-10-10] [--undo]
+    stock_ledger.py brand SUN-STAR pending --note "再申請中"
     stock_ledger.py map-sd 15913004S3 B0CBDKXTD2
 """
 from __future__ import annotations
@@ -297,6 +300,108 @@ def mark_received(*, tracking_no: str | None = None, reception_nos: list | None 
     return len(rows)
 
 
+def _get_state(conn, key):
+    row = conn.execute('SELECT value FROM ledger_state WHERE key = ?', (key,)).fetchone()
+    return row[0] if row else None
+
+
+def _set_state(conn, key, value):
+    conn.execute('INSERT INTO ledger_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+                 (key, value))
+
+
+def ingest_batch(emails: list) -> list:
+    """複数メールを取り込み、取り込み位置(最新メールの日時)を進める。"""
+    new_events = []
+    for email in emails:
+        new_events += ingest_email(email)
+    dates = [e['date'] for e in emails if e.get('date')]
+    with sqlite3.connect(of.DB_PATH) as conn:
+        _set_state(conn, 'last_ingest_at', _now())
+        latest = max(dates + [_get_state(conn, 'last_email_date') or ''])
+        if latest:
+            _set_state(conn, 'last_email_date', latest)
+    return new_events
+
+
+def gmail_since(default_days: int = 14) -> str:
+    """次回のGmail検索の開始日(after:YYYY/MM/DD)。取り込み済みの最新メールの1日前から
+    (重複取り込みは無害なので、取りこぼしを避ける側に倒す)。"""
+    of.init_ops_tables()
+    with sqlite3.connect(of.DB_PATH) as conn:
+        latest = _get_state(conn, 'last_email_date')
+    if latest:
+        start = datetime.fromisoformat(latest.replace('Z', '+00:00')).astimezone(JST).date() - timedelta(days=1)
+    else:
+        start = datetime.now(JST).date() - timedelta(days=default_days)
+    return start.strftime('%Y/%m/%d')
+
+
+def record_brand_status(brand: str, status: str, note: str = '', on: str | None = None) -> None:
+    """再申請など、メール以外で分かったブランド状況を登録する。"""
+    event_type = {'approved': BRAND_APPROVED, 'rejected': BRAND_REJECTED, 'pending': BRAND_PENDING}[status]
+    of.init_ops_tables()
+    with sqlite3.connect(of.DB_PATH) as conn:
+        _record_event(conn, f'manual:{_now()}', event_type, on or datetime.now(JST).date().isoformat(), brand, {'note': note})
+
+
+DOMESTIC_TRANSIT_ALERT_DAYS = 3
+INTL_TRANSIT_ALERT_DAYS = 10
+
+
+def alerts(today: str | None = None) -> list:
+    """人が対応すべきことの一覧。"""
+    of.init_ops_tables()
+    today_date = datetime.fromisoformat(today).date() if today else datetime.now(JST).date()
+    today_iso = today_date.isoformat()
+    result = []
+    with sqlite3.connect(of.DB_PATH) as conn:
+        other_channel = {r[0] for r in conn.execute("SELECT ref FROM ops_events WHERE event_type = 'channel_other'")}
+
+        for brand, event_type, on in conn.execute(
+            '''SELECT ref, event_type, occurred_on FROM ops_events e
+               WHERE event_type IN (?, ?, ?) AND id = (
+                   SELECT id FROM ops_events WHERE ref = e.ref AND event_type IN (?, ?, ?)
+                   ORDER BY occurred_on DESC, id DESC LIMIT 1)''',
+            (BRAND_APPROVED, BRAND_REJECTED, BRAND_PENDING) * 2,
+        ):
+            if event_type == BRAND_REJECTED:
+                result.append(f'ブランド却下: {brand}（{on}）。仕入れ済み・発注予定があれば再申請か販路変更を判断')
+            elif event_type == BRAND_PENDING:
+                result.append(f'ブランド審査中: {brand}（{on}〜）。結果が出るまで納品プランに入れない')
+
+        for reception, supplier, name, variant, expected in conn.execute(
+            '''SELECT sd_reception_no, supplier_name, product_name, variant, expected_ship_date FROM jp_purchase_records
+               WHERE supplier_shipped_at IS NULL AND received_at IS NULL AND length(expected_ship_date) = 10
+                 AND expected_ship_date < ?''', (today_iso,)
+        ):
+            result.append(f'出荷予定日超過: {supplier} {name} {variant or ""}（予定{expected}）')
+
+        limit = (today_date - timedelta(days=DOMESTIC_TRANSIT_ALERT_DAYS)).isoformat()
+        for supplier, carrier, tracking, shipped, count in conn.execute(
+            '''SELECT supplier_name, carrier, tracking_no, supplier_shipped_at, COUNT(*) FROM jp_purchase_records
+               WHERE received_at IS NULL AND supplier_shipped_at IS NOT NULL AND supplier_shipped_at <= ?
+               GROUP BY supplier_name, carrier, tracking_no, supplier_shipped_at''', (limit,)
+        ):
+            result.append(f'国内輸送{(today_date - datetime.fromisoformat(shipped).date()).days}日経過: {supplier} {carrier} {tracking}（{count}行）。届いていれば「届いた」、未着なら追跡確認')
+
+        for reception, name, variant in conn.execute(
+            'SELECT sd_reception_no, product_name, variant FROM jp_purchase_records WHERE asin IS NULL'
+        ):
+            if reception not in other_channel:
+                result.append(f'ASIN未紐付け: {name} {variant or ""}（受付番号{reception}）。出品するならmap-sdで紐付け')
+
+        intl_limit = (today_date - timedelta(days=INTL_TRANSIT_ALERT_DAYS)).isoformat()
+        for confirmation_id, shipped_on in conn.execute(
+            '''SELECT e.ref, e.occurred_on FROM ops_events e JOIN sp_inbound_shipments s ON s.shipment_confirmation_id = e.ref
+               WHERE e.event_type = ? AND e.occurred_on <= ? AND UPPER(IFNULL(s.status, '')) NOT IN ({})'''.format(
+                ','.join('?' * len(FC_RECEIVED_STATUSES))),
+            (TNK_SHIPPED, intl_limit, *FC_RECEIVED_STATUSES),
+        ):
+            result.append(f'FBA受領待ち{(today_date - datetime.fromisoformat(shipped_on).date()).days}日: {confirmation_id}（TNK発送{shipped_on}）。Seller Centralで受領状況を確認')
+    return result
+
+
 def set_sd_product_asin(sd_product_no: str, asin: str) -> None:
     of.init_ops_tables()
     with sqlite3.connect(of.DB_PATH) as conn:
@@ -393,7 +498,14 @@ def format_pipeline(rows: list) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description='在庫台帳')
     sub = parser.add_subparsers(dest='command', required=True)
-    sub.add_parser('ingest', help='標準入力のメールJSON配列を取り込む')
+    ingest = sub.add_parser('ingest', help='メールJSON配列(ファイルまたは標準入力)を取り込み、警告も出す')
+    ingest.add_argument('path', nargs='?')
+    sub.add_parser('since', help='次回Gmail検索の開始日(YYYY/MM/DD)')
+    sub.add_parser('alerts')
+    brand = sub.add_parser('brand', help='メール以外で分かったブランド状況を登録')
+    brand.add_argument('name')
+    brand.add_argument('status', choices=['approved', 'rejected', 'pending'])
+    brand.add_argument('--note', default='')
     stock = sub.add_parser('stock')
     stock.add_argument('--json', action='store_true')
     received = sub.add_parser('received')
@@ -407,9 +519,23 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command == 'ingest':
-        for email in json.load(sys.stdin):
-            for line in ingest_email(email):
-                print(line)
+        if args.path:
+            with open(args.path, encoding='utf-8') as f:
+                emails = json.load(f)
+        else:
+            emails = json.load(sys.stdin)
+        new_events = ingest_batch(emails)
+        print(f'== 新しい動き({len(new_events)}件)')
+        print('\n'.join(new_events) or 'なし')
+        print('== 要対応')
+        print('\n'.join(alerts()) or 'なし')
+    elif args.command == 'since':
+        print(gmail_since())
+    elif args.command == 'alerts':
+        print('\n'.join(alerts()) or 'なし')
+    elif args.command == 'brand':
+        record_brand_status(args.name, args.status, args.note)
+        print('ok')
     elif args.command == 'stock':
         rows = stock_pipeline()
         print(json.dumps(rows, ensure_ascii=False, indent=1) if args.json else format_pipeline(rows))
