@@ -266,6 +266,25 @@ def search_listings_items(next_token: Optional[str] = None, page_size: int = 20)
     return _request(f"/listings/2021-08-01/items/{seller}", params)
 
 
+def get_fees_estimate(asin: str, price_usd: float) -> Dict[str, float]:
+    """Product Fees API: getMyFeesEstimateForASIN - 指定価格でFBA出品したときの手数料見積もり(USD)。
+    返り値: {referral, fba, total}。他の費目(クロージング料等)は other に入る。"""
+    body = {"FeesEstimateRequest": {
+        "MarketplaceId": settings.marketplace_id,
+        "IsAmazonFulfilled": True,
+        "Identifier": f"{asin}-{price_usd}",
+        "PriceToEstimateFees": {"ListingPrice": {"CurrencyCode": "USD", "Amount": price_usd}},
+    }}
+    result = _request(f"/products/fees/v0/items/{asin}/feesEstimate", method="POST", body=body)
+    estimate = result["payload"]["FeesEstimateResult"]
+    if estimate.get("Status") != "Success":
+        raise SpApiError(f"手数料見積もり失敗 {asin}: {estimate.get('Error')}")
+    amounts = {d["FeeType"]: float(d["FeeAmount"]["Amount"]) for d in estimate["FeesEstimate"]["FeeDetailList"]}
+    total = float(estimate["FeesEstimate"]["TotalFeesEstimate"]["Amount"])
+    referral, fba = amounts.get("ReferralFee", 0.0), amounts.get("FBAFees", 0.0)
+    return {"referral": referral, "fba": fba, "total": total, "other": round(total - referral - fba, 4)}
+
+
 def get_pricing_rule_ids(product_type: str) -> list:
     """この出品者が使える自動価格設定ルールのID一覧(商品タイプ定義の seller 固有 enum)。"""
     definition = _request(

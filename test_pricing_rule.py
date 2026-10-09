@@ -21,6 +21,37 @@ class TestComputeBounds(unittest.TestCase):
         self.assertGreater(maximum, minimum)
 
 
+class TestActualFees(unittest.TestCase):
+    def test_uses_actual_fba_fee_and_reaches_break_even(self):
+        fee_fn = lambda price: {"referral": price * 0.15, "fba": 2.52, "other": 0.0}
+        minimum, _ = pricing_rule.compute_bounds(326, 7.49, fee_fn)
+        cost_usd = 326 / 150
+        other = 0.5 + cost_usd * 0.125 + cost_usd
+        self.assertAlmostEqual(minimum, (2.52 + other) / 0.85, delta=0.011)
+        self.assertGreaterEqual(minimum - minimum * 0.15 - 2.52 - other, 0)
+
+    def test_follows_price_dependent_fba_fee(self):
+        # 10ドル以下はFBA手数料が安く、超えると高くなる想定
+        fee_fn = lambda price: {"referral": price * 0.15, "fba": 2.0 if price <= 10 else 5.0, "other": 0.0}
+        minimum, _ = pricing_rule.compute_bounds(300, 20.0, fee_fn)
+        self.assertLessEqual(minimum, 10)
+
+
+class TestFeesEstimate(unittest.TestCase):
+    def test_parses_fee_details(self):
+        payload = {"payload": {"FeesEstimateResult": {"Status": "Success", "FeesEstimate": {
+            "TotalFeesEstimate": {"Amount": 3.66},
+            "FeeDetailList": [{"FeeType": "ReferralFee", "FeeAmount": {"Amount": 1.14}},
+                              {"FeeType": "FBAFees", "FeeAmount": {"Amount": 2.52}}]}}}}
+        with mock.patch.object(client, "_request", return_value=payload):
+            self.assertEqual(client.get_fees_estimate("B0X", 7.59), {"referral": 1.14, "fba": 2.52, "total": 3.66, "other": 0.0})
+
+    def test_failure_raises(self):
+        with mock.patch.object(client, "_request", return_value={"payload": {"FeesEstimateResult": {"Status": "ClientError", "Error": {"Message": "x"}}}}):
+            with self.assertRaises(client.SpApiError):
+                client.get_fees_estimate("B0X", 7.59)
+
+
 class TestEnrollPricingRule(unittest.TestCase):
     def test_patch_keeps_our_price_and_validates_by_default(self):
         with mock.patch.object(client.settings, "seller_id", "A1SELLER"), \
