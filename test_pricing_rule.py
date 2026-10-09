@@ -65,6 +65,46 @@ class TestMarketFloor(unittest.TestCase):
             self.assertIsNone(client.get_buy_box_price("B0X"))
 
 
+class TestConvertToFba(unittest.TestCase):
+    def test_fba_channel_has_no_quantity_and_required_attributes_are_sent(self):
+        with mock.patch.object(client.settings, "seller_id", "A1SELLER"), \
+                mock.patch.object(client, "_request", return_value={"status": "VALID"}) as request:
+            client.convert_to_fba("SKU/1", "RULER")
+        path, params = request.call_args[0]
+        kwargs = request.call_args[1]
+        self.assertEqual(path, "/listings/2021-08-01/items/A1SELLER/SKU%2F1")
+        self.assertEqual(params["mode"], "VALIDATION_PREVIEW")
+        patches = {p["path"]: p["value"] for p in kwargs["body"]["patches"]}
+        channel = patches["/attributes/fulfillment_availability"][0]
+        self.assertEqual(channel["fulfillment_channel_code"], "AMAZON_NA")
+        self.assertNotIn("quantity", channel)
+        self.assertIs(patches["/attributes/batteries_required"][0]["value"], False)
+        self.assertEqual(patches["/attributes/supplier_declared_dg_hz_regulation"][0]["value"], "not_applicable")
+
+    def test_apply_has_no_preview_and_delete_uses_delete(self):
+        with mock.patch.object(client.settings, "seller_id", "A1SELLER"), \
+                mock.patch.object(client, "_request", return_value={}) as request:
+            client.convert_to_fba("S", "RULER", validate_only=False)
+            self.assertIsNone(request.call_args[0][1]["mode"])
+            client.delete_listing_item("S")
+        self.assertEqual(request.call_args[1]["method"], "DELETE")
+
+
+class TestCreateInboundPlan(unittest.TestCase):
+    def test_body_has_items_with_label_and_per_item_prep_owner(self):
+        with mock.patch.object(client.settings, "marketplace_id", "ATVPDKIKX0DER"), \
+                mock.patch.object(client, "_request", return_value={"inboundPlanId": "wf1", "operationId": "op1"}) as request:
+            result = client.create_inbound_plan(
+                [{"msku": "A", "quantity": "10"}, {"msku": "B", "quantity": 3, "prep_owner": "NONE"}],
+                "第二便(仮)", {"name": "x", "countryCode": "JP"})
+        self.assertEqual(result["operationId"], "op1")
+        self.assertEqual(request.call_args[0][0], "/inbound/fba/2024-03-20/inboundPlans")
+        body = request.call_args[1]["body"]
+        self.assertEqual(body["destinationMarketplaces"], ["ATVPDKIKX0DER"])
+        self.assertEqual(body["items"][0], {"msku": "A", "quantity": 10, "labelOwner": "SELLER", "prepOwner": "SELLER"})
+        self.assertEqual(body["items"][1]["prepOwner"], "NONE")
+
+
 class TestFeesEstimate(unittest.TestCase):
     def test_parses_fee_details(self):
         payload = {"payload": {"FeesEstimateResult": {"Status": "Success", "FeesEstimate": {

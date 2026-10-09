@@ -202,6 +202,39 @@ def get_inbound_shipment(plan_id: str, shipment_id: str) -> Dict[str, Any]:
     return _request(f"/inbound/fba/2024-03-20/inboundPlans/{plan_id}/shipments/{shipment_id}")
 
 
+def create_inbound_plan(
+    items: list,
+    name: str,
+    source_address: Dict[str, Any],
+    label_owner: str = "SELLER",
+    prep_owner: str = "SELLER",
+) -> Dict[str, Any]:
+    """Fulfillment Inbound API(v2024-03-20): createInboundPlan - 「Amazonへ納品」のプラン(下書き)を作る。
+
+    items: [{"msku": ..., "quantity": ...}]。作るのはプランまで(梱包・配送の確定はしない)。
+    返り値: {"inboundPlanId", "operationId"}。成否は get_inbound_operation で見る(非同期)。"""
+    body = {
+        "name": name,
+        "sourceAddress": source_address,
+        "destinationMarketplaces": [settings.marketplace_id],
+        "items": [
+            {"msku": i["msku"], "quantity": int(i["quantity"]), "labelOwner": label_owner, "prepOwner": i.get("prep_owner", prep_owner)}
+            for i in items
+        ],
+    }
+    return _request("/inbound/fba/2024-03-20/inboundPlans", method="POST", body=body)
+
+
+def get_inbound_operation(operation_id: str) -> Dict[str, Any]:
+    """getInboundOperationStatus - 非同期処理の結果(SUCCESS/FAILED/IN_PROGRESS と問題の一覧)。"""
+    return _request(f"/inbound/fba/2024-03-20/operations/{operation_id}")
+
+
+def cancel_inbound_plan(plan_id: str) -> Dict[str, Any]:
+    """cancelInboundPlan - 下書きのプランを取り消す。"""
+    return _request(f"/inbound/fba/2024-03-20/inboundPlans/{plan_id}/cancellation", method="PUT")
+
+
 def put_listing_item(
     sku: str,
     asin: str,
@@ -289,6 +322,46 @@ def get_fees_estimate(asin: str, price_usd: float) -> Dict[str, float]:
     total = float(estimate["FeesEstimate"]["TotalFeesEstimate"]["Amount"])
     referral, fba = amounts.get("ReferralFee", 0.0), amounts.get("FBAFees", 0.0)
     return {"referral": referral, "fba": fba, "total": total, "other": round(total - referral - fba, 4)}
+
+
+def convert_to_fba(sku: str, product_type: str, validate_only: bool = True) -> Dict[str, Any]:
+    """Listings Items API: patchListingsItem - 出荷元をFBA(AMAZON_NA)にする。
+
+    FBAの出荷元は数量を持たない(数量を付けると「在庫タイプをサポートしていません」(12998)になり、
+    自己発送の数量0として扱われてFNSKUが付かない)。PATCHは出品全体を検証し直すため、
+    電池なし・危険物なしの必須項目も一緒に送る。validate_only=TrueはVALIDATION_PREVIEW(反映しない)。"""
+    seller = settings.seller_id
+    if not seller:
+        raise SpApiError("販売者ID(SP_API_SELLER_ID)が未設定です。")
+    marketplace = {"marketplace_id": settings.marketplace_id}
+    body = {
+        "productType": product_type,
+        "patches": [
+            {"op": "replace", "path": "/attributes/fulfillment_availability",
+             "value": [{"fulfillment_channel_code": "AMAZON_NA", **marketplace}]},
+            {"op": "replace", "path": "/attributes/batteries_required", "value": [{"value": False, **marketplace}]},
+            {"op": "replace", "path": "/attributes/supplier_declared_dg_hz_regulation",
+             "value": [{"value": "not_applicable", **marketplace}]},
+        ],
+    }
+    return _request(
+        f"/listings/2021-08-01/items/{seller}/{urllib.parse.quote(sku, safe='')}",
+        {"marketplaceIds": settings.marketplace_id, "mode": "VALIDATION_PREVIEW" if validate_only else None},
+        method="PATCH",
+        body=body,
+    )
+
+
+def delete_listing_item(sku: str) -> Dict[str, Any]:
+    """Listings Items API: deleteListingsItem - SKUの出品を削除する(在庫のあるSKUには使わない)。"""
+    seller = settings.seller_id
+    if not seller:
+        raise SpApiError("販売者ID(SP_API_SELLER_ID)が未設定です。")
+    return _request(
+        f"/listings/2021-08-01/items/{seller}/{urllib.parse.quote(sku, safe='')}",
+        {"marketplaceIds": settings.marketplace_id},
+        method="DELETE",
+    )
 
 
 def get_offers_summary(asin: str) -> Dict[str, Any]:
