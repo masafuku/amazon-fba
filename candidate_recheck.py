@@ -62,7 +62,19 @@ def load_candidates(tiers=DEFAULT_TIERS) -> list:
                 WHERE id = (SELECT MAX(id) FROM agent_candidates WHERE asin = a.asin)
                   AND priority_tier IN ({marks}) AND excluded_kind IS NULL
                 ORDER BY CASE priority_tier WHEN 'S' THEN 0 ELSE 1 END, asin''', tuple(tiers)).fetchall()
-    return [dict(r) for r in rows]
+    candidates = []
+    for r in rows:
+        candidate = dict(r)
+        try:
+            detail = json.loads(candidate["data_json"] or "{}")
+        except ValueError:
+            detail = {}
+        # monthly_sold列が空でも詳細データ(data_json)に値があることがある。Tierの判定には両方を見る。
+        if candidate["monthly_sold"] is None:
+            candidate["monthly_sold"] = detail.get("monthly_sold")
+        candidate["sales_rank_drops_30"] = detail.get("sales_rank_drops_30")
+        candidates.append(candidate)
+    return candidates
 
 
 def recompute(candidate: dict, buy_box: float, fees: dict) -> dict:
@@ -74,7 +86,7 @@ def recompute(candidate: dict, buy_box: float, fees: dict) -> dict:
         amazon_fee_rate=fees["referral"] / buy_box,
         fba_fee_usd=fees["fba"] + (fees.get("other") or 0.0),
     )
-    tier = of._classify_priority_tier(result["roi_pct"], candidate["monthly_sold"], None)
+    tier = of._classify_priority_tier(result["roi_pct"], candidate["monthly_sold"], candidate.get("sales_rank_drops_30"))
     return {"roi": result["roi_pct"], "tier": tier}
 
 
@@ -130,6 +142,23 @@ def recheck(tiers=DEFAULT_TIERS, max_age_hours: float = 20.0, limit: int | None 
     return {**counts, "skipped_recent": len(done), "total_candidates": len(todo) + len(done)}
 
 
+def reclassify_saved() -> int:
+    """保存済みのバイボックス・手数料から、APIを呼ばずにROIとTierだけ計算し直す。"""
+    init_table()
+    by_asin = {c["asin"]: c for c in load_candidates()}
+    changed = 0
+    with sqlite3.connect(of.DB_PATH) as conn:
+        for asin, bb, referral, fba in conn.execute(
+                "SELECT asin, buy_box_usd, referral_fee_usd, fba_fee_usd FROM candidate_rechecks WHERE status = 'ok'").fetchall():
+            candidate = by_asin.get(asin)
+            if not candidate:
+                continue
+            new = recompute(candidate, bb, {"referral": referral, "fba": fba, "other": 0.0})
+            conn.execute("UPDATE candidate_rechecks SET tier_after = ?, roi_after = ? WHERE asin = ?", (new["tier"], new["roi"], asin))
+            changed += 1
+    return changed
+
+
 def report() -> str:
     init_table()
     with sqlite3.connect(of.DB_PATH) as conn:
@@ -159,11 +188,14 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
     parser = argparse.ArgumentParser(description="S/A+候補をバイボックスと実額の手数料で再確認する(Tierは書き換えない)")
     parser.add_argument("--report", action="store_true", help="取得せず、保存済みの結果を表示する")
+    parser.add_argument("--reclassify", action="store_true", help="APIを呼ばず、保存済みのバイボックス・手数料でTierだけ計算し直す")
     parser.add_argument("--tiers", nargs="+", default=list(DEFAULT_TIERS))
     parser.add_argument("--max-age-hours", type=float, default=20.0)
     parser.add_argument("--limit", type=int)
     args = parser.parse_args()
-    if not args.report:
+    if args.reclassify:
+        logger.info(f"再計算: {reclassify_saved()}件")
+    elif not args.report:
         logger.info(f"再確認: {recheck(tuple(args.tiers), args.max_age_hours, args.limit)}")
     print(report())
 

@@ -64,6 +64,28 @@ class TestCandidateRecheck(unittest.TestCase):
             cr.recheck()
         self.assertEqual(call.call_count, 1)   # 失敗した1件だけが再取得される
 
+    def test_monthly_sold_falls_back_to_detail_json(self):
+        with sqlite3.connect(ops_finance.DB_PATH) as conn:
+            conn.execute(
+                """INSERT INTO agent_candidates (run_id, asin, title, us_price_usd, jp_cost_jpy, weight_kg, qualified, data_json, created_at,
+                       monthly_sold, priority_tier) VALUES ('r', 'J1', 't', 30.0, 1500, 0.1, 1, ?, '2026-10-02', NULL, 'A+')""",
+                (json.dumps({'roi_pct': 1.2, 'monthly_sold': 50, 'sales_rank_drops_30': None}),))
+        candidate = next(c for c in cr.load_candidates() if c['asin'] == 'J1')
+        self.assertEqual(candidate['monthly_sold'], 50)
+        new = cr.recompute(candidate, 30.0, {'referral': 4.5, 'fba': 3.5, 'other': 0.0})
+        self.assertEqual(new['tier'], 'A+')    # 実売ありのまま。Dにはならない
+
+    def test_reclassify_saved_recomputes_without_api(self):
+        with mock.patch.object(client, 'get_offers_summary', return_value={'buy_box': 30.0, 'lowest_fba': 30.0, 'offers': 3}), \
+                mock.patch.object(client, 'get_fees_estimate', return_value={'referral': 4.5, 'fba': 3.5, 'other': 0.0, 'total': 0}):
+            cr.recheck()
+        with sqlite3.connect(ops_finance.DB_PATH) as conn:
+            conn.execute("UPDATE candidate_rechecks SET tier_after = 'D', roi_after = 0")
+        with mock.patch.object(client, 'get_offers_summary', side_effect=AssertionError('APIは呼ばない')):
+            self.assertEqual(cr.reclassify_saved(), 2)
+        with sqlite3.connect(ops_finance.DB_PATH) as conn:
+            self.assertEqual({r[0] for r in conn.execute("SELECT tier_after FROM candidate_rechecks")}, {'S', 'A+'})
+
     def test_recompute_matches_original_formula(self):
         candidate = {'jp_cost_jpy': 1500, 'weight_kg': 0.1, 'monthly_sold': 150}
         new = cr.recompute(candidate, 30.0, {'referral': 4.5, 'fba': 3.5, 'other': 0.0})
