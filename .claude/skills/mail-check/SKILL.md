@@ -39,6 +39,7 @@ after:<since> (from:raccoon.ne.jp OR from:superdelivery.com OR from:globalbrand.
 | `Brand Approval Request for` | ブランド承認／却下 |
 | `Amazon Listing Created -` | 出品作成 |
 | `FBA Inbound Shipment Checked-In / Receiving / Closed (FBA…)` | FBA着荷・受領開始・受領完了 |
+| `価格の誤設定に対処し、停止された出品情報を回復する` | amazon.co.jp等での価格誤設定による出品停止（SKU・価格つき。要対応） |
 
 SDの「新着・プライスダウン情報」、ログイン通知、Amazonの「新しい返信先アドレスが追加されました」は対象外。
 

@@ -42,6 +42,7 @@ BRAND_REJECTED = 'brand_rejected'
 BRAND_PENDING = 'brand_pending'
 LISTING_CREATED = 'listing_created'
 FBA_CHECKED_IN = 'fba_checked_in'
+PRICE_SUPPRESSED = 'price_suppressed'
 FBA_RECEIVING = 'fba_receiving'
 FBA_CLOSED = 'fba_closed'
 FBA_IN_STOCK = 'fba_in_stock'
@@ -74,6 +75,7 @@ COUPON = re.compile(r'クーポン利用\s*\]\s*(-?[0-9,]+)')
 TNK_FIELD = re.compile(r'^\s*([^:\n]+?)\s*:\s*(.+?)\s*$', re.MULTILINE)
 BRAND_SUBJECT = re.compile(r'Brand Approval Request for (.+?)\s*$')
 LISTING_SUBJECT = re.compile(r'Amazon Listing Created - (\S+)')
+PRICE_ROW = re.compile(r'\|\s*(B0[0-9A-Z]{8})\s*\|\s*(\S+)\s*\|\s*(.+?)\s*\|\s*[¥$￥]\s*([0-9,.]+)\s*\|')
 FBA_INBOUND_SUBJECT = re.compile(r'FBA Inbound Shipment (Checked-In|Receiving|Closed) \((FBA\w+)\)')
 
 
@@ -112,6 +114,8 @@ def classify(subject: str) -> str | None:
         return LISTING_CREATED
     if FBA_INBOUND_SUBJECT.search(subject):
         return 'fba_inbound'
+    if '価格の誤設定' in subject:
+        return PRICE_SUPPRESSED
     return None
 
 
@@ -289,6 +293,14 @@ def ingest_email(email: dict) -> list:
             if _record_event(conn, source_id, event_type, received_on, shipment_id, {'via': 'email'}):
                 new_events.append({FBA_CHECKED_IN: 'FBA着荷', FBA_RECEIVING: 'FBA受領開始', FBA_CLOSED: 'FBA受領完了'}[event_type] + f' {shipment_id}')
 
+    elif kind == PRICE_SUPPRESSED:
+        marketplace = 'amazon.co.jp' if 'amazon.co.jp' in body.lower() else 'amazon(不明)'
+        with sqlite3.connect(of.DB_PATH) as conn:
+            for asin, sku, title, price in PRICE_ROW.findall(body):
+                if _record_event(conn, source_id, PRICE_SUPPRESSED, received_on, sku,
+                                 {'asin': asin, 'price': price, 'marketplace': marketplace, 'title': title}):
+                    new_events.append(f'価格の誤設定で出品停止 {marketplace} {sku} {price}')
+
     elif kind == LISTING_CREATED:
         sku = LISTING_SUBJECT.search(email['subject']).group(1)
         with sqlite3.connect(of.DB_PATH) as conn:
@@ -418,6 +430,14 @@ def alerts(today: str | None = None) -> list:
             (TNK_SHIPPED, intl_limit, *FC_RECEIVED_STATUSES),
         ):
             result.append(f'FBA受領待ち{(today_date - datetime.fromisoformat(shipped_on).date()).days}日: {confirmation_id}（TNK発送{shipped_on}）。Seller Centralで受領状況を確認')
+    recent = (today_date - timedelta(days=14)).isoformat()
+    with sqlite3.connect(of.DB_PATH) as conn:
+        for sku, on, detail in conn.execute(
+                "SELECT ref, occurred_on, detail FROM ops_events WHERE event_type = ? AND occurred_on >= ? ORDER BY occurred_on DESC",
+                (PRICE_SUPPRESSED, recent)):
+            info = json.loads(detail or '{}')
+            result.append(f"価格の誤設定で出品停止({on}): {info.get('marketplace')} {sku} 価格{info.get('price')}。"
+                          "国際出品(Build International Listings)の接続を確認")
     result += market_prices.roi_alerts()
     return result
 
@@ -599,6 +619,8 @@ def build_ledger_digest(since_iso: str | None, today: str | None = None) -> str:
                 add((event_type, ref), f'ブランド{label} {ref}')
             elif event_type == LISTING_CREATED:
                 add((event_type, ref), f'出品作成 {ref}')
+            elif event_type == PRICE_SUPPRESSED:
+                add((event_type, ref), f"価格誤設定で出品停止 {detail.get('marketplace')} {ref}")
 
         sales = conn.execute(
             '''SELECT i.asin, SUM(i.quantity), SUM(i.item_price_usd) FROM sp_order_items i

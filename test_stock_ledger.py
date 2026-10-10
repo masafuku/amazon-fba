@@ -241,6 +241,16 @@ class TestIngest(StockLedgerTestCase):
         row = sl.stock_pipeline()[0]
         self.assertEqual((row['planned'], row['intl_transit'], row['fc_received_inbound']), (0, 0, 10))
 
+    def test_price_suppression_email_becomes_event_and_alert(self):
+        body = ("amazon.co.jpでの商品の出品において、出品価格の誤設定の可能性が検出されました。\n"
+                "| ASIN | SKU | タイトル | 価格 |\n|---|---|---|---|\n"
+                "| B0G2RBRV24 | 7J-ESCZ-TEEU | ナカバヤシ シリコン製ブックマーカー | ¥1481 |\n")
+        events = sl.ingest_email({'id': 'p1', 'subject': '価格の誤設定に対処し、停止された出品情報を回復する', 'date': '2026-10-09T17:57:42Z', 'body': body})
+        self.assertEqual(events, ['価格の誤設定で出品停止 amazon.co.jp 7J-ESCZ-TEEU 1481'])
+        found = sl.alerts(today='2026-10-12')
+        self.assertTrue(any('amazon.co.jp 7J-ESCZ-TEEU' in a for a in found))
+        self.assertFalse(any('7J-ESCZ-TEEU' in a for a in sl.alerts(today='2026-12-01')))   # 14日を過ぎたら出さない
+
     def test_days_of_cover_uses_30_day_sales(self):
         with sqlite3.connect(ops_finance.DB_PATH) as conn:
             conn.execute("INSERT INTO sp_fba_inventory (asin, sku, fulfillable_quantity) VALUES ('A1', 'S', 20)")
