@@ -251,6 +251,32 @@ class TestIngest(StockLedgerTestCase):
         self.assertTrue(any('amazon.co.jp 7J-ESCZ-TEEU' in a for a in found))
         self.assertFalse(any('7J-ESCZ-TEEU' in a for a in sl.alerts(today='2026-12-01')))   # 14日を過ぎたら出さない
 
+    def test_paid_settlements_and_payment_status(self):
+        def notice(message_id, date, amount):
+            body = f"[ 決済確定日 ] {date}\n[ 合計金額 ] \\ {amount}\n"
+            return {'id': message_id, 'subject': '＜Paid＞決済確定のお知らせ（スーパーデリバリー）', 'date': '2026-10-01T09:10:08Z', 'body': body}
+        self.assertEqual(sl.ingest_email(notice('a', '2026/08/26', '27,019')), ['Paid決済確定 2026-08-26 ¥27,019'])
+        sl.ingest_email(notice('b', '2026/08/26', '2,553'))
+        sl.ingest_email(notice('c', '2026/09/17', '2,156'))
+        sl.ingest_email(notice('d', '2026/10/06', '15,840'))
+        self.assertEqual(sl.ingest_email(notice('a', '2026/08/26', '27,019')), [])   # 同じメールは二重に入らない
+        sl.ingest_email({'id': 'r', 'subject': '＜Paid＞ご入金ありがとうございます', 'date': '2026-09-16T12:40:13Z', 'body': ''})
+
+        summary = sl.payments_summary(today='2026-10-10')
+        self.assertEqual([(m['month'], m['total'], m['status']) for m in summary['months']],
+                         [('2026-08', 29572.0, '請求書発行済み・入金未確認'), ('2026-09', 2156.0, '請求書発行済み・入金未確認'),
+                          ('2026-10', 15840.0, '当月分(請求書は翌月初3営業日)')])
+        self.assertTrue(any('2026-08分 ¥29,572' in a for a in sl.alerts(today='2026-10-10')))
+
+        self.assertEqual(sl.mark_month_paid('2026-08', '2026-09-16', '推定'), 2)
+        summary = sl.payments_summary(today='2026-10-10')
+        self.assertEqual(summary['months'][0]['status'], '入金済み')
+        self.assertEqual(summary['unpaid_total'], 2156.0 + 15840.0)
+        found = sl.alerts(today='2026-10-10')
+        self.assertFalse(any('2026-08分' in a for a in found))
+        self.assertTrue(any('2026-09分 ¥2,156' in a for a in found))
+        self.assertFalse(any('2026-10分' in a for a in found))   # 当月分は要対応に出さない
+
     def test_days_of_cover_uses_30_day_sales(self):
         with sqlite3.connect(ops_finance.DB_PATH) as conn:
             conn.execute("INSERT INTO sp_fba_inventory (asin, sku, fulfillable_quantity) VALUES ('A1', 'S', 20)")

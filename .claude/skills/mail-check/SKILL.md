@@ -39,6 +39,8 @@ after:<since> (from:raccoon.ne.jp OR from:superdelivery.com OR from:globalbrand.
 | `Brand Approval Request for` | ブランド承認／却下 |
 | `Amazon Listing Created -` | 出品作成 |
 | `FBA Inbound Shipment Checked-In / Receiving / Closed (FBA…)` | FBA着荷・受領開始・受領完了 |
+| `＜Paid＞決済確定のお知らせ（スーパーデリバリー）` | SDの出荷ごとの決済額（支払いの月次集計。金額・日付つき） |
+| `＜Paid＞ご入金ありがとうございます` | Paidへの入金確認（金額は本文にない。どの月か、CEOに確認して `paid --month` で登録） |
 | `価格の誤設定に対処し、停止された出品情報を回復する` | amazon.co.jp等での価格誤設定による出品停止（SKU・価格つき。要対応） |
 
 SDの「新着・プライスダウン情報」、ログイン通知、Amazonの「新しい返信先アドレスが追加されました」は対象外。
@@ -84,6 +86,8 @@ ssh -i ~/.ssh/LightsailDefaultKey-ap-northeast-1.pem ubuntu@52.199.161.97 'cd /h
 | 「まだ届いてない」と言われて登録を取り消すとき | 上と同じコマンドに `--undo` を付ける |
 | 「◯◯ブランドは再申請中」 | `stock_ledger.py brand <ブランド名> pending --note "再申請中"` |
 | 新しいSD品番を出品するASINに紐付ける | `stock_ledger.py map-sd <SD品番> <ASIN>` |
+| 「◯月分のSDを払った」 | `stock_ledger.py paid --month YYYY-MM --on YYYY-MM-DD [--note ...]` |
+| SDの支払い状況・未払い | `stock_ledger.py payments` |
 | 在庫状況・第N便の中身・次の発注 | `stock_ledger.py stock` |
 
 **データの食い違い（伝票と実物が違う等）は勝手に直さず、CEOに確認してから反映する。**

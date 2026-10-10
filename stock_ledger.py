@@ -43,6 +43,8 @@ BRAND_PENDING = 'brand_pending'
 LISTING_CREATED = 'listing_created'
 FBA_CHECKED_IN = 'fba_checked_in'
 PRICE_SUPPRESSED = 'price_suppressed'
+PAID_SETTLED = 'paid_settled'
+PAID_RECEIVED = 'paid_received'
 FBA_RECEIVING = 'fba_receiving'
 FBA_CLOSED = 'fba_closed'
 FBA_IN_STOCK = 'fba_in_stock'
@@ -75,6 +77,8 @@ COUPON = re.compile(r'クーポン利用\s*\]\s*(-?[0-9,]+)')
 TNK_FIELD = re.compile(r'^\s*([^:\n]+?)\s*:\s*(.+?)\s*$', re.MULTILINE)
 BRAND_SUBJECT = re.compile(r'Brand Approval Request for (.+?)\s*$')
 LISTING_SUBJECT = re.compile(r'Amazon Listing Created - (\S+)')
+PAID_DATE = re.compile(r'決済確定日\s*\]\s*([0-9]{4})/([0-9]{2})/([0-9]{2})')
+PAID_AMOUNT = re.compile(r'合計金額\s*\]\s*[\\¥￥]?\s*([0-9,]+)')
 PRICE_ROW = re.compile(r'\|\s*(B0[0-9A-Z]{8})\s*\|\s*(\S+)\s*\|\s*(.+?)\s*\|\s*[¥$￥]\s*([0-9,.]+)\s*\|')
 FBA_INBOUND_SUBJECT = re.compile(r'FBA Inbound Shipment (Checked-In|Receiving|Closed) \((FBA\w+)\)')
 
@@ -116,6 +120,10 @@ def classify(subject: str) -> str | None:
         return 'fba_inbound'
     if '価格の誤設定' in subject:
         return PRICE_SUPPRESSED
+    if 'Paid' in subject and '決済確定のお知らせ' in subject:
+        return PAID_SETTLED
+    if 'Paid' in subject and 'ご入金ありがとうございます' in subject:
+        return PAID_RECEIVED
     return None
 
 
@@ -301,6 +309,23 @@ def ingest_email(email: dict) -> list:
                                  {'asin': asin, 'price': price, 'marketplace': marketplace, 'title': title}):
                     new_events.append(f'価格の誤設定で出品停止 {marketplace} {sku} {price}')
 
+    elif kind == PAID_SETTLED:
+        date_match, amount_match = PAID_DATE.search(body), PAID_AMOUNT.search(body)
+        if date_match and amount_match:
+            settled_on = '-'.join(date_match.groups())
+            amount = _num(amount_match.group(1))
+            with sqlite3.connect(of.DB_PATH) as conn:
+                cur = conn.execute(
+                    'INSERT OR IGNORE INTO sd_settlements (source_id, settled_on, amount_jpy, month) VALUES (?, ?, ?, ?)',
+                    (source_id, settled_on, amount, settled_on[:7]))
+                if cur.rowcount == 1:
+                    new_events.append(f'Paid決済確定 {settled_on} ¥{amount:,.0f}')
+
+    elif kind == PAID_RECEIVED:
+        with sqlite3.connect(of.DB_PATH) as conn:
+            if _record_event(conn, source_id, PAID_RECEIVED, received_on, source_id, {'note': '入金確認(金額はメールに無い)'}):
+                new_events.append(f'Paid入金確認 {received_on}（どの月の請求かは paid で登録）')
+
     elif kind == LISTING_CREATED:
         sku = LISTING_SUBJECT.search(email['subject']).group(1)
         with sqlite3.connect(of.DB_PATH) as conn:
@@ -376,6 +401,38 @@ def record_brand_status(brand: str, status: str, note: str = '', on: str | None 
         _record_event(conn, f'manual:{_now()}', event_type, on or datetime.now(JST).date().isoformat(), brand, {'note': note})
 
 
+def mark_month_paid(month: str, on: str, note: str = '') -> int:
+    """その月(ご利用月)の決済確定分を、入金済みにする。"""
+    of.init_ops_tables()
+    with sqlite3.connect(of.DB_PATH) as conn:
+        return conn.execute('UPDATE sd_settlements SET paid_on = ?, paid_note = ? WHERE month = ?', (on, note, month)).rowcount
+
+
+def payments_summary(today: str | None = None) -> dict:
+    """月ごとの決済確定額と支払い状況、未出荷(未決済)の仕入れの見込み額。"""
+    of.init_ops_tables()
+    today_date = datetime.fromisoformat(today).date() if today else datetime.now(JST).date()
+    this_month = today_date.strftime('%Y-%m')
+    with sqlite3.connect(of.DB_PATH) as conn:
+        months = []
+        for month, total, count, paid_on, paid_note, unpaid in conn.execute(
+                'SELECT month, SUM(amount_jpy), COUNT(*), MAX(paid_on), MAX(paid_note), SUM(paid_on IS NULL) '
+                'FROM sd_settlements GROUP BY month ORDER BY month'):
+            if not unpaid:
+                status = '入金済み'
+            elif month >= this_month:
+                status = '当月分(請求書は翌月初3営業日)'
+            else:
+                status = '請求書発行済み・入金未確認'
+            months.append({'month': month, 'total': total, 'notices': count, 'paid_on': paid_on, 'note': paid_note, 'status': status})
+        pending = conn.execute(
+            'SELECT supplier_name, order_date, SUM(amount_jpy) * 1.1 FROM jp_purchase_records '
+            'WHERE supplier_shipped_at IS NULL AND received_at IS NULL GROUP BY supplier_name, order_date').fetchall()
+    return {'months': months,
+            'unsettled': [{'supplier': a, 'order_date': b, 'estimated_total_incl_tax': round(c)} for a, b, c in pending],
+            'unpaid_total': sum(m['total'] for m in months if m['paid_on'] is None)}
+
+
 DOMESTIC_TRANSIT_ALERT_DAYS = 3
 INTL_TRANSIT_ALERT_DAYS = 10
 
@@ -438,6 +495,10 @@ def alerts(today: str | None = None) -> list:
             info = json.loads(detail or '{}')
             result.append(f"価格の誤設定で出品停止({on}): {info.get('marketplace')} {sku} 価格{info.get('price')}。"
                           "国際出品(Build International Listings)の接続を確認")
+    this_month = today_date.strftime('%Y-%m')
+    for m in payments_summary(today)['months']:
+        if m['paid_on'] is None and m['month'] < this_month:
+            result.append(f"SDの支払い未確認: {m['month']}分 ¥{m['total']:,.0f}（請求書は発行済み。払ったら paid --month {m['month']} で登録）")
     result += market_prices.roi_alerts()
     return result
 
@@ -705,6 +766,11 @@ def main() -> None:
     received.add_argument('--reception', nargs='*')
     received.add_argument('--on')
     received.add_argument('--undo', action='store_true')
+    sub.add_parser('payments', help='SD(Paid)の月ごとの決済額と支払い状況')
+    paid = sub.add_parser('paid', help='その月のSD請求を入金済みにする')
+    paid.add_argument('--month', required=True, help='ご利用月 YYYY-MM')
+    paid.add_argument('--on', required=True, help='入金日 YYYY-MM-DD')
+    paid.add_argument('--note', default='')
     mapping = sub.add_parser('map-sd')
     mapping.add_argument('sd_product_no')
     mapping.add_argument('asin')
@@ -736,6 +802,18 @@ def main() -> None:
     elif args.command == 'received':
         count = mark_received(tracking_no=args.tracking, reception_nos=args.reception, on=args.on, undo=args.undo)
         print(f"{count}行の自宅着を{'取り消しました' if args.undo else '登録しました'}")
+    elif args.command == 'payments':
+        summary = payments_summary()
+        for m in summary['months']:
+            paid_text = ''
+            if m['paid_on']:
+                paid_text = f" 入金日{m['paid_on']}" + (f"（{m['note']}）" if m['note'] else '')
+            print(f"{m['month']}  決済{m['notices']}件 ¥{m['total']:>9,.0f}  {m['status']}{paid_text}")
+        print(f"未払い(決済確定済み)の合計: ¥{summary['unpaid_total']:,.0f}")
+        for u in summary['unsettled']:
+            print(f"未決済(未出荷): {u['supplier']} {u['order_date']} 約¥{u['estimated_total_incl_tax']:,}（税込の見込み）")
+    elif args.command == 'paid':
+        print(f"{mark_month_paid(args.month, args.on, args.note)}件を入金済みにしました")
     elif args.command == 'map-sd':
         set_sd_product_asin(args.sd_product_no, args.asin)
         print('ok')

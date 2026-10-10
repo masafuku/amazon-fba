@@ -388,6 +388,19 @@ def init_ops_tables():
                 fetched_at TEXT
             );
 
+            -- SDの後払い(Paid)。出荷されるたびに届く「決済確定」メール1通=1行。ご利用月(settled_on)ごとに
+            -- 月末締め・翌月初3営業日に請求書が出る。paid_onはその月の請求を払った日(入金確認メールには金額が
+            -- 無いので、stock_ledger.py paid で月ごとに登録する)。
+            CREATE TABLE IF NOT EXISTS sd_settlements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_id TEXT NOT NULL UNIQUE,   -- Gmailメッセージ番号
+                settled_on TEXT NOT NULL,         -- 決済確定日 YYYY-MM-DD
+                amount_jpy REAL NOT NULL,         -- 合計金額(税込・クーポン後)
+                month TEXT NOT NULL,              -- ご利用月 YYYY-MM
+                paid_on TEXT,
+                paid_note TEXT
+            );
+
             -- 在庫台帳の取り込み位置など(key-value)。
             CREATE TABLE IF NOT EXISTS ledger_state (
                 key TEXT PRIMARY KEY,
