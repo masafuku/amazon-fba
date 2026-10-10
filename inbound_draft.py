@@ -22,7 +22,8 @@ import pricing_rule as pr
 from sp_api import client
 
 
-def eligible_items(stock: dict, only_with_fnsku: bool = False, include_errors: bool = False) -> tuple[list, list]:
+def eligible_items(stock: dict, only_with_fnsku: bool = False, include_errors: bool = False,
+                   include_planned: bool = False) -> tuple[list, list]:
     """(対象[{msku, asin, quantity, fnsku}], 除外[(msku, 理由)])"""
     seller, mp = client.settings.seller_id, client.settings.marketplace_id
     items, skipped = [], []
@@ -35,6 +36,8 @@ def eligible_items(stock: dict, only_with_fnsku: bool = False, include_errors: b
         errors = sum(i["severity"] == "ERROR" for i in r.get("issues", []))
         row = stock.get(listing["asin"], {})
         quantity = (row.get("at_home") or 0) + (row.get("domestic_transit") or 0)
+        if include_planned:   # すでに納品プランに入れた分(ラベルは、プラン済みの商品にも必要)
+            quantity += row.get("planned") or 0
         reason = (None if fba else "FBAではない") or (f"出品にエラー{errors}件" if errors and not include_errors else None) \
             or (None if quantity > 0 else "数量0") or ("FNSKU未割当" if only_with_fnsku and not summary.get("fnSku") else None)
         if reason:
