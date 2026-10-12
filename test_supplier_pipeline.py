@@ -21,6 +21,16 @@ def map_row(asin, wholesale=300):
     return {'sd_id': '1', 'part_no': 'P1', 'wholesale_jpy': wholesale, 'asin': asin, 'name': f'name {asin}'}
 
 
+class TestBladeExclusion(unittest.TestCase):
+    def test_english_blade_titles_are_excluded_but_corner_cutter_is_not(self):
+        for title, excluded in (('CANARY Cardboard Cutter with Non-Stick Blade Utility Knife', True),
+                                ('Sunstar Kadomaru Pro Corner Cutter', False),
+                                ('Kokuyo Campus Binder', False)):
+            row = {**map_row('A1'), 'name': title}
+            ev = sp.evaluate([row], {'A1': keepa_row('A1')}, 'x')
+            self.assertEqual(not ev['qualified'], excluded, title)
+
+
 class TestSanity(unittest.TestCase):
     def test_rank_missing_or_bad_is_screened(self):
         self.assertEqual(sp.market_sanity_flags(10, None, 300, None), ['no_rank'])

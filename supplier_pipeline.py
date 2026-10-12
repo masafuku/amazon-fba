@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -34,6 +35,10 @@ SANITY_MAX_SALES_RANK = 500_000      # これより悪い順位(または順位�
 SANITY_MAX_PRICE_RATIO = 10.0        # US価格(円換算)÷卸原価がこれを超え、月間販売の実数値も無いものは相場の異常値とみなす
 DEFAULT_RATE = 150.0
 SUPPLIER_CATEGORY_SUFFIX = ' supplier-search'
+# ops_finance._excluded_kind が拾えない英語タイトルの刃物(Cutter / Utility Knife など)。
+# 刃物は完全除外のカテゴリ。コーナーカッター(紙の角を丸める工具)のような刃のない文具は除外しない。
+_BLADE_TITLE = re.compile(r'\b(box cutter|cardboard cutter|utility knife|cutter knife|knife|scissors|shears?|blade)\b', re.IGNORECASE)
+_NOT_BLADE_TITLE = re.compile(r'corner cutter|replacement blade for (?:eraser|tape)', re.IGNORECASE)
 
 
 def _num(value) -> float | None:
@@ -145,6 +150,10 @@ def build_entry(map_row: dict, keepa_row: dict, supplier: str, rate: float = DEF
         'source': f'supplier-search/{supplier}',
     }
     of._apply_priority_fields(entry)
+    title = entry.get('title') or ''
+    if not entry.get('excluded_kind') and _BLADE_TITLE.search(title) and not _NOT_BLADE_TITLE.search(title):
+        entry['excluded_kind'] = 'knife'
+        entry['priority_tier'] = None
     return entry
 
 
