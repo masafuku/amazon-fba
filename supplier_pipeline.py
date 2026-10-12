@@ -15,7 +15,7 @@
     supplier_pipeline.py evaluate --map map.csv --keepa keepa.csv --supplier 丸進 \\
         --existing existing.json --out evaluation.json       # ローカルでもAWSでも可(DBは読まない)
     supplier_pipeline.py register --evaluation evaluation.json [--apply]   # AWSで実行。既定は予行演習
-    supplier_pipeline.py audit [--apply]                     # AWSで実行。旧方式の supplier 行を公式式で再計算(既定は報告のみ、--applyで反映)
+    supplier_pipeline.py refresh --keepa a.csv b.csv --asins asins.txt [--apply]  # AWSで実行。既存行を最新Keepaで再計算(原価はそのまま)\n    supplier_pipeline.py audit [--apply]                     # AWSで実行。旧方式の supplier 行を公式式で再計算(既定は報告のみ、--applyで反映)
 
 map.csv の列: sd_id, part_no, wholesale_jpy(SDの税抜卸価格/点), asin, name  (任意: jan。あればKeepaのEANと照合し、不一致は足切り)
 """
@@ -27,6 +27,7 @@ import json
 import re
 import sqlite3
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import ops_finance as of
@@ -262,6 +263,75 @@ def apply_audit(rows: list[dict], db_path: str | Path | None = None) -> int:
     return updated
 
 
+def add_restricted_supplier(asin: str, source: str, shop_name: str, price_jpy: float, note: str,
+                            url: str | None = None, min_qty: int | None = None, db_path: str | Path | None = None) -> int:
+    """US向けには使えない仕入れ先(国内販売のみ・海外販売×など)を、参考情報として data_json['manual_suppliers'] に
+    記録する。ops_finance.add_manual_supplier と違い、卸原価・利益・Tierは変えない(使えない価格で
+    ROIが良く見えるのを防ぐ)。restricted=True の印を付ける。同じsource+shop_nameは置き換える。更新した行数を返す。"""
+    now = datetime.now(timezone.utc).isoformat()
+    entry = {'source': source, 'shop_name': shop_name, 'url': url, 'price_jpy': float(price_jpy), 'min_qty': min_qty,
+             'note': note, 'checked_at': now, 'restricted': True}
+    updated = 0
+    with sqlite3.connect(db_path or of.DB_PATH, timeout=30) as conn:
+        for row_id, data_json in conn.execute('SELECT id, data_json FROM agent_candidates WHERE asin = ?', (asin,)).fetchall():
+            data = json.loads(data_json or '{}')
+            data['manual_suppliers'] = [x for x in (data.get('manual_suppliers') or [])
+                                        if not (x.get('source') == source and x.get('shop_name') == shop_name)] + [entry]
+            conn.execute('UPDATE agent_candidates SET data_json = ? WHERE id = ?', (json.dumps(data, ensure_ascii=False), row_id))
+            updated += 1
+    return updated
+
+
+def refresh_rows(asins, keepa: dict, db_path: str | Path | None = None, apply: bool = False, rate: float = DEFAULT_RATE) -> list[dict]:
+    """既存候補(ASINごとの最新行)を、その行の卸原価はそのままに、最新のKeepa(価格・手数料・月間販売・順位)と
+    公式式で再計算する。Tierの食い違い(evaluateのdiffs)を解消する用。applyでDBを更新し、更新前の値は
+    data_json['refresh_before'] に残す。Keepaに無い/価格が付かないASINは触らず結果に理由を出す。"""
+    results = []
+    with sqlite3.connect(db_path or of.DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        for asin in asins:
+            row = conn.execute('SELECT * FROM agent_candidates WHERE asin = ? ORDER BY id DESC LIMIT 1', (asin,)).fetchone()
+            k = keepa.get(asin)
+            if row is None or k is None or not row['jp_cost_jpy']:
+                results.append({'asin': asin, 'status': 'skip', 'reason': 'no row/keepa/cost'})
+                continue
+            price = _num(k.get('Buy Box: 現在')) or _num(k.get('Buy Box: 90 日平均'))
+            if not price:
+                results.append({'asin': asin, 'status': 'skip', 'reason': 'no US price'})
+                continue
+            referral = _num(k.get('紹介料％')); fba = _num(k.get('FBA Pick&Pack 料金'))
+            kwargs = {}
+            if referral is not None:
+                kwargs['amazon_fee_rate'] = referral / 100
+            if fba is not None:
+                kwargs['fba_fee_usd'] = fba
+            profit = of.calc_unit_profit(us_price_usd=price, jp_cost_jpy=row['jp_cost_jpy'],
+                                         weight_kg=row['weight_kg'] or of.DEFAULT_WEIGHT_KG_FALLBACK, exchange_rate=rate, **kwargs)
+            drops_90 = _num(k.get('売れ筋ランキング: 過去90日間の減少'))
+            drops_30 = round(drops_90 / 3, 1) if drops_90 is not None else None
+            monthly = _num(k.get('月間売上トレンド: 先月の購入'))
+            monthly = int(monthly) if monthly is not None else None
+            rank = _num(k.get('売れ筋ランキング: 現在'))
+            tier = None if row['excluded_kind'] else of._classify_priority_tier(profit['roi_pct'], monthly, drops_30)
+            qualified = 0 if row['excluded_kind'] else int(of.is_qualified_priority_tier(tier))
+            data = json.loads(row['data_json'] or '{}')
+            result = {'asin': asin, 'status': 'ok', 'title': row['title'], 'tier_before': row['priority_tier'], 'tier_after': tier,
+                      'roi_before': data.get('roi_pct'), 'roi_after': profit['roi_pct']}
+            results.append(result)
+            if apply:
+                data['refresh_before'] = {'us_price_usd': row['us_price_usd'], 'monthly_sold': row['monthly_sold'],
+                                          'sales_rank': row['sales_rank'], 'priority_tier': row['priority_tier'],
+                                          'roi_pct': data.get('roi_pct'), 'unit_profit_usd': row['unit_profit_usd']}
+                data.update(roi_pct=profit['roi_pct'], monthly_sold=monthly, sales_rank_drops_30=drops_30, rank_drops_30=drops_30,
+                            us_price_usd=price, refreshed_by='supplier_pipeline.refresh')
+                conn.execute(
+                    '''UPDATE agent_candidates SET us_price_usd=?, monthly_sold=?, sales_rank=?, unit_profit_usd=?, margin_pct=?,
+                           priority_tier=?, qualified=?, data_json=? WHERE id=?''',
+                    (price, monthly, int(rank) if rank is not None else row['sales_rank'], profit['unit_profit_usd'],
+                     profit['margin_pct'], tier, qualified, json.dumps(data, ensure_ascii=False), row['id']))
+    return results
+
+
 def _print_report(ev: dict) -> None:
     print(f"合格 {len(ev['qualified'])} / 不合格 {len(ev['rejected'])} / 足切り {len(ev['screened_out'])} / "
           f"既存スキップ {len(ev['skipped_existing'])} / Keepaなし {len(ev['no_keepa'])}")
@@ -294,6 +364,10 @@ def main(argv=None) -> int:
     p.add_argument('--include-rejected', action='store_true')
     p = sub.add_parser('audit')
     p.add_argument('--apply', action='store_true')
+    p = sub.add_parser('refresh')
+    p.add_argument('--keepa', required=True, nargs='+')
+    p.add_argument('--asins', required=True, help='ASINを1行1件で書いたファイル')
+    p.add_argument('--apply', action='store_true')
     args = parser.parse_args(argv)
 
     if args.cmd == 'existing':
@@ -309,6 +383,18 @@ def main(argv=None) -> int:
         ev = json.loads(Path(args.evaluation).read_text())
         res = register(ev, args.supplier, apply=args.apply, include_rejected=args.include_rejected)
         print(f"{'予行演習' if res['dry_run'] else '登録'}: {res['count']}件" + (f" run_id={res['run_id']}" if res['run_id'] else ''))
+    elif args.cmd == 'refresh':
+        keepa = {}
+        for path in args.keepa:
+            keepa.update(load_keepa_csv(path))
+        asins = [a.strip() for a in Path(args.asins).read_text().split() if a.strip()]
+        res = refresh_rows(asins, keepa, apply=args.apply)
+        for r in res:
+            if r['status'] != 'ok':
+                print(f"  {r['asin']}: 変更なし({r['reason']})")
+            else:
+                print(f"  {r['asin']} {str(r['title'])[:40]}: {r['tier_before']} → {r['tier_after']} (ROI {r['roi_before']} → {r['roi_after']})")
+        print(('DBを更新' if args.apply else '予行演習') + f": {sum(1 for r in res if r['status'] == 'ok')}件")
     elif args.cmd == 'audit':
         rows = audit_supplier_rows()
         unknown = [r for r in rows if r['tier_after'] is None]

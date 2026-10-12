@@ -21,6 +21,55 @@ def map_row(asin, wholesale=300):
     return {'sd_id': '1', 'part_no': 'P1', 'wholesale_jpy': wholesale, 'asin': asin, 'name': f'name {asin}'}
 
 
+class TestRefresh(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.patch = mock.patch.object(ops_finance, 'DB_PATH', Path(self.tmp.name) / 't.sqlite3')
+        self.patch.start()
+        ops_finance.init_ops_tables()
+        with sqlite3.connect(ops_finance.DB_PATH) as conn:
+            conn.execute('''INSERT INTO agent_candidates (run_id, asin, title, us_price_usd, jp_cost_jpy, weight_kg, qualified,
+                data_json, created_at, source_type, priority_tier, monthly_sold) VALUES ('r','A1','t',5.0,330,0.05,0,'{"roi_pct": 0.1}',
+                '2026-10-01','keyword','C+',10)''')
+
+    def tearDown(self):
+        self.patch.stop()
+        self.tmp.cleanup()
+
+    def test_dry_run_changes_nothing_and_apply_keeps_cost_and_before_values(self):
+        keepa = {'A1': keepa_row('A1')}
+        res = sp.refresh_rows(['A1'], keepa)
+        self.assertEqual(res[0]['tier_after'], 'S')
+        with sqlite3.connect(ops_finance.DB_PATH) as conn:
+            self.assertEqual(conn.execute('SELECT priority_tier FROM agent_candidates').fetchone()[0], 'C+')
+        sp.refresh_rows(['A1'], keepa, apply=True)
+        with sqlite3.connect(ops_finance.DB_PATH) as conn:
+            tier, cost, q, data = conn.execute('SELECT priority_tier, jp_cost_jpy, qualified, data_json FROM agent_candidates').fetchone()
+        self.assertEqual((tier, cost, q), ('S', 330, 1))
+        self.assertEqual(json.loads(data)['refresh_before']['priority_tier'], 'C+')
+
+    def test_skips_asin_without_keepa_price(self):
+        res = sp.refresh_rows(['A1'], {'A1': keepa_row('A1', price='')})
+        self.assertEqual(res[0]['status'], 'skip')
+
+
+class TestRestrictedSupplier(unittest.TestCase):
+    def test_records_without_changing_cost_or_tier(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(ops_finance, 'DB_PATH', Path(tmp) / 't.sqlite3'):
+            ops_finance.init_ops_tables()
+            with sqlite3.connect(ops_finance.DB_PATH) as conn:
+                conn.execute('''INSERT INTO agent_candidates (run_id, asin, title, us_price_usd, jp_cost_jpy, qualified, data_json,
+                    created_at, source_type, priority_tier) VALUES ('r','A1','t',9,800,1,'{}','2026-10-01','supplier','A+')''')
+            n = sp.add_restricted_supplier('A1', 'sd', 'サンスター文具', 696, '海外販売×')
+            n2 = sp.add_restricted_supplier('A1', 'sd', 'サンスター文具', 700, '海外販売×')   # 置き換え
+            with sqlite3.connect(ops_finance.DB_PATH) as conn:
+                cost, tier, data = conn.execute('SELECT jp_cost_jpy, priority_tier, data_json FROM agent_candidates').fetchone()
+            sup = json.loads(data)['manual_suppliers']
+            self.assertEqual((n, n2, cost, tier, len(sup)), (1, 1, 800, 'A+', 1))
+            self.assertTrue(sup[0]['restricted'])
+            self.assertEqual(sup[0]['price_jpy'], 700.0)
+
+
 class TestBladeExclusion(unittest.TestCase):
     def test_english_blade_titles_are_excluded_but_corner_cutter_is_not(self):
         for title, excluded in (('CANARY Cardboard Cutter with Non-Stick Blade Utility Knife', True),
