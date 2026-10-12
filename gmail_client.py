@@ -138,6 +138,23 @@ def get_message_plaintext(message_id: str) -> str:
     return _extract_plaintext(data.get("payload", {}))
 
 
+def get_message(message_id: str) -> Dict[str, Any]:
+    """Fetches one message as {id, subject, sender, date(ISO), body} - the shape stock_ledger.ingest_email expects."""
+    from datetime import datetime, timezone
+
+    data = _request(f"/messages/{message_id}", {"format": "full"})
+    headers = {h.get("name", "").lower(): h.get("value", "") for h in data.get("payload", {}).get("headers", [])}
+    internal_ms = int(data.get("internalDate", "0") or 0)
+    date_iso = datetime.fromtimestamp(internal_ms / 1000, tz=timezone.utc).isoformat() if internal_ms else ""
+    return {
+        "id": message_id,
+        "subject": headers.get("subject", ""),
+        "sender": headers.get("from", ""),
+        "date": date_iso,
+        "body": _extract_plaintext(data.get("payload", {})),
+    }
+
+
 def _extract_plaintext(payload: Dict[str, Any]) -> str:
     mime_type = payload.get("mimeType", "")
     body_data = payload.get("body", {}).get("data")
