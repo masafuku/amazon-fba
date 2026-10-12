@@ -331,7 +331,8 @@ def cost_basis_report(tiers=('S', 'A+', 'A-'), db_path: str | Path | None = None
 
 
 def rebase_cost(asin: str, shop: str, price_jpy: float, url: str | None = None, min_qty: int | None = None,
-                note: str | None = None, db_path: str | Path | None = None, apply: bool = False) -> dict:
+                note: str | None = None, db_path: str | Path | None = None, apply: bool = False,
+                restricted: bool = False) -> dict:
     """既存行の原価を、Amazon.co.jpの参考値から、仕入れ先の卸価格(税込換算)に付け替えて、利益・ROI・Tierを
     公式式で再計算する。ops_finance.add_manual_supplier と違い、卸価格のほうが高くても原価にする(Amazon.co.jpは
     仕入れ先ではないため)。更新前の値は data_json['rebase_before'] に残す。"""
@@ -359,6 +360,9 @@ def rebase_cost(asin: str, shop: str, price_jpy: float, url: str | None = None, 
             data.update(roi_pct=profit['roi_pct'], jp_cost_jpy=new_cost, wholesale_cost_jpy=new_cost, wholesale_raw_jpy=float(price_jpy),
                         cost_basis=COST_BASIS_WHOLESALE, cost_supplier=shop)
             entry = {'source': 'sd', 'shop_name': shop, 'url': url, 'price_jpy': float(price_jpy), 'min_qty': min_qty, 'note': note, 'checked_at': now}
+            if restricted:
+                entry['restricted'] = True   # 国内販売のみ/海外販売×: US向けには使えない参考の仕入れ先(原価はこの価格で計算)
+                data['cost_restricted'] = True
             data['manual_suppliers'] = [x for x in (data.get('manual_suppliers') or []) if not (x.get('source') == 'sd' and x.get('shop_name') == shop)] + [entry]
             conn.execute(
                 '''UPDATE agent_candidates SET jp_cost_jpy=?, unit_profit_usd=?, margin_pct=?, priority_tier=?, qualified=?, data_json=?
@@ -516,7 +520,8 @@ def main(argv=None) -> int:
         plan = json.loads(Path(args.plan).read_text())
         n = 0
         for item in plan:
-            r = rebase_cost(item['asin'], item['shop'], item['price_jpy'], item.get('url'), item.get('min_qty'), item.get('note'), apply=args.apply)
+            r = rebase_cost(item['asin'], item['shop'], item['price_jpy'], item.get('url'), item.get('min_qty'), item.get('note'), apply=args.apply,
+                            restricted=bool(item.get('restricted')))
             if r['status'] == 'ok':
                 n += 1
                 print(f"  {r['asin']} {str(r['title'])[:30]}: {r['tier_before']} → {r['tier_after']} (ROI {r['roi_before']} → {r['roi_after']:.2f}, 原価¥{r['cost_before']} → ¥{r['cost_after']:.0f})")

@@ -83,13 +83,14 @@ class TestCostBasis(unittest.TestCase):
                     created_at, source_type, priority_tier, monthly_sold) VALUES ('r','A1','t',8.0,200,0.01,1,?,'2026-10-01','keyword','A+',100)''',
                     (json.dumps(data),))
             self.assertEqual(sp.cost_basis_report(('A+',))['counts'], {sp.COST_BASIS_AMAZON_JP: 1})
-            r = sp.rebase_cost('A1', '丸進', 500, apply=True)   # 卸(税込550円)はAmazon JP参考値(200円)より高い
+            r = sp.rebase_cost('A1', '丸進', 500, apply=True, restricted=True)   # 卸(税込550円)はAmazon JP参考値(200円)より高い
             self.assertAlmostEqual(r['cost_after'], 550.0)
             with sqlite3.connect(ops_finance.DB_PATH) as conn:
                 cost, d = conn.execute('SELECT jp_cost_jpy, data_json FROM agent_candidates').fetchone()
             d = json.loads(d)
             self.assertAlmostEqual(cost, 550.0)
             self.assertEqual((d['cost_basis'], d['rebase_before']['jp_cost_jpy']), (sp.COST_BASIS_WHOLESALE, 200))
+            self.assertTrue(d['cost_restricted'] and d['manual_suppliers'][0]['restricted'])
             self.assertEqual(sp.cost_basis_report(('A+', 'A-', 'B+', 'B-', 'C+', 'C-', 'D', 'S'))['counts'], {sp.COST_BASIS_WHOLESALE: 1})
 
 
