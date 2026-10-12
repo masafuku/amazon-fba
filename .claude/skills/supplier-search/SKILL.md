@@ -172,6 +172,24 @@ ssh -i $KEY ubuntu@52.199.161.97 "cd /home/ubuntu/work/amazon-fba && PYTHONPATH=
 過去に旧方式(税抜・独自ROI式)で登録した supplier 行の監査(DBは変えない):
 `... supplier_pipeline.py audit`
 
+## 原価の根拠: 仕入れ先の卸価格を使う(Amazon.co.jpの価格は参考値)
+
+サプライヤー起点でも、ASIN指定の調査でも、**原価は仕入れ先(SD等)の卸価格**にする。Amazon.co.jpの小売価格は
+仕入れ先ではないので、原価にしない。Keepaの `investigate_asin` やダッシュボードのASIN指定調査は、原価に
+Amazon.co.jpの価格を使うため、そのままではTierが実態と違う(例: エナージェル0.5 シナモロール 789704は
+Amazon.co.jp¥440でC-、丸進の卸¥260でA+)。次の手順で付け替える。
+
+1. ASINのEAN(=JAN)で、SDを検索する(ブラウザ。`so=score&vi=1&sb=all`)。ヒットした商品ページごとに、
+   同じJANのバリエーションの卸価格・セット数・国内販売のみの有無を読み、`{JAN: [{shop, price_jpy, lot, sd_id, restricted}]}`
+   にする(`restricted` = 国内販売のみ/海外販売×。サンスター文具・MDSの「(国内販売のみ)」ブランド・HARIOなどは使えない)。
+2. 新しいASINの調査: `supplier_pipeline.py investigate --keepa k.csv --suppliers suppliers.json --out ev.json`
+   (使える最安の卸価格で評価。仕入れ先が無いASINは `no_supplier` として返し、Amazon.co.jpの価格では評価しない)。
+   → `register` で登録。
+3. 既存行の原価の付け替え: `supplier_pipeline.py basis --tiers S A+ A- B+ --out todo.json`(AWS)で、
+   原価がAmazon.co.jp参考値のままの行を出し、SDで見つかったものを
+   `rebase --plan plan.json [--apply]`(AWS。卸価格のほうが高くても原価にする。更新前は `data_json.rebase_before`)で更新する。
+   原価の根拠は `data_json.cost_basis`(`supplier_wholesale` / `amazon_jp_reference`)で区別する。
+
 ## 優先度ティア(`_classify_priority_tier`)
 
 実売の確度(強い実売>=100 / 実売あり30〜99 / ランク変動のみ(月間なし・30日の変動>=10) / 実売なし=D)× ROI
