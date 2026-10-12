@@ -53,6 +53,46 @@ class TestRefresh(unittest.TestCase):
         self.assertEqual(res[0]['status'], 'skip')
 
 
+class TestCostBasis(unittest.TestCase):
+    def test_pick_supplier_skips_restricted_and_takes_cheapest(self):
+        offers = [{'shop': 'A', 'price_jpy': 100, 'restricted': True}, {'shop': 'B', 'price_jpy': 300}, {'shop': 'C', 'price_jpy': 260}]
+        self.assertEqual(sp.pick_supplier(offers)['shop'], 'C')
+        self.assertIsNone(sp.pick_supplier([{'shop': 'A', 'price_jpy': 100, 'restricted': True}]))
+
+    def test_investigate_uses_supplier_price_and_reports_missing_supplier(self):
+        keepa = {'A1': keepa_row('A1'), 'A2': {**keepa_row('A2'), '商品コード: EAN': '4900000000999'}}
+        suppliers = {'4900000000000': [{'shop': '丸進', 'price_jpy': 260, 'sd_id': '1'}]}
+        ev = sp.investigate(keepa, suppliers)
+        entry = (ev['qualified'] + ev['rejected'])[0]
+        self.assertAlmostEqual(entry['jp_cost_jpy'], 286.0)
+        self.assertEqual((entry['cost_basis'], entry['cost_supplier']), (sp.COST_BASIS_WHOLESALE, '丸進'))
+        self.assertEqual(ev['no_supplier'], ['A2'])
+
+    def test_classify_cost_basis(self):
+        self.assertEqual(sp.classify_cost_basis({}), sp.COST_BASIS_AMAZON_JP)
+        self.assertEqual(sp.classify_cost_basis({'wholesale_cost_jpy': 300}), sp.COST_BASIS_WHOLESALE)
+        self.assertEqual(sp.classify_cost_basis({'manual_suppliers': [{'restricted': True}]}), sp.COST_BASIS_AMAZON_JP)
+        self.assertEqual(sp.classify_cost_basis({'manual_suppliers': [{'shop_name': 'X'}]}), sp.COST_BASIS_WHOLESALE)
+
+    def test_rebase_replaces_amazon_jp_cost_even_when_wholesale_is_higher(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(ops_finance, 'DB_PATH', Path(tmp) / 't.sqlite3'):
+            ops_finance.init_ops_tables()
+            data = {'amazon_fee_usd': 1.0, 'fba_fee_usd': 2.52, 'roi_pct': 0.9, 'sales_rank_drops_30': 20}
+            with sqlite3.connect(ops_finance.DB_PATH) as conn:
+                conn.execute('''INSERT INTO agent_candidates (run_id, asin, title, us_price_usd, jp_cost_jpy, weight_kg, qualified, data_json,
+                    created_at, source_type, priority_tier, monthly_sold) VALUES ('r','A1','t',8.0,200,0.01,1,?,'2026-10-01','keyword','A+',100)''',
+                    (json.dumps(data),))
+            self.assertEqual(sp.cost_basis_report(('A+',))['counts'], {sp.COST_BASIS_AMAZON_JP: 1})
+            r = sp.rebase_cost('A1', '丸進', 500, apply=True)   # 卸(税込550円)はAmazon JP参考値(200円)より高い
+            self.assertAlmostEqual(r['cost_after'], 550.0)
+            with sqlite3.connect(ops_finance.DB_PATH) as conn:
+                cost, d = conn.execute('SELECT jp_cost_jpy, data_json FROM agent_candidates').fetchone()
+            d = json.loads(d)
+            self.assertAlmostEqual(cost, 550.0)
+            self.assertEqual((d['cost_basis'], d['rebase_before']['jp_cost_jpy']), (sp.COST_BASIS_WHOLESALE, 200))
+            self.assertEqual(sp.cost_basis_report(('A+', 'A-', 'B+', 'B-', 'C+', 'C-', 'D', 'S'))['counts'], {sp.COST_BASIS_WHOLESALE: 1})
+
+
 class TestRestrictedSupplier(unittest.TestCase):
     def test_records_without_changing_cost_or_tier(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(ops_finance, 'DB_PATH', Path(tmp) / 't.sqlite3'):

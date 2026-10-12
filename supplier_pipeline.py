@@ -15,7 +15,10 @@
     supplier_pipeline.py evaluate --map map.csv --keepa keepa.csv --supplier 丸進 \\
         --existing existing.json --out evaluation.json       # ローカルでもAWSでも可(DBは読まない)
     supplier_pipeline.py register --evaluation evaluation.json [--apply]   # AWSで実行。既定は予行演習
-    supplier_pipeline.py refresh --keepa a.csv b.csv --asins asins.txt [--apply]  # AWSで実行。既存行を最新Keepaで再計算(原価はそのまま)\n    supplier_pipeline.py audit [--apply]                     # AWSで実行。旧方式の supplier 行を公式式で再計算(既定は報告のみ、--applyで反映)
+    supplier_pipeline.py refresh --keepa a.csv b.csv --asins asins.txt [--apply]  # AWSで実行。既存行を最新Keepaで再計算(原価はそのまま)\n    supplier_pipeline.py investigate --keepa k.csv --suppliers suppliers.json [--existing e.json] --out ev.json   # ASIN指定: 使える最安の卸価格で評価
+    supplier_pipeline.py basis [--tiers S A+ A-] [--out todo.json]   # AWS: 原価がAmazon.co.jp参考値のままの既存候補
+    supplier_pipeline.py rebase --plan plan.json [--apply]           # AWS: 既存行の原価を仕入れ先の卸価格に付け替え
+    supplier_pipeline.py audit [--apply]                     # AWSで実行。旧方式の supplier 行を公式式で再計算(既定は報告のみ、--applyで反映)
 
 map.csv の列: sd_id, part_no, wholesale_jpy(SDの税抜卸価格/点), asin, name  (任意: jan。あればKeepaのEANと照合し、不一致は足切り)
 """
@@ -36,6 +39,8 @@ SANITY_MAX_SALES_RANK = 500_000      # これより悪い順位(または順位�
 SANITY_MAX_PRICE_RATIO = 10.0        # US価格(円換算)÷卸原価がこれを超え、月間販売の実数値も無いものは相場の異常値とみなす
 DEFAULT_RATE = 150.0
 SUPPLIER_CATEGORY_SUFFIX = ' supplier-search'
+COST_BASIS_WHOLESALE = 'supplier_wholesale'       # 原価=仕入れ先(SD等)の卸価格
+COST_BASIS_AMAZON_JP = 'amazon_jp_reference'      # 原価=Amazon.co.jpの小売価格(参考値。仕入れ先ではない)
 # ops_finance._excluded_kind が拾えない英語タイトルの刃物(Cutter / Utility Knife など)。
 # 刃物は完全除外のカテゴリ。コーナーカッター(紙の角を丸める工具)のような刃のない文具は除外しない。
 _BLADE_TITLE = re.compile(r'\b(box cutter|cardboard cutter|utility knife|cutter knife|knife|scissors|shears?|blade)\b', re.IGNORECASE)
@@ -149,6 +154,8 @@ def build_entry(map_row: dict, keepa_row: dict, supplier: str, rate: float = DEF
         'evidence': evidence_kind(monthly_sold, rank_drops_30),
         'wholesale_cost_jpy': jp_cost,
         'source': f'supplier-search/{supplier}',
+        'cost_basis': COST_BASIS_WHOLESALE,
+        'cost_supplier': supplier,
     }
     of._apply_priority_fields(entry)
     title = entry.get('title') or ''
@@ -263,6 +270,104 @@ def apply_audit(rows: list[dict], db_path: str | Path | None = None) -> int:
     return updated
 
 
+def pick_supplier(offers: list[dict]) -> dict | None:
+    """同じJANを扱う仕入れ先の候補から、US向けに使える中で卸価格が最安のものを選ぶ。
+    offers: [{'shop','price_jpy','lot','sd_id','restricted'(国内販売のみ/海外販売×なら True)}]"""
+    usable = [o for o in offers if not o.get('restricted') and o.get('price_jpy')]
+    return min(usable, key=lambda o: o['price_jpy']) if usable else None
+
+
+def investigate(keepa: dict, suppliers: dict, existing: dict | None = None, rate: float = DEFAULT_RATE) -> dict:
+    """ASIN指定の調査: Keepa CSVの各ASIN(EAN=JAN)について、suppliers[JAN](ブラウザで引いた仕入れ先の一覧)から
+    使える最安の卸価格を原価にして評価する。仕入れ先が無いASINは no_supplier として返す(Amazon.co.jpの価格では
+    評価しない: 仕入れ先ではないため)。"""
+    map_rows, no_supplier = [], []
+    for asin, k in keepa.items():
+        eans = [e for e in re.split(r'[,\s]+', k.get('商品コード: EAN') or '') if e]
+        offer = next((pick_supplier(suppliers[e]) for e in eans if e in suppliers and pick_supplier(suppliers[e])), None)
+        if not offer:
+            no_supplier.append(asin)
+            continue
+        map_rows.append({'sd_id': offer.get('sd_id'), 'part_no': eans[0], 'wholesale_jpy': float(offer['price_jpy']), 'asin': asin,
+                         'name': k.get('商品名'), 'jan': eans[0], '_shop': offer['shop']})
+    ev = {'qualified': [], 'rejected': [], 'screened_out': [], 'skipped_existing': [], 'diffs': [], 'no_keepa': [], 'no_supplier': no_supplier}
+    for row in map_rows:
+        part = evaluate([row], keepa, row['_shop'], existing, rate)
+        for key in ('qualified', 'rejected', 'screened_out', 'skipped_existing', 'diffs'):
+            ev[key].extend(part[key])
+    ev['qualified'].sort(key=of._qualified_sort_key)
+    return ev
+
+
+def classify_cost_basis(data: dict) -> str:
+    """既存行の原価の根拠。卸価格(NETSEA/SD/手動の使える仕入れ先)があれば wholesale、なければ amazon_jp(参考値)。"""
+    if data.get('cost_basis') in (COST_BASIS_WHOLESALE, COST_BASIS_AMAZON_JP):
+        return data['cost_basis']
+    if data.get('wholesale_cost_jpy') is not None:
+        return COST_BASIS_WHOLESALE
+    if any(not s.get('restricted') for s in (data.get('manual_suppliers') or [])):
+        return COST_BASIS_WHOLESALE
+    return COST_BASIS_AMAZON_JP
+
+
+def cost_basis_report(tiers=('S', 'A+', 'A-'), db_path: str | Path | None = None) -> dict:
+    """Tierが tiers の既存候補(ASINごとの最新行)を、原価の根拠別に数え、Amazon.co.jp参考値のままのものを返す。"""
+    with sqlite3.connect(db_path or of.DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            '''SELECT asin, title, priority_tier, jp_cost_jpy, us_price_usd, monthly_sold, data_json FROM agent_candidates a
+               WHERE id = (SELECT MAX(id) FROM agent_candidates WHERE asin = a.asin) AND excluded_kind IS NULL''').fetchall()
+    counts, todo = {}, []
+    for r in rows:
+        if r['priority_tier'] not in tiers:
+            continue
+        data = json.loads(r['data_json'] or '{}')
+        basis = classify_cost_basis(data)
+        counts[basis] = counts.get(basis, 0) + 1
+        if basis == COST_BASIS_AMAZON_JP:
+            todo.append({'asin': r['asin'], 'title': r['title'], 'tier': r['priority_tier'], 'jp_cost_jpy': r['jp_cost_jpy'],
+                         'ean': data.get('ean') or data.get('upc'), 'monthly_sold': r['monthly_sold']})
+    return {'counts': counts, 'todo': todo}
+
+
+def rebase_cost(asin: str, shop: str, price_jpy: float, url: str | None = None, min_qty: int | None = None,
+                note: str | None = None, db_path: str | Path | None = None, apply: bool = False) -> dict:
+    """既存行の原価を、Amazon.co.jpの参考値から、仕入れ先の卸価格(税込換算)に付け替えて、利益・ROI・Tierを
+    公式式で再計算する。ops_finance.add_manual_supplier と違い、卸価格のほうが高くても原価にする(Amazon.co.jpは
+    仕入れ先ではないため)。更新前の値は data_json['rebase_before'] に残す。"""
+    new_cost = of.normalize_jp_cost_for_tax(float(price_jpy), None)
+    with sqlite3.connect(db_path or of.DB_PATH, timeout=30) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute('SELECT * FROM agent_candidates WHERE asin = ? ORDER BY id DESC LIMIT 1', (asin,)).fetchone()
+        if row is None or not row['us_price_usd']:
+            return {'asin': asin, 'status': 'skip', 'reason': 'no row/price'}
+        data = json.loads(row['data_json'] or '{}')
+        price = row['us_price_usd']
+        fee_rate = (data.get('amazon_fee_usd') / price) if data.get('amazon_fee_usd') is not None else 0.15
+        fba = data.get('fba_fee_usd') if data.get('fba_fee_usd') is not None else 3.5
+        profit = of.calc_unit_profit(us_price_usd=price, jp_cost_jpy=new_cost, weight_kg=row['weight_kg'] or of.DEFAULT_WEIGHT_KG_FALLBACK,
+                                     amazon_fee_rate=fee_rate, fba_fee_usd=fba)
+        drops = data.get('sales_rank_drops_30', data.get('rank_drops_30'))
+        tier = None if row['excluded_kind'] else of._classify_priority_tier(profit['roi_pct'], row['monthly_sold'], drops)
+        result = {'asin': asin, 'status': 'ok', 'title': row['title'], 'tier_before': row['priority_tier'], 'tier_after': tier,
+                  'roi_before': data.get('roi_pct'), 'roi_after': profit['roi_pct'], 'cost_before': row['jp_cost_jpy'], 'cost_after': new_cost}
+        if apply:
+            now = datetime.now(timezone.utc).isoformat()
+            data['rebase_before'] = {'jp_cost_jpy': row['jp_cost_jpy'], 'priority_tier': row['priority_tier'], 'roi_pct': data.get('roi_pct'),
+                                     'unit_profit_usd': row['unit_profit_usd'], 'cost_basis': classify_cost_basis(data)}
+            data.update(profit)
+            data.update(roi_pct=profit['roi_pct'], jp_cost_jpy=new_cost, wholesale_cost_jpy=new_cost, wholesale_raw_jpy=float(price_jpy),
+                        cost_basis=COST_BASIS_WHOLESALE, cost_supplier=shop)
+            entry = {'source': 'sd', 'shop_name': shop, 'url': url, 'price_jpy': float(price_jpy), 'min_qty': min_qty, 'note': note, 'checked_at': now}
+            data['manual_suppliers'] = [x for x in (data.get('manual_suppliers') or []) if not (x.get('source') == 'sd' and x.get('shop_name') == shop)] + [entry]
+            conn.execute(
+                '''UPDATE agent_candidates SET jp_cost_jpy=?, unit_profit_usd=?, margin_pct=?, priority_tier=?, qualified=?, data_json=?
+                   WHERE id=?''',
+                (new_cost, profit['unit_profit_usd'], profit['margin_pct'], tier,
+                 0 if row['excluded_kind'] else int(of.is_qualified_priority_tier(tier)), json.dumps(data, ensure_ascii=False), row['id']))
+    return result
+
+
 def add_restricted_supplier(asin: str, source: str, shop_name: str, price_jpy: float, note: str,
                             url: str | None = None, min_qty: int | None = None, db_path: str | Path | None = None) -> int:
     """US向けには使えない仕入れ先(国内販売のみ・海外販売×など)を、参考情報として data_json['manual_suppliers'] に
@@ -364,6 +469,17 @@ def main(argv=None) -> int:
     p.add_argument('--include-rejected', action='store_true')
     p = sub.add_parser('audit')
     p.add_argument('--apply', action='store_true')
+    p = sub.add_parser('investigate')
+    p.add_argument('--keepa', required=True)
+    p.add_argument('--suppliers', required=True, help='JAN→仕入れ先一覧のJSON(ブラウザでSDを検索して作る)')
+    p.add_argument('--existing')
+    p.add_argument('--out', required=True)
+    p = sub.add_parser('basis')
+    p.add_argument('--tiers', nargs='+', default=['S', 'A+', 'A-'])
+    p.add_argument('--out')
+    p = sub.add_parser('rebase')
+    p.add_argument('--plan', required=True, help='[{asin,shop,price_jpy,url,min_qty,note}]のJSON')
+    p.add_argument('--apply', action='store_true')
     p = sub.add_parser('refresh')
     p.add_argument('--keepa', required=True, nargs='+')
     p.add_argument('--asins', required=True, help='ASINを1行1件で書いたファイル')
@@ -383,6 +499,30 @@ def main(argv=None) -> int:
         ev = json.loads(Path(args.evaluation).read_text())
         res = register(ev, args.supplier, apply=args.apply, include_rejected=args.include_rejected)
         print(f"{'予行演習' if res['dry_run'] else '登録'}: {res['count']}件" + (f" run_id={res['run_id']}" if res['run_id'] else ''))
+    elif args.cmd == 'investigate':
+        existing = json.loads(Path(args.existing).read_text()) if args.existing else {}
+        ev = investigate(load_keepa_csv(args.keepa), json.loads(Path(args.suppliers).read_text()), existing)
+        Path(args.out).write_text(json.dumps(ev, ensure_ascii=False))
+        _print_report(ev)
+        if ev['no_supplier']:
+            print('仕入れ先が見つからない(評価していない): ' + ', '.join(ev['no_supplier']))
+    elif args.cmd == 'basis':
+        rep = cost_basis_report(tuple(args.tiers))
+        print('原価の根拠(Tier ' + '/'.join(args.tiers) + '): ' + ', '.join(f'{k}={v}' for k, v in rep['counts'].items()))
+        if args.out:
+            Path(args.out).write_text(json.dumps(rep['todo'], ensure_ascii=False))
+            print(f"Amazon.co.jp参考値のまま {len(rep['todo'])}件 → {args.out}")
+    elif args.cmd == 'rebase':
+        plan = json.loads(Path(args.plan).read_text())
+        n = 0
+        for item in plan:
+            r = rebase_cost(item['asin'], item['shop'], item['price_jpy'], item.get('url'), item.get('min_qty'), item.get('note'), apply=args.apply)
+            if r['status'] == 'ok':
+                n += 1
+                print(f"  {r['asin']} {str(r['title'])[:30]}: {r['tier_before']} → {r['tier_after']} (ROI {r['roi_before']} → {r['roi_after']:.2f}, 原価¥{r['cost_before']} → ¥{r['cost_after']:.0f})")
+            else:
+                print(f"  {r['asin']}: 変更なし({r['reason']})")
+        print(('DBを更新' if args.apply else '予行演習') + f': {n}件')
     elif args.cmd == 'refresh':
         keepa = {}
         for path in args.keepa:
