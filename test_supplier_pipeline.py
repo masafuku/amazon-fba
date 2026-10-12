@@ -37,6 +37,14 @@ class TestSanity(unittest.TestCase):
 
 
 class TestEvaluate(unittest.TestCase):
+    def test_ean_mismatch_is_screened_but_match_or_unknown_passes(self):
+        bad = {**map_row('A1'), 'jan': '4900000000999'}
+        ev = sp.evaluate([bad], {'A1': keepa_row('A1')}, 'Zoomy')   # keepa EAN は 4900000000000
+        self.assertEqual(ev['screened_out'][0]['screened_out'], ['ean_mismatch'])
+        ok = {**map_row('A2'), 'jan': '4900000000000'}
+        ev = sp.evaluate([ok], {'A2': keepa_row('A2')}, 'Zoomy')
+        self.assertEqual(len(ev['qualified'] + ev['rejected']), 1)
+
     def test_wholesale_is_tax_adjusted_and_uses_official_formula(self):
         ev = sp.evaluate([map_row('A1', 300)], {'A1': keepa_row('A1')}, '丸進')
         entry = (ev['qualified'] + ev['rejected'])[0]

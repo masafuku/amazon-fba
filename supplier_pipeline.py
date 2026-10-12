@@ -17,7 +17,7 @@
     supplier_pipeline.py register --evaluation evaluation.json [--apply]   # AWSで実行。既定は予行演習
     supplier_pipeline.py audit [--apply]                     # AWSで実行。旧方式の supplier 行を公式式で再計算(既定は報告のみ、--applyで反映)
 
-map.csv の列: sd_id, part_no, wholesale_jpy(SDの税抜卸価格/点), asin, name  (任意: jan)
+map.csv の列: sd_id, part_no, wholesale_jpy(SDの税抜卸価格/点), asin, name  (任意: jan。あればKeepaのEANと照合し、不一致は足切り)
 """
 from __future__ import annotations
 
@@ -109,11 +109,14 @@ def build_entry(map_row: dict, keepa_row: dict, supplier: str, rate: float = DEF
     wholesale_raw = float(map_row['wholesale_jpy'])
     jp_cost = of.normalize_jp_cost_for_tax(wholesale_raw, None)
 
-    base = {'asin': asin, 'title': map_row.get('name'), 'supplier': supplier, 'part_no': map_row.get('part_no'),
+    base = {'asin': asin, 'title': map_row.get('name') or keepa_row.get('商品名'), 'supplier': supplier, 'part_no': map_row.get('part_no'),
             'sd_id': map_row.get('sd_id'), 'wholesale_raw_jpy': wholesale_raw, 'jp_cost_jpy': jp_cost,
             'us_price_usd': us_price, 'sales_rank': int(sales_rank) if sales_rank is not None else None,
             'monthly_sold': monthly_sold, 'sales_rank_drops_30': rank_drops_30}
     flags = market_sanity_flags(us_price, sales_rank, jp_cost, monthly_sold, rate)
+    jan, keepa_ean = (map_row.get('jan') or '').strip(), keepa_row.get('商品コード: EAN') or ''
+    if jan and keepa_ean and jan not in keepa_ean:
+        flags.append('ean_mismatch')   # JAN検索で別商品(まとめ買い等)を拾った可能性。SDの単品卸価格と合わない
     if flags:
         return {**base, 'screened_out': flags}
 
