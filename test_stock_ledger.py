@@ -260,17 +260,19 @@ class TestIngest(StockLedgerTestCase):
         sl.ingest_email(notice('c', '2026/09/17', '2,156'))
         sl.ingest_email(notice('d', '2026/10/06', '15,840'))
         self.assertEqual(sl.ingest_email(notice('a', '2026/08/26', '27,019')), [])   # 同じメールは二重に入らない
-        sl.ingest_email({'id': 'r', 'subject': '＜Paid＞ご入金ありがとうございます', 'date': '2026-09-16T12:40:13Z', 'body': ''})
-
         summary = sl.payments_summary(today='2026-10-10')
         self.assertEqual([(m['month'], m['total'], m['status']) for m in summary['months']],
                          [('2026-08', 29572.0, '請求書発行済み・入金未確認'), ('2026-09', 2156.0, '請求書発行済み・入金未確認'),
                           ('2026-10', 15840.0, '当月分(請求書は翌月初3営業日)')])
         self.assertTrue(any('2026-08分 ¥29,572' in a for a in sl.alerts(today='2026-10-10')))
 
-        self.assertEqual(sl.mark_month_paid('2026-08', '2026-09-16', '推定'), 2)
+        # 入金メールは、当月より前で一番古い未払いの月に自動で当てる
+        events = sl.ingest_email({'id': 'r', 'subject': '＜Paid＞ご入金ありがとうございます', 'date': '2026-09-16T12:40:13Z', 'body': ''})
+        self.assertEqual(len(events), 1)
+        self.assertIn('2026-08分 ¥29,572', events[0])
         summary = sl.payments_summary(today='2026-10-10')
         self.assertEqual(summary['months'][0]['status'], '入金済み')
+        self.assertEqual(summary['months'][0]['paid_on'], '2026-09-16')
         self.assertEqual(summary['unpaid_total'], 2156.0 + 15840.0)
         found = sl.alerts(today='2026-10-10')
         self.assertFalse(any('2026-08分' in a for a in found))

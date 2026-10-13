@@ -324,7 +324,16 @@ def ingest_email(email: dict) -> list:
     elif kind == PAID_RECEIVED:
         with sqlite3.connect(of.DB_PATH) as conn:
             if _record_event(conn, source_id, PAID_RECEIVED, received_on, source_id, {'note': '入金確認(金額はメールに無い)'}):
-                new_events.append(f'Paid入金確認 {received_on}（どの月の請求かは paid で登録）')
+                # 入金メールには月も金額もないので、請求書発行済み(当月より前)で一番古い未払いの月に当てる。違えば paid で直す。
+                this_month = received_on[:7]
+                row = conn.execute('SELECT month, SUM(amount_jpy) FROM sd_settlements WHERE paid_on IS NULL AND month < ? '
+                                   'GROUP BY month ORDER BY month LIMIT 1', (this_month,)).fetchone()
+                if row:
+                    conn.execute('UPDATE sd_settlements SET paid_on = ?, paid_note = ? WHERE month = ?',
+                                 (received_on, 'Paid入金メールから自動(最古の未払い月に充当)', row[0]))
+                    new_events.append(f'Paid入金確認 {received_on} → {row[0]}分 ¥{row[1]:,.0f} を入金済みにした（違う月なら paid で直す）')
+                else:
+                    new_events.append(f'Paid入金確認 {received_on}（未払いの月がないので登録なし）')
 
     elif kind == LISTING_CREATED:
         sku = LISTING_SUBJECT.search(email['subject']).group(1)

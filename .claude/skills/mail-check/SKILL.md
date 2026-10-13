@@ -40,7 +40,7 @@ after:<since> (from:raccoon.ne.jp OR from:superdelivery.com OR from:globalbrand.
 | `Amazon Listing Created -` | 出品作成 |
 | `FBA Inbound Shipment Checked-In / Receiving / Closed (FBA…)` | FBA着荷・受領開始・受領完了 |
 | `＜Paid＞決済確定のお知らせ（スーパーデリバリー）` | SDの出荷ごとの決済額（支払いの月次集計。金額・日付つき） |
-| `＜Paid＞ご入金ありがとうございます` | Paidへの入金確認（金額は本文にない。どの月か、CEOに確認して `paid --month` で登録） |
+| `＜Paid＞ご入金ありがとうございます` | Paidへの入金確認（金額・月は本文にない）。`ingest` が、当月より前で一番古い未払いの月に自動で入金済みを付ける。報告で「◯月分に充当」と伝え、違えば `paid --month` で直す |
 | `価格の誤設定に対処し、停止された出品情報を回復する` | amazon.co.jp等での価格誤設定による出品停止（SKU・価格つき。要対応） |
 
 SDの「新着・プライスダウン情報」、ログイン通知、Amazonの「新しい返信先アドレスが追加されました」は対象外。
