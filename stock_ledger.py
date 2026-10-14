@@ -438,7 +438,7 @@ def payments_summary(today: str | None = None) -> dict:
             'SELECT supplier_name, order_date, SUM(amount_jpy) * 1.1 FROM jp_purchase_records '
             'WHERE supplier_shipped_at IS NULL AND received_at IS NULL GROUP BY supplier_name, order_date').fetchall()
     return {'months': months,
-            'unsettled': [{'supplier': a, 'order_date': b, 'estimated_total_incl_tax': round(c)} for a, b, c in pending],
+            'unsettled': [{'supplier': a, 'order_date': b, 'estimated_total_incl_tax': round(c or 0)} for a, b, c in pending],
             'unpaid_total': sum(m['total'] for m in months if m['paid_on'] is None)}
 
 
