@@ -1,0 +1,501 @@
+"""SP-API連携(収支・在庫ダッシュボード)のユニットテスト。
+
+Keepaからの独立性を保つ設計を検証する意図も込めて、これらのテストは
+keepa_mcp/keepa関連のものを一切importしない。
+"""
+import json
+import sqlite3
+import tempfile
+import time
+import unittest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import ops_finance as of
+import sd_email_parser
+import sp_api.client as sp_client
+import sp_api_sync
+from sp_api.config import Settings as SpSettings
+
+
+class TestSpApiSettings(unittest.TestCase):
+    def test_not_configured_when_missing_credentials(self):
+        settings = SpSettings(
+            lwa_client_id="", lwa_client_secret="", refresh_token="",
+            region="na", marketplace_id="ATVPDKIKX0DER",
+        )
+        self.assertFalse(settings.configured)
+
+    def test_configured_when_all_credentials_present(self):
+        settings = SpSettings(
+            lwa_client_id="id", lwa_client_secret="secret", refresh_token="token",
+            region="na", marketplace_id="ATVPDKIKX0DER",
+        )
+        self.assertTrue(settings.configured)
+
+    def test_missing_one_field_is_not_configured(self):
+        settings = SpSettings(
+            lwa_client_id="id", lwa_client_secret="", refresh_token="token",
+            region="na", marketplace_id="ATVPDKIKX0DER",
+        )
+        self.assertFalse(settings.configured)
+
+
+class TestLwaTokenCaching(unittest.TestCase):
+    def setUp(self):
+        sp_client._access_token = None
+        sp_client._access_token_expires_at = 0.0
+
+    def test_reuses_cached_token_before_expiry(self):
+        with patch.object(sp_client, "_fetch_access_token", return_value=("tok1", 3600.0)) as mock_fetch:
+            token1 = sp_client.get_access_token()
+            token2 = sp_client.get_access_token()
+        self.assertEqual(token1, "tok1")
+        self.assertEqual(token2, "tok1")
+        mock_fetch.assert_called_once()
+
+    def test_refreshes_when_forced(self):
+        with patch.object(sp_client, "_fetch_access_token", side_effect=[("tok1", 3600.0), ("tok2", 3600.0)]):
+            token1 = sp_client.get_access_token()
+            token2 = sp_client.get_access_token(force_refresh=True)
+        self.assertEqual(token1, "tok1")
+        self.assertEqual(token2, "tok2")
+
+    def test_refreshes_when_expired(self):
+        with patch.object(sp_client, "_fetch_access_token", side_effect=[("tok1", 0.001), ("tok2", 3600.0)]):
+            token1 = sp_client.get_access_token()
+            time.sleep(0.05)
+            token2 = sp_client.get_access_token()
+        self.assertEqual(token1, "tok1")
+        self.assertEqual(token2, "tok2")
+
+
+class TestSpApiSyncGuard(unittest.TestCase):
+    """認証情報未設定なら、SP-APIを一切呼ばずに正常終了することを確認する。"""
+
+    def test_run_once_skips_without_credentials(self):
+        fake_settings = MagicMock(configured=False)
+        with patch.object(sp_api_sync, "sp_settings", fake_settings), \
+             patch.object(sp_api_sync.sp_client, "get_orders") as mock_get_orders:
+            sp_api_sync.run_once()
+        mock_get_orders.assert_not_called()
+
+
+class TestSdEmailParser(unittest.TestCase):
+    # 本日実際に受信したSuper Delivery注文確定メールの本文(Zoomy BUNGU分、
+    # パタップ クリアイエロー10点)をそのままfixtureにする。
+    SAMPLE_BODY = (
+        "■出展企業(問い合わせ先)：Zoomy BUNGU\n"
+        "https://www.superdelivery.com/p/do/dpsl/di/1003908/\n"
+        "[注文時のメッセージ]\n\n"
+        "----------------------------------------------------------------------\n"
+        "[　受付番号　]　93977902\n"
+        "[　 SD品番 　]　15782388S2\n"
+        "[　 商品名 　]　【ナカバヤシ】シリコンブックマーカー パタップ\n"
+        "[メーカー品番]　1531671\n"
+        "[ JANコード　]　4902205744443\n"
+        "[　　内訳　　]　DSB-PTP-CY クリアイエロー\n"
+        "[ セット毎数 ]　5点\n"
+        "[注文セット数]　2セット\n"
+        "[　注文点数　]　10点\n"
+        "[　注文単価　]　\\196\n"
+        "[　注文金額　]　\\1,960\n"
+        "----------------------------------------------------------------------\n"
+    )
+
+    def test_parses_single_reception_block(self):
+        records = sd_email_parser.parse_email_body(self.SAMPLE_BODY, order_date="2026-09-08")
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        self.assertEqual(record["sdReceptionNo"], "93977902")
+        self.assertEqual(record["sdProductNo"], "15782388S2")
+        self.assertEqual(record["janCode"], "4902205744443")
+        self.assertEqual(record["variant"], "DSB-PTP-CY クリアイエロー")
+        self.assertEqual(record["quantity"], 10)
+        self.assertEqual(record["unitPriceJpy"], 196.0)
+        self.assertEqual(record["amountJpy"], 1960.0)
+        self.assertEqual(record["supplierName"], "Zoomy BUNGU")
+        self.assertEqual(record["orderDate"], "2026-09-08")
+
+    def test_no_reception_number_yields_no_records(self):
+        self.assertEqual(sd_email_parser.parse_email_body("no matching content here"), [])
+
+    def test_amount_with_comma_parses_correctly(self):
+        body = self.SAMPLE_BODY.replace("\\1,960", "\\12,345")
+        records = sd_email_parser.parse_email_body(body)
+        self.assertEqual(records[0]["amountJpy"], 12345.0)
+
+
+class TestSdEmailParserOrderDate(unittest.TestCase):
+    """2026-09-30: order_dateが実行日固定になっていたバグの修正確認。"""
+
+    def test_extracts_order_date_from_body(self):
+        body = "何か\n[ 発注日 ] 2026/09/08(火)18:37\nそれ以外の本文"
+        self.assertEqual(sd_email_parser.extract_order_date(body), "2026-09-08")
+
+    def test_returns_none_when_order_date_missing(self):
+        self.assertIsNone(sd_email_parser.extract_order_date("発注日の記載がない本文"))
+
+
+class TestSdEmailParserShippingAndCoupon(unittest.TestCase):
+    """2026-09-30: 送料(見込み)・クーポン利用の抽出と、ブロックごとの実質送料計算。
+    CEOへの提案通り「クーポンで無料なら反映不要」(net_shipping<=0なら0を返す)を確認する。"""
+
+    def _body(self, supplier, shipping_line, coupon_line=""):
+        return (
+            f"■出展企業(問い合わせ先)：{supplier}\n"
+            "----------------------------------------------------------------------\n"
+            "[　受付番号　]　90000001\n"
+            "[　 SD品番 　]　SD1\n"
+            "[　 商品名 　]　テスト商品\n"
+            "[ JANコード　]　1111111111111\n"
+            "[　注文点数　]　10点\n"
+            "[　注文単価　]　\\100\n"
+            "[　注文金額　]　\\1,000\n"
+            "----------------------------------------------------------------------\n"
+            "[お支払い方法]Paid（掛け）\n"
+            "[　商品小計　] \\1,000\n"
+            f"{shipping_line}\n"
+            "[小計(税抜き)] \\1,000\n"
+            f"{coupon_line}\n"
+        )
+
+    def test_shipping_with_no_coupon_is_kept_in_full(self):
+        body = self._body("Zoomy BUNGU", "[送料(見込み)] \\1,100")
+        records = sd_email_parser.parse_email_body(body)
+        self.assertEqual(records[0]["netShippingJpy"], 1100.0)
+
+    def test_shipping_fully_offset_by_coupon_is_zero(self):
+        # 実例(2026-09-08、Zoomy BUNGU): 送料1,100円がクーポン1,210円で相殺され
+        # 実質0円 -> 反映不要(2026-09-30、CEOとの合意通り)。
+        body = self._body("Zoomy BUNGU", "[送料(見込み)] \\1,100", "[ クーポン利用 ] -1,210")
+        records = sd_email_parser.parse_email_body(body)
+        self.assertEqual(records[0]["netShippingJpy"], 0.0)
+
+    def test_shipping_partially_offset_by_coupon(self):
+        body = self._body("丸進", "[送料(見込み)] \\1,000", "[ クーポン利用 ] -300")
+        records = sd_email_parser.parse_email_body(body)
+        self.assertEqual(records[0]["netShippingJpy"], 700.0)
+
+    def test_no_shipping_no_coupon_is_zero(self):
+        body = self._body("ハリマ共和物産", "[送料(見込み)] \\0")
+        records = sd_email_parser.parse_email_body(body)
+        self.assertEqual(records[0]["netShippingJpy"], 0.0)
+
+    def test_two_supplier_blocks_get_independent_shipping(self):
+        body = self._body("丸進", "[送料(見込み)] \\1,000") + self._body("コモライフ", "[送料(見込み)] \\0")
+        records = sd_email_parser.parse_email_body(body)
+        self.assertEqual(len(records), 2)
+        by_supplier = {r["supplierName"]: r["netShippingJpy"] for r in records}
+        self.assertEqual(by_supplier["丸進"], 1000.0)
+        self.assertEqual(by_supplier["コモライフ"], 0.0)
+
+
+class TestSdEmailParserGuard(unittest.TestCase):
+    def test_run_once_skips_without_gmail_credentials(self):
+        with patch.object(sd_email_parser.gmail, "configured", return_value=False), \
+             patch.object(sd_email_parser.gmail, "search_messages") as mock_search:
+            sd_email_parser.run_once()
+        mock_search.assert_not_called()
+
+
+class TestAllocateOrderShipping(unittest.TestCase):
+    """CEO: 「送料は商品ごとに配分して」— 同一発注(supplier_name+order_date)内の
+    商品行に、送料を数量按分で書き込み、COGS計算(compute_finance_summary)に
+    反映されることを確認する。"""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._original_db_path = of.DB_PATH
+        of.DB_PATH = Path(self._tmpdir.name) / "test.sqlite3"
+        of.init_ops_tables()
+
+    def tearDown(self):
+        of.DB_PATH = self._original_db_path
+        self._tmpdir.cleanup()
+
+    def test_shipping_allocated_proportionally_by_quantity(self):
+        of.upsert_jp_purchase_record({
+            "orderDate": "2026-08-26", "sdReceptionNo": "R1", "supplierName": "丸進",
+            "sdProductNo": None, "productName": "定規", "janCode": "JAN1", "variant": None,
+            "unitPriceJpy": 195, "quantity": 30, "amountJpy": 5850,
+        })
+        of.upsert_jp_purchase_record({
+            "orderDate": "2026-08-26", "sdReceptionNo": "R2", "supplierName": "丸進",
+            "sdProductNo": None, "productName": "シール", "janCode": "JAN2", "variant": None,
+            "unitPriceJpy": 238, "quantity": 30, "amountJpy": 7140,
+        })
+        updated = of.allocate_order_shipping("丸進", "2026-08-26", 800)
+        self.assertEqual(len(updated), 2)
+        # 30個+30個=60個のうち、各行30個ずつ -> 半分ずつ(¥400)に配分される
+        for row in updated:
+            self.assertAlmostEqual(row["shippingCostJpy"], 400.0)
+
+    def test_shipping_allocation_only_affects_matching_order(self):
+        of.upsert_jp_purchase_record({
+            "orderDate": "2026-08-26", "sdReceptionNo": "R3", "supplierName": "丸進",
+            "sdProductNo": None, "productName": "定規", "janCode": "JAN3", "variant": None,
+            "unitPriceJpy": 195, "quantity": 10, "amountJpy": 1950,
+        })
+        of.upsert_jp_purchase_record({
+            "orderDate": "2026-09-08", "sdReceptionNo": "R4", "supplierName": "Zoomy BUNGU",
+            "sdProductNo": None, "productName": "パタップ", "janCode": "JAN4", "variant": None,
+            "unitPriceJpy": 196, "quantity": 10, "amountJpy": 1960,
+        })
+        updated = of.allocate_order_shipping("丸進", "2026-08-26", 800)
+        self.assertEqual(len(updated), 1)
+        self.assertAlmostEqual(updated[0]["shippingCostJpy"], 800.0)
+
+    def test_finance_summary_cogs_includes_allocated_shipping(self):
+        of.set_asin_jan_map("B0TEST", "JAN5")
+        of.upsert_jp_purchase_record({
+            "orderDate": "2026-08-26", "sdReceptionNo": "R5", "supplierName": "丸進",
+            "sdProductNo": None, "productName": "定規", "janCode": "JAN5", "variant": None,
+            "unitPriceJpy": 200, "quantity": 10, "amountJpy": 2000,
+        })
+        of.allocate_order_shipping("丸進", "2026-08-26", 500)  # -> 送料/個 = ¥50
+        of.upsert_sp_orders([{
+            "orderId": "O1", "purchaseDate": "2026-09-01", "asin": "B0TEST", "sku": "SKU1",
+            "quantity": 2, "itemPriceUsd": 10.0, "orderStatus": "Shipped",
+        }])
+        of.upsert_sp_order_items("O1", [{
+            "asin": "B0TEST", "sku": "SKU1", "quantity": 2, "itemPriceUsd": 10.0,
+        }])
+        summary = of.compute_finance_summary(days=30, usd_to_jpy=150.0)
+        # 着地原価/個 = ¥200(商品単価) + ¥50(送料按分) = ¥250 -> $250/150 * 2個 = $3.33...
+        self.assertAlmostEqual(summary["cogsUsd"], (250 / 150.0) * 2, places=2)
+
+
+class TestPerProductPnl(unittest.TestCase):
+    """Phase 2/3: sp_order_items経由の商品ごとのP&L(get_per_product_pnl)。
+    1注文に複数ASINが含まれる場合の手数料の数量按分も検証する。"""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._original_db_path = of.DB_PATH
+        of.DB_PATH = Path(self._tmpdir.name) / "test.sqlite3"
+        of.init_ops_tables()
+
+    def tearDown(self):
+        of.DB_PATH = self._original_db_path
+        self._tmpdir.cleanup()
+
+    def test_single_asin_order_pnl(self):
+        of.upsert_jp_purchase_record({
+            "orderDate": "2026-08-26", "sdReceptionNo": "R1", "supplierName": "丸進",
+            "sdProductNo": None, "productName": "定規", "janCode": "JAN1", "variant": None,
+            "unitPriceJpy": 195, "quantity": 30, "amountJpy": 5850,
+        })
+        of.set_asin_jan_map("B0RULER", "JAN1")
+        of.upsert_sp_orders([{
+            "orderId": "O1", "purchaseDate": "2026-09-01", "asin": None, "sku": None,
+            "quantity": None, "itemPriceUsd": None, "orderStatus": "Shipped",
+        }])
+        of.upsert_sp_order_items("O1", [{
+            "asin": "B0RULER", "sku": "SKU1", "quantity": 2, "itemPriceUsd": 7.49,
+        }])
+        of.upsert_sp_financial_events("O1", [
+            {"eventType": "Commission", "amountUsd": -2.0, "postedDate": "2026-09-01"},
+        ])
+        result = of.get_per_product_pnl(days=30, usd_to_jpy=150.0)
+        self.assertEqual(len(result), 1)
+        row = result[0]
+        self.assertEqual(row["asin"], "B0RULER")
+        self.assertEqual(row["units"], 2)
+        self.assertAlmostEqual(row["revenueUsd"], 14.98)
+        self.assertAlmostEqual(row["feesUsd"], -2.0)
+        self.assertAlmostEqual(row["cogsUsd"], (195 / 150.0) * 2, places=2)
+
+    def test_multi_asin_order_splits_fees_by_quantity(self):
+        of.upsert_sp_orders([{
+            "orderId": "O2", "purchaseDate": "2026-09-01", "asin": None, "sku": None,
+            "quantity": None, "itemPriceUsd": None, "orderStatus": "Shipped",
+        }])
+        of.upsert_sp_order_items("O2", [
+            {"asin": "B0A", "sku": "SKU-A", "quantity": 1, "itemPriceUsd": 10.0},
+            {"asin": "B0B", "sku": "SKU-B", "quantity": 3, "itemPriceUsd": 5.0},
+        ])
+        of.upsert_sp_financial_events("O2", [
+            {"eventType": "Commission", "amountUsd": -4.0, "postedDate": "2026-09-01"},
+        ])
+        result = {row["asin"]: row for row in of.get_per_product_pnl(days=30)}
+        # 手数料-4.0ドルが数量比(1:3)で按分される -> B0A=-1.0, B0B=-3.0
+        self.assertAlmostEqual(result["B0A"]["feesUsd"], -1.0)
+        self.assertAlmostEqual(result["B0B"]["feesUsd"], -3.0)
+
+
+class TestShipmentPnl(unittest.TestCase):
+    """Phase 4: FBA納品便(sp_inbound_shipments)ごとのP&L(get_shipment_pnl)。
+    原価の紐付けと、売上のFIFO近似割り当てを検証する。"""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._original_db_path = of.DB_PATH
+        of.DB_PATH = Path(self._tmpdir.name) / "test.sqlite3"
+        of.init_ops_tables()
+
+    def tearDown(self):
+        of.DB_PATH = self._original_db_path
+        self._tmpdir.cleanup()
+
+    def _shipment(self, shipment_id="sh1", confirmation_id="FBA1", window_start="2026-10-18T00:00Z"):
+        return {
+            "shipmentId": shipment_id, "planId": "plan1", "shipmentConfirmationId": confirmation_id,
+            "status": "READY_TO_SHIP", "destinationFc": "HIA1",
+            "deliveryWindowStart": window_start, "deliveryWindowEnd": "2026-10-24T23:59Z",
+            "createdAt": "2026-09-29T00:00:00Z",
+        }
+
+    def test_cost_only_when_no_sales_yet(self):
+        of.upsert_jp_purchase_record({
+            "orderDate": "2026-08-26", "sdReceptionNo": "R1", "supplierName": "丸進",
+            "sdProductNo": None, "productName": "定規", "janCode": "JAN1", "variant": None,
+            "unitPriceJpy": 195, "quantity": 30, "amountJpy": 5850,
+        })
+        of.set_asin_jan_map("B0RULER", "JAN1")
+        of.upsert_sp_inbound_shipment(self._shipment(), [{"asin": "B0RULER", "sku": "SKU1", "quantity": 30}])
+
+        result = of.get_shipment_pnl(usd_to_jpy=150.0)
+        self.assertEqual(len(result), 1)
+        row = result[0]
+        self.assertEqual(row["shipmentConfirmationId"], "FBA1")
+        self.assertEqual(row["unitsShipped"], 30)
+        self.assertEqual(row["unitsSold"], 0)
+        self.assertAlmostEqual(row["costUsd"], (195 / 150.0) * 30, places=2)
+        self.assertAlmostEqual(row["revenueUsd"], 0.0)
+
+    def test_fifo_allocates_sales_to_earliest_shipment_first(self):
+        of.upsert_jp_purchase_record({
+            "orderDate": "2026-08-26", "sdReceptionNo": "R2", "supplierName": "丸進",
+            "sdProductNo": None, "productName": "定規", "janCode": "JAN2", "variant": None,
+            "unitPriceJpy": 195, "quantity": 60, "amountJpy": 11700,
+        })
+        of.set_asin_jan_map("B0RULER2", "JAN2")
+        # 2つの便(古い順: sh-old -> sh-new)、それぞれ10個ずつ出荷
+        of.upsert_sp_inbound_shipment(
+            self._shipment("sh-old", "FBA-OLD", "2026-10-01T00:00Z"),
+            [{"asin": "B0RULER2", "sku": "SKU2", "quantity": 10}],
+        )
+        of.upsert_sp_inbound_shipment(
+            self._shipment("sh-new", "FBA-NEW", "2026-10-15T00:00Z"),
+            [{"asin": "B0RULER2", "sku": "SKU2", "quantity": 10}],
+        )
+        # 15個売れた注文(古い便の10個 + 新しい便の5個にまたがる想定)
+        of.upsert_sp_orders([{
+            "orderId": "O1", "purchaseDate": "2026-10-05", "asin": None, "sku": None,
+            "quantity": None, "itemPriceUsd": None, "orderStatus": "Shipped",
+        }])
+        of.upsert_sp_order_items("O1", [{"asin": "B0RULER2", "sku": "SKU2", "quantity": 15, "itemPriceUsd": 7.49}])
+
+        result = {row["shipmentConfirmationId"]: row for row in of.get_shipment_pnl(usd_to_jpy=150.0)}
+        # 古い便(10個出荷)が先に売上を吸収 -> 10個分完売、新しい便は残り5個分だけ売れた扱い
+        self.assertEqual(result["FBA-OLD"]["unitsSold"], 10)
+        self.assertEqual(result["FBA-NEW"]["unitsSold"], 5)
+        self.assertAlmostEqual(result["FBA-OLD"]["revenueUsd"], 7.49 * 10, places=2)
+        self.assertAlmostEqual(result["FBA-NEW"]["revenueUsd"], 7.49 * 5, places=2)
+
+
+class TestPurchaseAndSupplierViews(unittest.TestCase):
+    """出品者フィードバック対応: 仕入れ一覧/詳細、納品便詳細への仕入れ紐付け、
+    仕入れ先ごとの未発注候補一覧(find_candidates_by_supplier)。"""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._original_db_path = of.DB_PATH
+        of.DB_PATH = Path(self._tmpdir.name) / "test.sqlite3"
+        of.init_ops_tables()
+
+    def tearDown(self):
+        of.DB_PATH = self._original_db_path
+        self._tmpdir.cleanup()
+
+    def test_list_and_get_purchase_record(self):
+        of.upsert_jp_purchase_record({
+            "orderDate": "2026-09-22", "sdReceptionNo": "R100", "supplierName": "ハリマ共和物産",
+            "sdProductNo": "SD1", "productName": "毎日香", "janCode": "JAN100", "variant": None,
+            "unitPriceJpy": 288, "quantity": 10, "amountJpy": 2880,
+        })
+        of.upsert_jp_purchase_record({
+            "orderDate": "2026-09-22", "sdReceptionNo": "R101", "supplierName": "中三エス・ティ",
+            "sdProductNo": "SD2", "productName": "万能分別はさみ", "janCode": "JAN101", "variant": None,
+            "unitPriceJpy": 756, "quantity": 10, "amountJpy": 7560,
+        })
+
+        all_purchases = of.list_jp_purchase_records()
+        self.assertEqual(len(all_purchases), 2)
+
+        filtered = of.list_jp_purchase_records(supplier_name="ハリマ")
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered[0]["sdReceptionNo"], "R100")
+
+        detail = of.get_jp_purchase_record("R101")
+        self.assertEqual(detail["productName"], "万能分別はさみ")
+        self.assertEqual(detail["quantity"], 10)
+
+        self.assertIsNone(of.get_jp_purchase_record("does-not-exist"))
+
+    def test_shipment_detail_links_purchase_records(self):
+        of.set_asin_jan_map("B0RULER", "JAN200")
+        of.upsert_jp_purchase_record({
+            "orderDate": "2026-08-26", "sdReceptionNo": "R200", "supplierName": "丸進",
+            "sdProductNo": "SD3", "productName": "定規", "janCode": "JAN200", "variant": None,
+            "unitPriceJpy": 195, "quantity": 30, "amountJpy": 5850,
+        })
+        of.upsert_sp_inbound_shipment(
+            {
+                "shipmentId": "sh200", "planId": "plan200", "shipmentConfirmationId": "FBA200",
+                "status": "READY_TO_SHIP", "destinationFc": "HIA1",
+                "deliveryWindowStart": "2026-10-18T00:00Z", "deliveryWindowEnd": "2026-10-24T23:59Z",
+                "createdAt": "2026-09-29T00:00:00Z",
+            },
+            [{"asin": "B0RULER", "sku": "SKU200", "quantity": 30}],
+        )
+        detail = of.get_shipment_detail("sh200")
+        self.assertIsNotNone(detail)
+        self.assertEqual(detail["shipmentConfirmationId"], "FBA200")
+        self.assertIn("B0RULER", detail["purchasesByAsin"])
+        self.assertEqual(detail["purchasesByAsin"]["B0RULER"][0]["sdReceptionNo"], "R200")
+
+        self.assertIsNone(of.get_shipment_detail("does-not-exist"))
+
+    def test_find_candidates_by_supplier_matches_netsea_and_manual(self):
+        with sqlite3.connect(of.DB_PATH) as conn:
+            conn.execute(
+                '''
+                INSERT INTO agent_candidates
+                    (run_id, category, asin, title, qualified, priority_tier, jp_cost_jpy,
+                     data_json, created_at)
+                VALUES ('r1', 'kw', 'B0NETSEA', 'Netsea Matched Item', 1, 'A+', 300,
+                        ?, '2026-09-01T00:00:00Z')
+                ''',
+                (json.dumps({"netsea_shop_name": "ハリマ共和物産(卸)"}),),
+            )
+            conn.execute(
+                '''
+                INSERT INTO agent_candidates
+                    (run_id, category, asin, title, qualified, priority_tier, jp_cost_jpy,
+                     data_json, created_at)
+                VALUES ('r1', 'kw', 'B0MANUAL', 'Manually Sourced Item', 1, 'B+', 400,
+                        ?, '2026-09-02T00:00:00Z')
+                ''',
+                (json.dumps({"manual_suppliers": [{"source": "sd", "shop_name": "ハリマ共和物産"}]}),),
+            )
+            conn.execute(
+                '''
+                INSERT INTO agent_candidates
+                    (run_id, category, asin, title, qualified, priority_tier, jp_cost_jpy,
+                     data_json, created_at)
+                VALUES ('r1', 'kw', 'B0OTHER', 'Unrelated Supplier Item', 1, 'C+', 500,
+                        ?, '2026-09-03T00:00:00Z')
+                ''',
+                (json.dumps({"netsea_shop_name": "別の卸会社"}),),
+            )
+
+        result = of.find_candidates_by_supplier("ハリマ")
+        asins = {r["asin"] for r in result}
+        self.assertEqual(asins, {"B0NETSEA", "B0MANUAL"})
+        self.assertNotIn("B0OTHER", asins)
+
+
+if __name__ == "__main__":
+    unittest.main()
