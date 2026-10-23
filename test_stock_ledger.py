@@ -133,6 +133,12 @@ class TestParsing(unittest.TestCase):
         self.assertEqual(info['trackingNo'], '878153169479')
         self.assertEqual(info['date'], '2026-10-06')
 
+    def test_tnk_shipped_tracking_in_service_line(self):
+        email = TNK_SHIPPED_EMAIL.replace('FEDEX INTERNATIONAL ECONOMY\n  追跡番号: 878153169479', '追跡番号: 879031401355')
+        info = sl.parse_tnk(email)
+        self.assertEqual(info['trackingNo'], '879031401355')
+        self.assertIsNone(info['service'])
+
     def test_classify(self):
         self.assertEqual(sl.classify('＜SD＞出荷完了いたしました(丸進)'), sl.SD_SHIPPED)
         self.assertEqual(sl.classify('TNK Logisticsからのお知らせ: 貨物が到着しました'), sl.TNK_ARRIVED)

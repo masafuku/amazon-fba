@@ -183,6 +183,13 @@ def parse_tnk(body: str) -> dict:
         value = get(label)
         return float(value.replace('kg', '').strip()) if value else None
 
+    service = get('配送方法')
+    tracking_no = get('追跡番号')
+    if not tracking_no and service:
+        # 配送方法が空のメールは「配送方法: 追跡番号: 123…」と1行に並ぶので、サービス欄から番号を拾う
+        embedded = re.match(r'追跡番号\s*:\s*(\d+)$', service)
+        if embedded:
+            tracking_no, service = embedded.group(1), None
     return {
         'fbaShipmentId': get('FBAシップメントID'),
         'date': get('受付日') or get('発送日'),
@@ -192,8 +199,8 @@ def parse_tnk(body: str) -> dict:
         'volumetricKg': kg('容積重量'),
         'actualKg': kg('実重量'),
         'courier': get('クーリエ'),
-        'service': get('配送方法'),
-        'trackingNo': get('追跡番号'),
+        'service': service,
+        'trackingNo': tracking_no,
     }
 
 
