@@ -25,7 +25,6 @@ import stock_ledger
 from sp_api import client as sp_client
 
 JST = timezone(timedelta(hours=9))
-ORDER_URL = 'https://sellercentral.amazon.com/orders-v3/order/{}'
 STATE_KEY = 'order_watch_seen'
 LOOKBACK_DAYS = 2  # LastUpdatedAfter。5分ごとに動かしても、取りこぼしと一時的なエラーを吸収できる余裕
 BASELINE_DAYS = 14
@@ -136,7 +135,6 @@ def format_new(order: dict, items: list[dict], stock: dict, listing_price=None) 
     lines = [f"【新規注文 {when}】{status_ja(order.get('OrderStatus'))}"]
     lines += _item_lines(items, stock, listing_price)
     lines.append(f"注文番号 {order['AmazonOrderId']}")
-    lines.append(ORDER_URL.format(order['AmazonOrderId']))
     return '\n'.join(lines)
 
 
@@ -147,7 +145,6 @@ def format_change(order: dict, items: list[dict], old_status: str) -> str:
     for item in items:
         lines.append(f"・{(item.get('Title') or item.get('ASIN') or '')[:44]} ×{item.get('QuantityOrdered') or 1}")
     lines.append(f"注文番号 {order['AmazonOrderId']}")
-    lines.append(ORDER_URL.format(order['AmazonOrderId']))
     return '\n'.join(lines)
 
 

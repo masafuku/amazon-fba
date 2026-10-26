@@ -69,7 +69,6 @@ class TestOrderWatch(unittest.TestCase):
         self.assertIn('概算利益 約$3.12', self.sent[0])
         self.assertIn('FC在庫 11点', self.sent[0])
         self.assertIn('A-2', self.sent[0])
-        self.assertIn('https://sellercentral.amazon.com/orders-v3/order/A-2', self.sent[0])
         self.run_watch()
         self.assertEqual(len(self.sent), 1)
 
@@ -88,7 +87,6 @@ class TestOrderWatch(unittest.TestCase):
         self.items = {'A-1': [item()]}
         self.run_watch()
         self.assertIn('保留中(支払い確認待ち) → 出荷済み', self.sent[0])
-        self.assertIn('https://sellercentral.amazon.com/orders-v3/order/A-1', self.sent[0])
         self.orders = [order('A-1', 'Canceled')]
         self.run_watch()
         self.assertEqual(len(self.sent), 2)
