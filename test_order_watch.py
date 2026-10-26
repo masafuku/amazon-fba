@@ -1,4 +1,3 @@
-import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -15,11 +14,8 @@ def order(order_id, status='Pending', date='2026-10-25T17:01:49Z'):
     return {'AmazonOrderId': order_id, 'OrderStatus': status, 'PurchaseDate': date}
 
 
-def item(asin='B0FKTF2XVZ', qty=1, price=None, title='Sanrio FriXion Ball Knock Set'):
-    entry = {'ASIN': asin, 'QuantityOrdered': qty, 'Title': title}
-    if price is not None:
-        entry['ItemPrice'] = {'CurrencyCode': 'USD', 'Amount': str(price)}
-    return entry
+def item(asin='B0FKTF2XVZ', qty=1, title='Sanrio FriXion Ball Knock Set'):
+    return {'ASIN': asin, 'QuantityOrdered': qty, 'Title': title}
 
 
 class TestOrderWatch(unittest.TestCase):
@@ -33,10 +29,7 @@ class TestOrderWatch(unittest.TestCase):
         self.items = {}
         for name, value in [
             ('fetch_orders', lambda since: self.orders),
-            ('fetch_items', lambda order_id: self.items.get(order_id, [])),
-            ('fetch_stock', lambda: {'B0FKTF2XVZ': 11}),
-            ('estimate_profit', lambda asin, price, qty=1: 3.12 * qty),
-            ('_listing_price', lambda asin: 15.0),
+            ('fetch_items', lambda order_id: self.items.get(order_id, [item()])),
         ]:
             p = mock.patch.object(order_watch, name, value)
             p.start()
@@ -56,47 +49,46 @@ class TestOrderWatch(unittest.TestCase):
         self.assertEqual(self.sent, [])
         self.assertEqual(order_watch._state(), {'A-1': 'Shipped'})
 
-    def test_new_order_is_notified_once(self):
+    def test_new_order_is_notified_once_with_name_and_time_only(self):
         self.orders = [order('A-1', 'Shipped')]
         self.run_watch()
         self.orders = [order('A-1', 'Shipped'), order('A-2')]
-        self.items = {'A-2': [item(price=15.0)]}
         result = self.run_watch()
         self.assertEqual(result['new'], ['A-2'])
-        self.assertEqual(len(self.sent), 1)
-        self.assertIn('【新規注文 10/26 02:01】保留中', self.sent[0])
-        self.assertIn('$15.00', self.sent[0])
-        self.assertIn('概算利益 約$3.12', self.sent[0])
-        self.assertIn('FC在庫 11点', self.sent[0])
-        self.assertIn('A-2', self.sent[0])
+        self.assertEqual(self.sent, ['【売れた 10/26 02:01】\nSanrio FriXion Ball Knock Set'])
         self.run_watch()
         self.assertEqual(len(self.sent), 1)
 
-    def test_pending_order_without_price_uses_listing_price(self):
+    def test_quantity_is_shown_only_when_more_than_one(self):
         self.orders = [order('A-1', 'Shipped')]
         self.run_watch()
         self.orders.append(order('A-2'))
-        self.items = {'A-2': [item()]}
+        self.items = {'A-2': [item(qty=3)]}
         self.run_watch()
-        self.assertIn('$15.00(出品価格から推定)', self.sent[0])
+        self.assertIn('Sanrio FriXion Ball Knock Set ×3', self.sent[0])
 
-    def test_status_change_and_cancel_are_notified(self):
+    def test_shipped_and_cancel_are_notified(self):
         self.orders = [order('A-1', 'Pending')]
         self.run_watch()
         self.orders = [order('A-1', 'Shipped')]
-        self.items = {'A-1': [item()]}
         self.run_watch()
-        self.assertIn('保留中(支払い確認待ち) → 出荷済み', self.sent[0])
+        self.assertEqual(self.sent[0], '【出荷 10/26 12:00】\nSanrio FriXion Ball Knock Set')
         self.orders = [order('A-1', 'Canceled')]
         self.run_watch()
-        self.assertEqual(len(self.sent), 2)
-        self.assertIn('⚠ 出荷済み → キャンセル', self.sent[1])
+        self.assertEqual(self.sent[1], '【⚠ キャンセル 10/26 12:00】\nSanrio FriXion Ball Knock Set')
+
+    def test_change_to_pending_is_recorded_silently(self):
+        self.orders = [order('A-1', 'Unshipped')]
+        self.run_watch()
+        self.orders = [order('A-1', 'Pending')]
+        self.run_watch()
+        self.assertEqual(self.sent, [])
+        self.assertEqual(order_watch._state(), {'A-1': 'Pending'})
 
     def test_failed_send_is_retried_next_time(self):
         self.orders = [order('A-1', 'Shipped')]
         self.run_watch()
         self.orders.append(order('A-2'))
-        self.items = {'A-2': [item(price=15.0)]}
 
         def boom(_):
             raise RuntimeError('LINE down')
@@ -111,18 +103,10 @@ class TestOrderWatch(unittest.TestCase):
         self.orders = [order('A-1', 'Shipped')]
         self.run_watch()
         self.orders.append(order('A-2'))
-        self.items = {'A-2': [item(price=15.0)]}
         result = self.run_watch(dry_run=True)
         self.assertEqual(result['new'], ['A-2'])
         self.assertEqual(self.sent, [])
         self.assertNotIn('A-2', order_watch._state())
-
-    def test_unit_cost_uses_purchase_records(self):
-        with sqlite3.connect(ops_finance.DB_PATH) as conn:
-            conn.execute('INSERT INTO jp_purchase_records (order_date, sd_reception_no, product_name, quantity, amount_jpy, asin) '
-                         'VALUES (?, ?, ?, ?, ?, ?)', ('2026-08-26', '1', 'x', 20, 14300.0, 'B0FKTF2XVZ'))
-        self.assertEqual(order_watch.unit_cost_jpy('B0FKTF2XVZ'), 715.0)
-        self.assertIsNone(order_watch.unit_cost_jpy('NOPE'))
 
 
 if __name__ == '__main__':
