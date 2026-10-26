@@ -296,5 +296,33 @@ class TestIngest(StockLedgerTestCase):
         self.assertEqual(row['days_of_cover'], 40.0)
 
 
+class TestShipmentCosts(StockLedgerTestCase):
+    def test_record_and_summarize_in_usd(self):
+        sl.record_shipment_cost('FBA19RGV6RMN', 'placement', 14.40, 'USD', 'Amazon納品プラン')
+        sl.record_shipment_cost('FBA19RGV6RMN', 'handling', 1500, 'JPY')
+        summary = sl.shipment_costs_summary()
+        self.assertEqual(len(summary), 1)
+        self.assertEqual(summary[0]['confirmation_id'], 'FBA19RGV6RMN')
+        self.assertAlmostEqual(summary[0]['total_usd'], 14.40 + 1500 / sl.USD_JPY)
+        text = sl.format_shipment_costs(summary)
+        self.assertIn('Amazon納品のプレースメント手数料: $14.40', text)
+        self.assertIn('発送代行費: ¥1,500', text)
+
+    def test_same_shipment_and_type_is_overwritten(self):
+        sl.record_shipment_cost('FBA19TRVZBZ7', 'placement', 33.0)
+        sl.record_shipment_cost('FBA19TRVZBZ7', 'placement', 34.88)
+        items = sl.shipment_costs_summary()[0]['items']
+        self.assertEqual([i['amount'] for i in items], [34.88])
+
+    def test_rejects_unknown_type_and_currency(self):
+        with self.assertRaises(ValueError):
+            sl.record_shipment_cost('FBA19X', 'bogus', 1.0)
+        with self.assertRaises(ValueError):
+            sl.record_shipment_cost('FBA19X', 'placement', 1.0, 'EUR')
+
+    def test_empty_summary_message(self):
+        self.assertEqual(sl.format_shipment_costs(sl.shipment_costs_summary()), '登録された便の費用はありません')
+
+
 if __name__ == '__main__':
     unittest.main()

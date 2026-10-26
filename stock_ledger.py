@@ -762,6 +762,63 @@ def format_pipeline(rows: list) -> str:
     return '\n'.join(lines)
 
 
+COST_TYPES = {
+    'placement': 'Amazon納品のプレースメント手数料',
+    'freight': 'TNK国際運賃',
+    'fuel': '燃油サーチャージ',
+    'handling': '発送代行費',
+    'customs_docs': '通関書類作成費',
+    'domestic': '国内送料(自宅→TNK)',
+    'other': 'その他',
+}
+USD_JPY = 150.0  # 便の費用の合計をドルで見るときの換算(pricing_rule.EXCHANGE_RATEと同じ)
+
+
+def record_shipment_cost(confirmation_id: str, cost_type: str, amount: float, currency: str = 'USD', note: str = '') -> None:
+    """便(Amazonの納品ID)ごとの費用の実額を登録する。同じ便・同じ種別は上書き(再登録で直せる)。"""
+    if cost_type not in COST_TYPES:
+        raise ValueError(f"費用の種別は {', '.join(COST_TYPES)} のどれかです: {cost_type}")
+    currency = currency.upper()
+    if currency not in ('USD', 'JPY'):
+        raise ValueError('通貨は USD か JPY です')
+    of.init_ops_tables()
+    with sqlite3.connect(of.DB_PATH) as conn:
+        conn.execute(
+            '''INSERT INTO shipment_costs (confirmation_id, cost_type, amount, currency, note, recorded_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(confirmation_id, cost_type) DO UPDATE SET
+                 amount = excluded.amount, currency = excluded.currency, note = excluded.note, recorded_at = excluded.recorded_at''',
+            (confirmation_id, cost_type, float(amount), currency, note, _now()))
+
+
+def shipment_costs_summary() -> list[dict]:
+    """便ごとの費用の一覧。合計は米ドル換算(円は USD_JPY で割る)。"""
+    of.init_ops_tables()
+    with sqlite3.connect(of.DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute('SELECT * FROM shipment_costs ORDER BY confirmation_id, cost_type').fetchall()
+    by_shipment: dict[str, dict] = {}
+    for row in rows:
+        entry = by_shipment.setdefault(row['confirmation_id'], {'confirmation_id': row['confirmation_id'], 'items': [], 'total_usd': 0.0})
+        usd = row['amount'] if row['currency'] == 'USD' else row['amount'] / USD_JPY
+        entry['items'].append({'type': row['cost_type'], 'amount': row['amount'], 'currency': row['currency'], 'note': row['note'], 'usd': usd})
+        entry['total_usd'] += usd
+    return list(by_shipment.values())
+
+
+def format_shipment_costs(summary: list[dict]) -> str:
+    if not summary:
+        return '登録された便の費用はありません'
+    lines = []
+    for shipment in summary:
+        lines.append(f"{shipment['confirmation_id']}  合計 約${shipment['total_usd']:,.2f}(¥は{USD_JPY:.0f}円/$で換算)")
+        for item in shipment['items']:
+            amount = f"${item['amount']:,.2f}" if item['currency'] == 'USD' else f"¥{item['amount']:,.0f}"
+            note = f"  {item['note']}" if item['note'] else ''
+            lines.append(f"  {COST_TYPES[item['type']]}: {amount}{note}")
+    return '\n'.join(lines)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description='在庫台帳')
     sub = parser.add_subparsers(dest='command', required=True)
@@ -790,6 +847,13 @@ def main() -> None:
     mapping = sub.add_parser('map-sd')
     mapping.add_argument('sd_product_no')
     mapping.add_argument('asin')
+    cost = sub.add_parser('ship-cost', help='便ごとの費用の実額を登録(同じ便・同じ種別は上書き)')
+    cost.add_argument('confirmation_id', help='Amazonの納品ID 例: FBA19RGV6RMN')
+    cost.add_argument('cost_type', choices=list(COST_TYPES))
+    cost.add_argument('amount', type=float)
+    cost.add_argument('--currency', default='USD', choices=['USD', 'JPY'])
+    cost.add_argument('--note', default='')
+    sub.add_parser('ship-costs', help='便ごとの費用の一覧と合計')
     args = parser.parse_args()
 
     if args.command == 'ingest':
@@ -805,6 +869,11 @@ def main() -> None:
         print('\n'.join(alerts()) or 'なし')
     elif args.command == 'since':
         print(gmail_since())
+    elif args.command == 'ship-cost':
+        record_shipment_cost(args.confirmation_id, args.cost_type, args.amount, args.currency, args.note)
+        print('ok')
+    elif args.command == 'ship-costs':
+        print(format_shipment_costs(shipment_costs_summary()))
     elif args.command == 'alerts':
         print('\n'.join(alerts()) or 'なし')
     elif args.command == 'digest':

@@ -406,6 +406,18 @@ def init_ops_tables():
                 key TEXT PRIMARY KEY,
                 value TEXT
             );
+
+            -- 便(Amazonの納品ID)ごとの費用の実額。箱数・重量・納品先の分け方で変わるため、
+            -- 商品ごとの原価には按分せず、便の損益で引く。1便×1費用種別につき1行(再登録は上書き)。
+            CREATE TABLE IF NOT EXISTS shipment_costs (
+                confirmation_id TEXT NOT NULL,    -- 例: FBA19RGV6RMN
+                cost_type TEXT NOT NULL,          -- placement / freight / fuel / handling / customs_docs / domestic / other
+                amount REAL NOT NULL,
+                currency TEXT NOT NULL,           -- USD / JPY
+                note TEXT,
+                recorded_at TEXT,
+                PRIMARY KEY (confirmation_id, cost_type)
+            );
             '''
         )
         purchase_columns = {row[1] for row in conn.execute('PRAGMA table_info(jp_purchase_records)').fetchall()}
