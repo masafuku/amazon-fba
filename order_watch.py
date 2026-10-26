@@ -71,7 +71,7 @@ def _names(items: list[dict]) -> str:
         qty = int(item.get('QuantityOrdered') or 1)
         title = (item.get('Title') or item.get('ASIN') or '')[:TITLE_LENGTH]
         parts.append(f'{title} ×{qty}' if qty > 1 else title)
-    return '\n'.join(parts)
+    return ' / '.join(parts)
 
 
 def _jst(raw: str | None) -> str:
@@ -82,12 +82,12 @@ def _jst(raw: str | None) -> str:
 
 
 def format_new(order: dict, items: list[dict]) -> str:
-    return f"【売れた {_jst(order.get('PurchaseDate'))}】\n{_names(items)}"
+    return f"【売れた {_jst(order.get('PurchaseDate'))}】{_names(items)}"
 
 
 def format_change(order: dict, items: list[dict], now: datetime) -> str:
     label = STATUS_LABEL[order.get('OrderStatus')]
-    return f"【{label} {now.astimezone(JST):%m/%d %H:%M}】\n{_names(items)}"
+    return f"【{label} {now.astimezone(JST):%m/%d %H:%M}】{_names(items)}"
 
 
 def _line_sender():
