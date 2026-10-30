@@ -1997,6 +1997,8 @@ GATED_BRAND_TERMS = {
     'パイロット': ('pilot', 'パイロット', 'frixion', 'フリクション'),
     '三菱鉛筆': ('mitsubishi pencil', '三菱鉛筆', 'uni-ball', 'uniball', 'uni ball', 'jetstream', 'ジェットストリーム',
               'kuru toga', 'クルトガ', 'ユニボール'),
+    # 呉竹: 新規のブランド承認申請の受付が停止(2026-10-30、CEOが申請ページで確認。ASIN B0B87XPWB2)。
+    '呉竹': ('kuretake', '呉竹'),
 }
 
 
