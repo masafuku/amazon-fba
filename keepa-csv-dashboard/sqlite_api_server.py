@@ -1993,6 +1993,10 @@ GATED_BRAND_TERMS = {
     'タカラトミー': ('takara tomy', 'takaratomy', 'タカラトミー', 'beyblade', 'ベイブレード'),
     # MUJI: 卸ルートが無く、ネットストアの規約が転売目的の購入を禁止(2026-09-27、CEO判断で見送り)。
     '無印良品(MUJI)': ('muji', '無印良品', '良品計画'),
+    # パイロット・三菱鉛筆: 新規のブランド承認申請の受付が停止(2026-10-30、CEOが申請ページで確認)。
+    'パイロット': ('pilot', 'パイロット', 'frixion', 'フリクション'),
+    '三菱鉛筆': ('mitsubishi pencil', '三菱鉛筆', 'uni-ball', 'uniball', 'uni ball', 'jetstream', 'ジェットストリーム',
+              'kuru toga', 'クルトガ', 'ユニボール'),
 }
 
 
