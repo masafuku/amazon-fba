@@ -406,6 +406,18 @@ def init_ops_tables():
                 key TEXT PRIMARY KEY,
                 value TEXT
             );
+
+            -- 便(Amazonの納品ID)ごとの費用の実額。箱数・重量・納品先の分け方で変わるため、
+            -- 商品ごとの原価には按分せず、便の損益で引く。1便×1費用種別につき1行(再登録は上書き)。
+            CREATE TABLE IF NOT EXISTS shipment_costs (
+                confirmation_id TEXT NOT NULL,    -- 例: FBA19RGV6RMN
+                cost_type TEXT NOT NULL,          -- placement / freight / fuel / handling / customs_docs / domestic / other
+                amount REAL NOT NULL,
+                currency TEXT NOT NULL,           -- USD / JPY
+                note TEXT,
+                recorded_at TEXT,
+                PRIMARY KEY (confirmation_id, cost_type)
+            );
             '''
         )
         purchase_columns = {row[1] for row in conn.execute('PRAGMA table_info(jp_purchase_records)').fetchall()}
@@ -1214,6 +1226,14 @@ GATED_BRAND_TERMS = {
     '無印良品(MUJI)': ('muji', '無印良品', '良品計画'),
     # Holbein: ブランド承認＋商品承認要件のため実質出品不可(2026-09-30確認)。
     'Holbein': ('holbein', 'ホルベイン'),
+    # パイロット・三菱鉛筆: 新規のブランド承認申請の受付が停止(2026-10-30、CEOが申請ページで確認)。
+    'パイロット': ('pilot', 'パイロット', 'frixion', 'フリクション'),
+    '三菱鉛筆': ('mitsubishi pencil', '三菱鉛筆', 'uni-ball', 'uniball', 'uni ball', 'jetstream', 'ジェットストリーム',
+              'kuru toga', 'クルトガ', 'ユニボール'),
+    # 呉竹: 新規のブランド承認申請の受付が停止(2026-10-30、CEOが申請ページで確認。ASIN B0B87XPWB2)。
+    '呉竹': ('kuretake', '呉竹'),
+    # ほぼ日: 同上(2026-10-31、ASIN B07DKKVQ9M)。
+    'ほぼ日': ('hobonichi', 'ほぼ日'),
 }
 
 
@@ -2951,11 +2971,18 @@ def list_sp_inbound_shipments() -> list:
     ]
 
 
+# まだ発送していない/無効な納品プランの状態。収支には実績(発送済みの便)だけを載せる。
+_UNSHIPPED_SHIPMENT_STATUSES = frozenset({'WORKING', 'READY_TO_SHIP', 'CANCELLED', 'DELETED', 'ERROR'})
+
+
 def get_shipment_pnl(usd_to_jpy: float = 150.0) -> list:
-    """FBA納品便(sp_inbound_shipments)ごとのP&L概算。
+    """FBA納品便(sp_inbound_shipments)ごとのP&L概算。発送済みの便だけが対象
+    (作成中・発送前・取消の納品プランは、原価も売上の割り当ても含めない)。
 
     原価: 便の各ASINの数量 × jp_purchase_recordsのその便に最も近い日付の仕入単価
     (+送料按分、既存のcost_by_asinロジックと同じ)。
+
+    売上は出荷済み(Shipped)の注文だけ。Pending・取消は実績ではないので数えない。
 
     売上: 正確なロット追跡はできない(Amazonはどの納品便由来の在庫が売れたかを
     教えない)ため、ASINごとに納品便を納品期間開始日の古い順に並べ、
@@ -2963,7 +2990,8 @@ def get_shipment_pnl(usd_to_jpy: float = 150.0) -> list:
     FIFO近似で先頭の便から順に割り当てる、という概算を行う。UI側で
     「概算」である旨を明記すること。"""
     init_ops_tables()
-    shipments = list_sp_inbound_shipments()
+    shipments = [s for s in list_sp_inbound_shipments()
+                 if (s['status'] or '').upper() not in _UNSHIPPED_SHIPMENT_STATUSES]
     if not shipments:
         return []
 
@@ -2981,7 +3009,7 @@ def get_shipment_pnl(usd_to_jpy: float = 150.0) -> list:
                    o.purchase_date AS purchase_date
             FROM sp_order_items oi
             JOIN sp_orders o ON o.order_id = oi.order_id
-            WHERE oi.asin IS NOT NULL
+            WHERE oi.asin IS NOT NULL AND o.order_status = 'Shipped'
             ORDER BY o.purchase_date ASC
             '''
         ).fetchall()
