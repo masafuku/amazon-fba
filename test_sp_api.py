@@ -341,10 +341,23 @@ class TestShipmentPnl(unittest.TestCase):
     def _shipment(self, shipment_id="sh1", confirmation_id="FBA1", window_start="2026-10-18T00:00Z"):
         return {
             "shipmentId": shipment_id, "planId": "plan1", "shipmentConfirmationId": confirmation_id,
-            "status": "READY_TO_SHIP", "destinationFc": "HIA1",
+            "status": "SHIPPED", "destinationFc": "HIA1",
             "deliveryWindowStart": window_start, "deliveryWindowEnd": "2026-10-24T23:59Z",
             "createdAt": "2026-09-29T00:00:00Z",
         }
+
+    def test_unshipped_plans_are_excluded(self):
+        of.upsert_jp_purchase_record({
+            "orderDate": "2026-10-10", "sdReceptionNo": "R1", "supplierName": "S",
+            "sdProductNo": "P1", "productName": "x", "janCode": None, "variant": None,
+            "unitPriceJpy": 150, "quantity": 30, "amountJpy": 4500, "asin": "B0RULER",
+        })
+        for sid, conf, status in (("sh1", "FBA1", "SHIPPED"), ("sh2", "FBA2", "READY_TO_SHIP"), ("sh3", "FBA3", "WORKING")):
+            ship = self._shipment(sid, conf)
+            ship["status"] = status
+            of.upsert_sp_inbound_shipment(ship, [{"asin": "B0RULER", "sku": "SKU1", "quantity": 30}])
+        result = of.get_shipment_pnl()
+        self.assertEqual([r["shipmentConfirmationId"] for r in result], ["FBA1"])
 
     def test_cost_only_when_no_sales_yet(self):
         of.upsert_jp_purchase_record({
@@ -444,7 +457,7 @@ class TestPurchaseAndSupplierViews(unittest.TestCase):
         of.upsert_sp_inbound_shipment(
             {
                 "shipmentId": "sh200", "planId": "plan200", "shipmentConfirmationId": "FBA200",
-                "status": "READY_TO_SHIP", "destinationFc": "HIA1",
+                "status": "SHIPPED", "destinationFc": "HIA1",
                 "deliveryWindowStart": "2026-10-18T00:00Z", "deliveryWindowEnd": "2026-10-24T23:59Z",
                 "createdAt": "2026-09-29T00:00:00Z",
             },
