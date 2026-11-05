@@ -347,6 +347,7 @@ export default function FinancePage() {
                                     <th className="px-2 py-2">販売数(概算)</th>
                                     <th className="px-2 py-2">原価</th>
                                     <th className="px-2 py-2">売上(概算)</th>
+                                    <th className="px-2 py-2">手数料(* 見込み含む)</th>
                                     <th className="px-2 py-2">純利益(概算)</th>
                                 </tr>
                             </thead>
@@ -370,6 +371,7 @@ export default function FinancePage() {
                                         <td className="px-2 py-2">{row.unitsSold}</td>
                                         <td className="px-2 py-2">{usd(row.costUsd)}</td>
                                         <td className="px-2 py-2">{usd(row.revenueUsd)}</td>
+                                        <td className="px-2 py-2">{usd(row.feesUsd)}{row.estimatedFeesUsd > 0 ? ' *' : ''}</td>
                                         <td className={`px-2 py-2 font-semibold ${row.netProfitUsd >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                                             {usd(row.netProfitUsd)}
                                         </td>

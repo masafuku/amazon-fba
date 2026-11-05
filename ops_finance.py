@@ -2982,7 +2982,8 @@ def get_shipment_pnl(usd_to_jpy: float = 150.0) -> list:
     原価: 便の各ASINの数量 × jp_purchase_recordsのその便に最も近い日付の仕入単価
     (+送料按分、既存のcost_by_asinロジックと同じ)。
 
-    売上は出荷済み(Shipped)の注文だけ。Pending・取消は実績ではないので数えない。
+    販売は出荷ではなく注文の時点で数える(CEO指示)。取消を除くPendingも含め、売価が未確定の
+    注文は相場のBuy Boxで見込む。
 
     売上: 正確なロット追跡はできない(Amazonはどの納品便由来の在庫が売れたかを
     教えない)ため、ASINごとに納品便を納品期間開始日の古い順に並べ、
@@ -3005,14 +3006,20 @@ def get_shipment_pnl(usd_to_jpy: float = 150.0) -> list:
         ).fetchall()
         sold_items = conn.execute(
             '''
-            SELECT oi.asin AS asin, oi.quantity AS quantity, oi.item_price_usd AS item_price_usd,
-                   o.purchase_date AS purchase_date
+            SELECT oi.order_id AS order_id, oi.asin AS asin, oi.quantity AS quantity,
+                   oi.item_price_usd AS item_price_usd, o.purchase_date AS purchase_date,
+                   o.order_status AS order_status
             FROM sp_order_items oi
             JOIN sp_orders o ON o.order_id = oi.order_id
-            WHERE oi.asin IS NOT NULL AND o.order_status = 'Shipped'
+            WHERE oi.asin IS NOT NULL AND UPPER(IFNULL(o.order_status, '')) NOT IN ('CANCELED', 'CANCELLED')
             ORDER BY o.purchase_date ASC
             '''
         ).fetchall()
+        buy_box_by_asin = {r[0]: r[1] for r in conn.execute('SELECT asin, buy_box_usd FROM market_prices')}
+        # 注文ごとの手数料: 確定分(sp_financial_events)があればそれ、無ければ見込み(相場の手数料)。
+        actual_fee_by_order = {r[0]: r[1] or 0.0 for r in conn.execute(
+            'SELECT order_id, SUM(amount_usd) FROM sp_financial_events GROUP BY order_id')}
+        estimated_fee_by_order = _estimated_fees_by_order(conn, '2000-01-01', set(actual_fee_by_order))
 
     # ASINごとの仕入単価履歴(着地原価)。便の納品期間開始日に最も近い(かつそれ以前の)
     # 仕入れ記録を使う。無ければ直近(最後)の記録にフォールバック。
@@ -3033,10 +3040,18 @@ def get_shipment_pnl(usd_to_jpy: float = 150.0) -> list:
 
     # ASINごとの未消化販売キュー(FIFO)。(quantity, unit_revenue_usd)
     sales_queue: dict = {}
+    qty_by_order: dict = {}
     for row in sold_items:
-        sales_queue.setdefault(row['asin'], []).append(
-            {'qty': row['quantity'] or 0, 'unitRevenue': row['item_price_usd'] or 0}
-        )
+        qty_by_order[row['order_id']] = qty_by_order.get(row['order_id'], 0) + (row['quantity'] or 0)
+    for row in sold_items:
+        order_fee = actual_fee_by_order.get(row['order_id'], estimated_fee_by_order.get(row['order_id'], 0.0))
+        order_qty = qty_by_order.get(row['order_id']) or 0
+        price, _ = _estimated_price(row, buy_box_by_asin)
+        sales_queue.setdefault(row['asin'], []).append({
+            'qty': row['quantity'] or 0, 'unitRevenue': price or 0,
+            'unitFee': (order_fee / order_qty) if order_qty else 0.0,
+            'estimated': row['order_id'] not in actual_fee_by_order,
+        })
 
     # 便をASINごとに納品期間開始日の古い順で処理するため、まずASIN×便の一覧を作る
     shipments_sorted = sorted(shipments, key=lambda s: s['deliveryWindowStart'] or s['createdAt'] or '')
@@ -3046,6 +3061,8 @@ def get_shipment_pnl(usd_to_jpy: float = 150.0) -> list:
         as_of = shipment['deliveryWindowStart'] or shipment['createdAt']
         total_cost_usd = 0.0
         total_revenue_usd = 0.0
+        total_fees_usd = 0.0
+        estimated_fees_usd = 0.0
         total_units_shipped = 0
         total_units_sold = 0
         for item in shipment['items']:
@@ -3060,13 +3077,16 @@ def get_shipment_pnl(usd_to_jpy: float = 150.0) -> list:
                 sale = queue[0]
                 take = min(remaining, sale['qty'])
                 total_revenue_usd += take * sale['unitRevenue']
+                total_fees_usd += take * sale['unitFee']
+                if sale['estimated']:
+                    estimated_fees_usd += take * sale['unitFee']
                 total_units_sold += take
                 sale['qty'] -= take
                 remaining -= take
                 if sale['qty'] <= 0:
                     queue.pop(0)
 
-        net_profit_usd = total_revenue_usd - total_cost_usd
+        net_profit_usd = total_revenue_usd - total_fees_usd - total_cost_usd
         result.append({
             'shipmentId': shipment['shipmentId'],
             'shipmentConfirmationId': shipment['shipmentConfirmationId'],
@@ -3078,6 +3098,8 @@ def get_shipment_pnl(usd_to_jpy: float = 150.0) -> list:
             'unitsSold': total_units_sold,
             'costUsd': round(total_cost_usd, 2),
             'revenueUsd': round(total_revenue_usd, 2),
+            'feesUsd': round(total_fees_usd, 2),
+            'estimatedFeesUsd': round(estimated_fees_usd, 2),
             'netProfitUsd': round(net_profit_usd, 2),
             'items': shipment['items'],
         })
