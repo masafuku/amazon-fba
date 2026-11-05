@@ -4,6 +4,8 @@ import {
     Bar,
     BarChart,
     CartesianGrid,
+    Cell,
+    LabelList,
     ResponsiveContainer,
     Tooltip,
     XAxis,
@@ -38,6 +40,19 @@ function AsinLink({ asin }) {
     return (
         <a href={`#candidate/${encodeURIComponent(asin)}`} className="font-mono text-xs text-cyan-400 hover:underline">
             {asin}
+        </a>
+    );
+}
+
+function NameLink({ asin, name }) {
+    if (!asin) return <span>-</span>;
+    return (
+        <a
+            href={`#candidate/${encodeURIComponent(asin)}`}
+            title={name || asin}
+            className="block max-w-[16rem] truncate text-cyan-400 hover:underline"
+        >
+            {name || asin}
         </a>
     );
 }
@@ -93,15 +108,28 @@ export default function FinancePage() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [days]);
 
+    // ウォーターフォール: 売上から項目を引いていき、小計(固定費前利益)・合計(純利益)は地面から立てる。
     const chartData = useMemo(() => {
         if (!summary) return [];
-        return [
-            { name: '売上', value: summary.revenueUsd },
-            { name: '原価', value: -summary.cogsUsd },
-            { name: '手数料', value: -summary.feesUsd },
-            { name: '固定費', value: -summary.fixedCostUsd },
-            { name: '純利益', value: summary.netProfitUsd },
+        const gross = summary.revenueUsd - summary.feesUsd - summary.cogsUsd;
+        const steps = [
+            { name: '売上', kind: 'up', delta: summary.revenueUsd },
+            { name: '原価', kind: 'down', delta: -summary.cogsUsd },
+            { name: '手数料', kind: 'down', delta: -summary.feesUsd },
+            { name: '固定費前利益', kind: 'total', total: gross },
+            { name: '固定費', kind: 'down', delta: -summary.fixedCostUsd },
+            { name: '純利益', kind: 'total', total: summary.netProfitUsd },
         ];
+        let running = 0;
+        return steps.map((step) => {
+            if (step.kind === 'total') {
+                running = step.total;
+                return { name: step.name, kind: 'total', amount: step.total, range: [Math.min(0, step.total), Math.max(0, step.total)] };
+            }
+            const from = running;
+            running += step.delta;
+            return { name: step.name, kind: step.kind, amount: step.delta, range: [Math.min(from, running), Math.max(from, running)] };
+        });
     }, [summary]);
 
     const coveragePct = summary?.fixedCostCoveragePct;
@@ -164,6 +192,11 @@ export default function FinancePage() {
                         <SummaryCard
                             label={summary.estimatedFeesUsd > 0 ? `手数料(うち見込み ${usd(summary.estimatedFeesUsd)})` : '実手数料'}
                             value={usd(summary.feesUsd)}
+                        />
+                        <SummaryCard
+                            label="固定費前利益"
+                            value={usd(summary.revenueUsd - summary.feesUsd - summary.cogsUsd)}
+                            emphasis={summary.revenueUsd - summary.feesUsd - summary.cogsUsd >= 0 ? 'positive' : 'negative'}
                         />
                         <SummaryCard label="固定費按分" value={usd(summary.fixedCostUsd)} />
                         <SummaryCard
@@ -231,17 +264,23 @@ export default function FinancePage() {
                     </div>
 
                     <div className="rounded-xl bg-slate-900 p-4">
-                        <h2 className="mb-3 text-sm font-semibold text-slate-300">内訳(期間合計)</h2>
+                        <h2 className="mb-1 text-sm font-semibold text-slate-300">内訳(期間合計)</h2>
+                        <p className="mb-3 text-xs text-slate-500"><span className="text-blue-400">■</span> 増加 <span className="text-orange-400">■</span> 減少 <span className="text-slate-400">■</span> 小計・合計</p>
                         <ResponsiveContainer width="100%" height={220}>
                             <BarChart data={chartData}>
                                 <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
                                 <XAxis dataKey="name" stroke="#94a3b8" fontSize={12} />
                                 <YAxis stroke="#94a3b8" fontSize={12} />
                                 <Tooltip
-                                    formatter={(value) => usd(value)}
+                                    formatter={(value, name, item) => usd(item.payload.amount)}
                                     contentStyle={{ backgroundColor: '#0f172a', border: '1px solid #334155' }}
                                 />
-                                <Bar dataKey="value" fill="#22d3ee" radius={[4, 4, 0, 0]} />
+                                <Bar dataKey="range" radius={[3, 3, 0, 0]}>
+                                    {chartData.map((d) => (
+                                        <Cell key={d.name} fill={d.kind === 'up' ? '#3b82f6' : d.kind === 'down' ? '#f97316' : '#94a3b8'} />
+                                    ))}
+                                    <LabelList dataKey="amount" position="top" fill="#cbd5e1" fontSize={11} formatter={(v) => usd(v)} />
+                                </Bar>
                             </BarChart>
                         </ResponsiveContainer>
                     </div>
@@ -259,7 +298,7 @@ export default function FinancePage() {
                         <table className="w-full text-left text-sm">
                             <thead>
                                 <tr className="text-slate-400">
-                                    <th className="px-2 py-2">ASIN</th>
+                                    <th className="px-2 py-2">商品名</th>
                                     <th className="px-2 py-2">SKU</th>
                                     <th className="px-2 py-2">在庫数</th>
                                     <th className="px-2 py-2">直近30日販売数</th>
@@ -269,7 +308,7 @@ export default function FinancePage() {
                             <tbody>
                                 {inventory.map((item) => (
                                     <tr key={item.asin} className="border-t border-slate-800">
-                                        <td className="px-2 py-2"><AsinLink asin={item.asin} /></td>
+                                        <td className="px-2 py-2"><NameLink asin={item.asin} name={item.productName} /></td>
                                         <td className="px-2 py-2 text-xs">{item.sku}</td>
                                         <td className="px-2 py-2">{item.fulfillableQuantity}</td>
                                         <td className="px-2 py-2">{item.soldLast30d}</td>
@@ -293,7 +332,7 @@ export default function FinancePage() {
                         <table className="w-full text-left text-sm">
                             <thead>
                                 <tr className="text-slate-400">
-                                    <th className="px-2 py-2">ASIN</th>
+                                    <th className="px-2 py-2">商品名</th>
                                     <th className="px-2 py-2">数量</th>
                                     <th className="px-2 py-2">売上</th>
                                     <th className="px-2 py-2">手数料</th>
@@ -305,7 +344,7 @@ export default function FinancePage() {
                             <tbody>
                                 {products.map((row) => (
                                     <tr key={row.asin} className="border-t border-slate-800">
-                                        <td className="px-2 py-2"><AsinLink asin={row.asin} /></td>
+                                        <td className="px-2 py-2"><NameLink asin={row.asin} name={row.productName} /></td>
                                         <td className="px-2 py-2">{row.units}</td>
                                         <td className="px-2 py-2">{usd(row.revenueUsd)}{row.estimatedRevenueUsd > 0 ? ' *' : ''}</td>
                                         <td className="px-2 py-2">{usd(row.feesUsd)}{row.estimatedFeesUsd > 0 ? ' *' : ''}</td>
@@ -345,9 +384,10 @@ export default function FinancePage() {
                                     <th className="px-2 py-2">納品期間</th>
                                     <th className="px-2 py-2">出荷数</th>
                                     <th className="px-2 py-2">販売数(概算)</th>
-                                    <th className="px-2 py-2">原価</th>
+                                    <th className="px-2 py-2">原価(うち国内送料)</th>
                                     <th className="px-2 py-2">売上(概算)</th>
                                     <th className="px-2 py-2">手数料(* 見込み含む)</th>
+                                    <th className="px-2 py-2">国際送料・関税(* 見積り)</th>
                                     <th className="px-2 py-2">純利益(概算)</th>
                                 </tr>
                             </thead>
@@ -369,9 +409,10 @@ export default function FinancePage() {
                                         </td>
                                         <td className="px-2 py-2">{row.unitsShipped}</td>
                                         <td className="px-2 py-2">{row.unitsSold}</td>
-                                        <td className="px-2 py-2">{usd(row.costUsd)}</td>
+                                        <td className="px-2 py-2">{usd(row.costUsd)}<span className="text-xs text-slate-500"> ({usd(row.domesticShippingUsd)})</span></td>
                                         <td className="px-2 py-2">{usd(row.revenueUsd)}</td>
                                         <td className="px-2 py-2">{usd(row.feesUsd)}{row.estimatedFeesUsd > 0 ? ' *' : ''}</td>
+                                        <td className="px-2 py-2">{usd((row.intlShippingUsd || 0) + (row.dutyUsd || 0))}{row.intlCostEstimated ? ' *' : ''}</td>
                                         <td className={`px-2 py-2 font-semibold ${row.netProfitUsd >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                                             {usd(row.netProfitUsd)}
                                         </td>
@@ -481,7 +522,7 @@ export default function FinancePage() {
                             <thead>
                                 <tr className="text-slate-400">
                                     <th className="px-2 py-2">注文日</th>
-                                    <th className="px-2 py-2">ASIN</th>
+                                    <th className="px-2 py-2">商品名</th>
                                     <th className="px-2 py-2">数量</th>
                                     <th className="px-2 py-2">金額</th>
                                     <th className="px-2 py-2">状態</th>
@@ -491,7 +532,7 @@ export default function FinancePage() {
                                 {orders.map((order) => (
                                     <tr key={order.orderId} className="border-t border-slate-800">
                                         <td className="px-2 py-2 text-xs">{formatDateTime(order.purchaseDate)}</td>
-                                        <td className="px-2 py-2"><AsinLink asin={order.asin} /></td>
+                                        <td className="px-2 py-2"><NameLink asin={order.asin} name={order.productName} /></td>
                                         <td className="px-2 py-2">{order.quantity}</td>
                                         <td className="px-2 py-2">{usd(order.itemPriceUsd)}</td>
                                         <td className="px-2 py-2 text-xs">{order.orderStatus}</td>

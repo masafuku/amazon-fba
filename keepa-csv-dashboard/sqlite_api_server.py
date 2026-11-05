@@ -1639,6 +1639,30 @@ def load_finance_summary(days: int = 30, usd_to_jpy: float = 150.0):
     }
 
 
+def _product_names(conn, asins):
+    """ASIN→商品名。仕入れ記録(SDの商品名)→候補の英語タイトル→お気に入りの順に引く。"""
+    names = {}
+    wanted = sorted({a for a in asins if a})
+    if not wanted:
+        return names
+    marks = ','.join('?' * len(wanted))
+    for table, col, order in (
+        ('jp_purchase_records', 'product_name', 'order_date DESC'),
+        ('favorites', 'title', 'updated_at DESC'),
+        ('agent_candidates', 'title', 'id DESC'),
+    ):
+        try:
+            rows = conn.execute(
+                f'SELECT asin, {col} FROM {table} WHERE asin IN ({marks}) AND {col} IS NOT NULL AND {col} != "" ORDER BY {order}',
+                wanted,
+            ).fetchall()
+        except sqlite3.Error:
+            continue
+        for asin, name in rows:
+            names.setdefault(asin, name)
+    return names
+
+
 def load_fba_inventory(days_for_velocity: int = 30):
     """在庫日数付きのFBA在庫一覧。ops_finance.pyのget_sp_fba_inventory_with_days_of_stock()と同一ロジック。"""
     since = (datetime.now(timezone.utc) - timedelta(days=days_for_velocity)).date().isoformat()
@@ -1654,6 +1678,7 @@ def load_fba_inventory(days_for_velocity: int = 30):
         inventory = conn.execute(
             'SELECT asin, sku, fnsku, fulfillable_quantity, snapshot_at FROM sp_fba_inventory'
         ).fetchall()
+        names = _product_names(conn, [r['asin'] for r in inventory])
 
     result = []
     for row in inventory:
@@ -1662,6 +1687,7 @@ def load_fba_inventory(days_for_velocity: int = 30):
         days_of_stock = (row['fulfillable_quantity'] / daily_rate) if daily_rate > 0 else None
         result.append({
             'asin': row['asin'],
+            'productName': names.get(row['asin']) or row['sku'],
             'sku': row['sku'],
             'fnsku': row['fnsku'],
             'fulfillableQuantity': row['fulfillable_quantity'],
@@ -1683,9 +1709,11 @@ def load_sp_orders(days: int = 30, limit: int = 100):
             ''',
             (since, limit),
         ).fetchall()
+        names = _product_names(conn, [r[2] for r in rows])
     return [
         {
             'orderId': order_id, 'purchaseDate': purchase_date, 'asin': asin, 'sku': sku,
+            'productName': names.get(asin) or sku,
             'quantity': quantity, 'itemPriceUsd': item_price_usd, 'orderStatus': order_status,
         }
         for order_id, purchase_date, asin, sku, quantity, item_price_usd, order_status in rows
@@ -1754,6 +1782,8 @@ def load_finance_products(days: int = 30, usd_to_jpy: float = 150.0):
         entry['feesUsd'] += allocated_fee + allocated_estimate
         entry['estimatedFeesUsd'] += allocated_estimate
 
+    with sqlite3.connect(DB_PATH) as name_conn:
+        names = _product_names(name_conn, list(by_asin))
     result = []
     for asin, entry in by_asin.items():
         cogs_jpy_per_unit = cost_by_asin.get(asin, 0) or 0
@@ -1761,6 +1791,7 @@ def load_finance_products(days: int = 30, usd_to_jpy: float = 150.0):
         net_profit_usd = entry['revenueUsd'] - entry['feesUsd'] - cogs_usd
         result.append({
             'asin': asin,
+            'productName': names.get(asin) or asin,
             'units': entry['units'],
             'revenueUsd': round(entry['revenueUsd'], 2),
             'estimatedRevenueUsd': round(entry['estimatedRevenueUsd'], 2),
@@ -1772,6 +1803,23 @@ def load_finance_products(days: int = 30, usd_to_jpy: float = 150.0):
         })
     result.sort(key=lambda r: r['revenueUsd'], reverse=True)
     return result
+
+
+# 便ごとの収支に入れる国際送料・関税の見積り(TNK請求書が届くまで)。第一便の概算
+# (運賃4,373+燃油2,044+発送代行1,500=7,917円÷90個。国内送料は原価に入っているので除く)。
+# 関税は仕入れ単価の12.5%(pricing_rule.IMPORT_DUTY_RATEと同じ)。実額は shipment_intl_costs に
+# 入れると、その便だけ見積りを置き換える。
+INTL_SHIPPING_JPY_PER_UNIT_ESTIMATE = 7917 / 90
+IMPORT_DUTY_RATE_ESTIMATE = 0.125
+SHIPMENT_INTL_COSTS_DDL = '''
+    CREATE TABLE IF NOT EXISTS shipment_intl_costs (
+        shipment_confirmation_id TEXT PRIMARY KEY,
+        shipping_jpy REAL NOT NULL,
+        duty_jpy REAL NOT NULL DEFAULT 0,
+        note TEXT,
+        updated_at TEXT
+    )
+'''
 
 
 def load_finance_shipments(usd_to_jpy: float = 150.0):
@@ -1836,13 +1884,25 @@ def load_finance_shipments(usd_to_jpy: float = 150.0):
     ]
 
     purchases_by_asin = {}
+    domestic_by_asin = {}
     for row in cost_by_asin_rows:
         shipping_per_unit = (row['shipping_cost_jpy'] / row['quantity']) if row['quantity'] else 0
         landed = (row['unit_price_jpy'] or 0) + shipping_per_unit
         purchases_by_asin.setdefault(row['asin'], []).append((row['order_date'] or '', landed))
+        domestic_by_asin.setdefault(row['asin'], []).append((row['order_date'] or '', shipping_per_unit))
 
     def landed_cost_for(asin, as_of_date):
         history = purchases_by_asin.get(asin)
+        if not history:
+            return 0.0
+        if not as_of_date:
+            return history[-1][1]
+        candidates = [cost for date, cost in history if date <= as_of_date]
+        return candidates[-1] if candidates else history[0][1]
+
+    def domestic_shipping_for(asin, as_of_date):
+        # landed_cost_for と同じ仕入れ(その日付以前で最新)の、1個あたり国内送料(仕入れ先→TNK倉庫)
+        history = domestic_by_asin.get(asin)
         if not history:
             return 0.0
         if not as_of_date:
@@ -1866,6 +1926,17 @@ def load_finance_shipments(usd_to_jpy: float = 150.0):
 
     shipments_sorted = sorted(shipments, key=lambda s: s['deliveryWindowStart'] or s['createdAt'] or '')
 
+    intl_costs = {}
+    try:
+        with sqlite3.connect(DB_PATH) as cost_conn:
+            cost_conn.execute(SHIPMENT_INTL_COSTS_DDL)
+            for sid, ship_jpy, duty_jpy in cost_conn.execute(
+                'SELECT shipment_confirmation_id, shipping_jpy, duty_jpy FROM shipment_intl_costs'
+            ):
+                intl_costs[sid] = (ship_jpy or 0, duty_jpy or 0)
+    except sqlite3.Error:
+        pass
+
     result = []
     for shipment in shipments_sorted:
         as_of = shipment['deliveryWindowStart'] or shipment['createdAt']
@@ -1875,11 +1946,15 @@ def load_finance_shipments(usd_to_jpy: float = 150.0):
         estimated_fees_usd = 0.0
         total_units_shipped = 0
         total_units_sold = 0
+        duty_estimate_usd = 0.0
+        domestic_shipping_usd = 0.0
         for item in shipment['items']:
             asin = item['asin']
             qty_shipped = item['quantity'] or 0
             total_units_shipped += qty_shipped
             total_cost_usd += (landed_cost_for(asin, as_of) / usd_to_jpy) * qty_shipped
+            domestic_shipping_usd += (domestic_shipping_for(asin, as_of) / usd_to_jpy) * qty_shipped
+            duty_estimate_usd += (landed_cost_for(asin, as_of) / usd_to_jpy) * qty_shipped * IMPORT_DUTY_RATE_ESTIMATE
 
             remaining = qty_shipped
             queue = sales_queue.get(asin, [])
@@ -1896,7 +1971,14 @@ def load_finance_shipments(usd_to_jpy: float = 150.0):
                 if sale['qty'] <= 0:
                     queue.pop(0)
 
-        net_profit_usd = total_revenue_usd - total_fees_usd - total_cost_usd
+        actual_intl = intl_costs.get(shipment['shipmentConfirmationId']) or intl_costs.get(shipment['shipmentId'])
+        if actual_intl:
+            intl_shipping_usd = actual_intl[0] / usd_to_jpy
+            duty_usd = actual_intl[1] / usd_to_jpy
+        else:
+            intl_shipping_usd = total_units_shipped * INTL_SHIPPING_JPY_PER_UNIT_ESTIMATE / usd_to_jpy
+            duty_usd = duty_estimate_usd
+        net_profit_usd = total_revenue_usd - total_fees_usd - total_cost_usd - intl_shipping_usd - duty_usd
         result.append({
             'shipmentId': shipment['shipmentId'],
             'shipmentConfirmationId': shipment['shipmentConfirmationId'],
@@ -1907,9 +1989,13 @@ def load_finance_shipments(usd_to_jpy: float = 150.0):
             'unitsShipped': total_units_shipped,
             'unitsSold': total_units_sold,
             'costUsd': round(total_cost_usd, 2),
+            'domesticShippingUsd': round(domestic_shipping_usd, 2),
             'revenueUsd': round(total_revenue_usd, 2),
             'feesUsd': round(total_fees_usd, 2),
             'estimatedFeesUsd': round(estimated_fees_usd, 2),
+            'intlShippingUsd': round(intl_shipping_usd, 2),
+            'dutyUsd': round(duty_usd, 2),
+            'intlCostEstimated': not actual_intl,
             'netProfitUsd': round(net_profit_usd, 2),
             'items': shipment['items'],
         })

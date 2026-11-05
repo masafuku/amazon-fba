@@ -2975,6 +2975,23 @@ def list_sp_inbound_shipments() -> list:
 _UNSHIPPED_SHIPMENT_STATUSES = frozenset({'WORKING', 'READY_TO_SHIP', 'CANCELLED', 'DELETED', 'ERROR'})
 
 
+# 便ごとの収支に入れる国際送料・関税の見積り(TNK請求書が届くまで)。第一便の概算
+# (運賃4,373+燃油2,044+発送代行1,500=7,917円÷90個。国内送料は原価に入っているので除く)。
+# 関税は仕入れ単価の12.5%(pricing_rule.IMPORT_DUTY_RATEと同じ)。実額は shipment_intl_costs に
+# 入れると、その便だけ見積りを置き換える。
+INTL_SHIPPING_JPY_PER_UNIT_ESTIMATE = 7917 / 90
+IMPORT_DUTY_RATE_ESTIMATE = 0.125
+SHIPMENT_INTL_COSTS_DDL = '''
+    CREATE TABLE IF NOT EXISTS shipment_intl_costs (
+        shipment_confirmation_id TEXT PRIMARY KEY,
+        shipping_jpy REAL NOT NULL,
+        duty_jpy REAL NOT NULL DEFAULT 0,
+        note TEXT,
+        updated_at TEXT
+    )
+'''
+
+
 def get_shipment_pnl(usd_to_jpy: float = 150.0) -> list:
     """FBA納品便(sp_inbound_shipments)ごとのP&L概算。発送済みの便だけが対象
     (作成中・発送前・取消の納品プランは、原価も売上の割り当ても含めない)。
@@ -3024,13 +3041,25 @@ def get_shipment_pnl(usd_to_jpy: float = 150.0) -> list:
     # ASINごとの仕入単価履歴(着地原価)。便の納品期間開始日に最も近い(かつそれ以前の)
     # 仕入れ記録を使う。無ければ直近(最後)の記録にフォールバック。
     purchases_by_asin: dict = {}
+    domestic_by_asin: dict = {}
     for row in cost_by_asin_rows:
         shipping_per_unit = (row['shipping_cost_jpy'] / row['quantity']) if row['quantity'] else 0
         landed = (row['unit_price_jpy'] or 0) + shipping_per_unit
         purchases_by_asin.setdefault(row['asin'], []).append((row['order_date'] or '', landed))
+        domestic_by_asin.setdefault(row['asin'], []).append((row['order_date'] or '', shipping_per_unit))
 
     def landed_cost_for(asin: str, as_of_date: str | None) -> float:
         history = purchases_by_asin.get(asin)
+        if not history:
+            return 0.0
+        if not as_of_date:
+            return history[-1][1]
+        candidates = [cost for date, cost in history if date <= as_of_date]
+        return candidates[-1] if candidates else history[0][1]
+
+    def domestic_shipping_for(asin: str, as_of_date: str | None) -> float:
+        # landed_cost_for と同じ仕入れの、1個あたり国内送料(仕入れ先→TNK倉庫)
+        history = domestic_by_asin.get(asin)
         if not history:
             return 0.0
         if not as_of_date:
@@ -3056,6 +3085,17 @@ def get_shipment_pnl(usd_to_jpy: float = 150.0) -> list:
     # 便をASINごとに納品期間開始日の古い順で処理するため、まずASIN×便の一覧を作る
     shipments_sorted = sorted(shipments, key=lambda s: s['deliveryWindowStart'] or s['createdAt'] or '')
 
+    intl_costs = {}
+    try:
+        with sqlite3.connect(DB_PATH) as cost_conn:
+            cost_conn.execute(SHIPMENT_INTL_COSTS_DDL)
+            for sid, ship_jpy, duty_jpy in cost_conn.execute(
+                'SELECT shipment_confirmation_id, shipping_jpy, duty_jpy FROM shipment_intl_costs'
+            ):
+                intl_costs[sid] = (ship_jpy or 0, duty_jpy or 0)
+    except sqlite3.Error:
+        pass
+
     result = []
     for shipment in shipments_sorted:
         as_of = shipment['deliveryWindowStart'] or shipment['createdAt']
@@ -3065,11 +3105,15 @@ def get_shipment_pnl(usd_to_jpy: float = 150.0) -> list:
         estimated_fees_usd = 0.0
         total_units_shipped = 0
         total_units_sold = 0
+        duty_estimate_usd = 0.0
+        domestic_shipping_usd = 0.0
         for item in shipment['items']:
             asin = item['asin']
             qty_shipped = item['quantity'] or 0
             total_units_shipped += qty_shipped
             total_cost_usd += (landed_cost_for(asin, as_of) / usd_to_jpy) * qty_shipped
+            domestic_shipping_usd += (domestic_shipping_for(asin, as_of) / usd_to_jpy) * qty_shipped
+            duty_estimate_usd += (landed_cost_for(asin, as_of) / usd_to_jpy) * qty_shipped * IMPORT_DUTY_RATE_ESTIMATE
 
             remaining = qty_shipped
             queue = sales_queue.get(asin, [])
@@ -3086,7 +3130,14 @@ def get_shipment_pnl(usd_to_jpy: float = 150.0) -> list:
                 if sale['qty'] <= 0:
                     queue.pop(0)
 
-        net_profit_usd = total_revenue_usd - total_fees_usd - total_cost_usd
+        actual_intl = intl_costs.get(shipment['shipmentConfirmationId']) or intl_costs.get(shipment['shipmentId'])
+        if actual_intl:
+            intl_shipping_usd = actual_intl[0] / usd_to_jpy
+            duty_usd = actual_intl[1] / usd_to_jpy
+        else:
+            intl_shipping_usd = total_units_shipped * INTL_SHIPPING_JPY_PER_UNIT_ESTIMATE / usd_to_jpy
+            duty_usd = duty_estimate_usd
+        net_profit_usd = total_revenue_usd - total_fees_usd - total_cost_usd - intl_shipping_usd - duty_usd
         result.append({
             'shipmentId': shipment['shipmentId'],
             'shipmentConfirmationId': shipment['shipmentConfirmationId'],
@@ -3097,9 +3148,13 @@ def get_shipment_pnl(usd_to_jpy: float = 150.0) -> list:
             'unitsShipped': total_units_shipped,
             'unitsSold': total_units_sold,
             'costUsd': round(total_cost_usd, 2),
+            'domesticShippingUsd': round(domestic_shipping_usd, 2),
             'revenueUsd': round(total_revenue_usd, 2),
             'feesUsd': round(total_fees_usd, 2),
             'estimatedFeesUsd': round(estimated_fees_usd, 2),
+            'intlShippingUsd': round(intl_shipping_usd, 2),
+            'dutyUsd': round(duty_usd, 2),
+            'intlCostEstimated': not actual_intl,
             'netProfitUsd': round(net_profit_usd, 2),
             'items': shipment['items'],
         })
