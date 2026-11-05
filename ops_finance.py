@@ -3685,8 +3685,20 @@ def get_sp_fba_inventory_with_days_of_stock(days_for_velocity: int = 30) -> list
         sold_by_asin = {
             row['asin']: row['total_qty']
             for row in conn.execute(
-                'SELECT asin, SUM(quantity) AS total_qty FROM sp_orders WHERE purchase_date >= ? GROUP BY asin',
+                '''SELECT oi.asin, SUM(oi.quantity) AS total_qty FROM sp_order_items oi
+                   JOIN sp_orders o ON o.order_id = oi.order_id
+                   WHERE o.purchase_date >= ? AND o.order_status != 'Canceled' GROUP BY oi.asin''',
                 (since,),
+            )
+        }
+        # アマゾンへ送付した数(未発送・取消の便は除く)
+        sent_by_asin = {
+            row[0]: row[1]
+            for row in conn.execute(
+                '''SELECT i.asin, SUM(i.quantity) FROM sp_inbound_shipment_items i
+                   JOIN sp_inbound_shipments s ON s.shipment_id = i.shipment_id
+                   WHERE UPPER(IFNULL(s.status, '')) NOT IN ('WORKING', 'READY_TO_SHIP', 'CANCELLED', 'DELETED', 'ERROR')
+                   GROUP BY i.asin'''
             )
         }
         inventory = conn.execute(
@@ -3703,6 +3715,7 @@ def get_sp_fba_inventory_with_days_of_stock(days_for_velocity: int = 30) -> list
                 'asin': row['asin'],
                 'sku': row['sku'],
                 'fnsku': row['fnsku'],
+                'sentQuantity': sent_by_asin.get(row['asin'], 0) or 0,
                 'fulfillableQuantity': row['fulfillable_quantity'],
                 'snapshotAt': row['snapshot_at'],
                 'soldLast30d': sold,

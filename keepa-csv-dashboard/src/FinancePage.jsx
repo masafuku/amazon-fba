@@ -66,6 +66,36 @@ function SupplierLink({ name }) {
     );
 }
 
+
+// 見出しクリックで昇順/降順に並べ替える。値が無い行(null)は常に末尾。
+function useSort(rows, defaultKey = null, defaultDir = 'desc') {
+    const [sort, setSort] = useState({ key: defaultKey, dir: defaultDir });
+    const sorted = useMemo(() => {
+        if (!sort.key) return rows;
+        const sign = sort.dir === 'asc' ? 1 : -1;
+        return [...rows].sort((a, b) => {
+            const x = a[sort.key];
+            const y = b[sort.key];
+            const xn = x === null || x === undefined || x === '';
+            const yn = y === null || y === undefined || y === '';
+            if (xn && yn) return 0;
+            if (xn) return 1;
+            if (yn) return -1;
+            if (typeof x === 'number' && typeof y === 'number') return (x - y) * sign;
+            return String(x).localeCompare(String(y), 'ja') * sign;
+        });
+    }, [rows, sort]);
+    const th = (label, key) => (
+        <th
+            className="cursor-pointer select-none whitespace-nowrap px-2 py-2 hover:text-slate-200"
+            onClick={() => setSort((p) => (p.key === key ? { key, dir: p.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: 'asc' }))}
+        >
+            {label}{sort.key === key ? (sort.dir === 'asc' ? ' ▲' : ' ▼') : ''}
+        </th>
+    );
+    return { rows: sorted, th };
+}
+
 export default function FinancePage() {
     const [days, setDays] = useState(30);
     const [summary, setSummary] = useState(null);
@@ -133,6 +163,12 @@ export default function FinancePage() {
     }, [summary]);
 
     const coveragePct = summary?.fixedCostCoveragePct;
+    const invS = useSort(inventory);
+    const prodS = useSort(products);
+    const shipS = useSort(shipments);
+    const poS = useSort(purchaseOrders);
+    const ordS = useSort(orders);
+
     const isNoDataYet = summary && summary.orderCount === 0 && inventory.length === 0;
 
     const toggleOrder = (key) => {
@@ -298,18 +334,19 @@ export default function FinancePage() {
                         <table className="w-full text-left text-sm">
                             <thead>
                                 <tr className="text-slate-400">
-                                    <th className="px-2 py-2">商品名</th>
-                                    <th className="px-2 py-2">SKU</th>
-                                    <th className="px-2 py-2">在庫数</th>
-                                    <th className="px-2 py-2">直近30日販売数</th>
-                                    <th className="px-2 py-2">在庫日数</th>
+                                    {invS.th('商品名', 'productName')}
+                                    {invS.th('SKU', 'sku')}
+                                    {invS.th('アマゾン送付数', 'sentQuantity')}{invS.th('在庫数', 'fulfillableQuantity')}
+                                    {invS.th('直近30日販売数', 'soldLast30d')}
+                                    {invS.th('在庫日数', 'daysOfStock')}
                                 </tr>
                             </thead>
                             <tbody>
-                                {inventory.map((item) => (
+                                {invS.rows.map((item) => (
                                     <tr key={item.asin} className="border-t border-slate-800">
                                         <td className="px-2 py-2"><NameLink asin={item.asin} name={item.productName} /></td>
                                         <td className="px-2 py-2 text-xs">{item.sku}</td>
+                                        <td className="px-2 py-2">{item.sentQuantity}</td>
                                         <td className="px-2 py-2">{item.fulfillableQuantity}</td>
                                         <td className="px-2 py-2">{item.soldLast30d}</td>
                                         <td className="px-2 py-2">
@@ -332,17 +369,17 @@ export default function FinancePage() {
                         <table className="w-full text-left text-sm">
                             <thead>
                                 <tr className="text-slate-400">
-                                    <th className="px-2 py-2">商品名</th>
-                                    <th className="px-2 py-2">数量</th>
-                                    <th className="px-2 py-2">売上</th>
-                                    <th className="px-2 py-2">手数料</th>
-                                    <th className="px-2 py-2">原価</th>
-                                    <th className="px-2 py-2">純利益</th>
-                                    <th className="px-2 py-2">利益率</th>
+                                    {prodS.th('商品名', 'productName')}
+                                    {prodS.th('数量', 'units')}
+                                    {prodS.th('売上', 'revenueUsd')}
+                                    {prodS.th('手数料', 'feesUsd')}
+                                    {prodS.th('原価', 'cogsUsd')}
+                                    {prodS.th('純利益', 'netProfitUsd')}
+                                    {prodS.th('利益率', 'marginPct')}
                                 </tr>
                             </thead>
                             <tbody>
-                                {products.map((row) => (
+                                {prodS.rows.map((row) => (
                                     <tr key={row.asin} className="border-t border-slate-800">
                                         <td className="px-2 py-2"><NameLink asin={row.asin} name={row.productName} /></td>
                                         <td className="px-2 py-2">{row.units}</td>
@@ -378,21 +415,21 @@ export default function FinancePage() {
                         <table className="w-full text-left text-sm">
                             <thead>
                                 <tr className="text-slate-400">
-                                    <th className="px-2 py-2">FBA Shipment ID</th>
-                                    <th className="px-2 py-2">状態</th>
-                                    <th className="px-2 py-2">納品先FC</th>
-                                    <th className="px-2 py-2">納品期間</th>
-                                    <th className="px-2 py-2">出荷数</th>
-                                    <th className="px-2 py-2">販売数(概算)</th>
-                                    <th className="px-2 py-2">原価(うち国内送料)</th>
-                                    <th className="px-2 py-2">売上(概算)</th>
-                                    <th className="px-2 py-2">手数料(* 見込み含む)</th>
-                                    <th className="px-2 py-2">国際送料・関税(* 見積り)</th>
-                                    <th className="px-2 py-2">純利益(概算)</th>
+                                    {shipS.th('FBA Shipment ID', 'shipmentConfirmationId')}
+                                    {shipS.th('状態', 'status')}
+                                    {shipS.th('納品先FC', 'destinationFc')}
+                                    {shipS.th('納品期間', 'deliveryWindowStart')}
+                                    {shipS.th('出荷数', 'unitsShipped')}
+                                    {shipS.th('販売数(概算)', 'unitsSold')}
+                                    {shipS.th('原価(うち国内送料)', 'costUsd')}
+                                    {shipS.th('売上(概算)', 'revenueUsd')}
+                                    {shipS.th('手数料(* 見込み含む)', 'feesUsd')}
+                                    {shipS.th('国際送料・関税(* 見積り)', 'intlShippingUsd')}
+                                    {shipS.th('純利益(概算)', 'netProfitUsd')}
                                 </tr>
                             </thead>
                             <tbody>
-                                {shipments.map((row) => (
+                                {shipS.rows.map((row) => (
                                     <tr
                                         key={row.shipmentId}
                                         className="cursor-pointer border-t border-slate-800 hover:bg-slate-800/40"
@@ -439,15 +476,15 @@ export default function FinancePage() {
                             <thead>
                                 <tr className="text-slate-400">
                                     <th className="px-2 py-2" />
-                                    <th className="px-2 py-2">発注日</th>
-                                    <th className="px-2 py-2">仕入先</th>
-                                    <th className="px-2 py-2">商品点数</th>
-                                    <th className="px-2 py-2">合計数量</th>
-                                    <th className="px-2 py-2">合計金額</th>
+                                    {poS.th('発注日', 'orderDate')}
+                                    {poS.th('仕入先', 'supplierName')}
+                                    {poS.th('商品点数', 'itemCount')}
+                                    {poS.th('合計数量', 'totalQuantity')}
+                                    {poS.th('合計金額', 'totalAmountJpy')}
                                 </tr>
                             </thead>
                             <tbody>
-                                {purchaseOrders.map((po) => {
+                                {poS.rows.map((po) => {
                                     const key = `${po.orderDate}__${po.supplierName}`;
                                     const isOpen = expandedOrders.has(key);
                                     return (
@@ -521,15 +558,15 @@ export default function FinancePage() {
                         <table className="w-full text-left text-sm">
                             <thead>
                                 <tr className="text-slate-400">
-                                    <th className="px-2 py-2">注文日</th>
-                                    <th className="px-2 py-2">商品名</th>
-                                    <th className="px-2 py-2">数量</th>
-                                    <th className="px-2 py-2">金額</th>
-                                    <th className="px-2 py-2">状態</th>
+                                    {ordS.th('注文日', 'purchaseDate')}
+                                    {ordS.th('商品名', 'productName')}
+                                    {ordS.th('数量', 'quantity')}
+                                    {ordS.th('金額', 'itemPriceUsd')}
+                                    {ordS.th('状態', 'orderStatus')}
                                 </tr>
                             </thead>
                             <tbody>
-                                {orders.map((order) => (
+                                {ordS.rows.map((order) => (
                                     <tr key={order.orderId} className="border-t border-slate-800">
                                         <td className="px-2 py-2 text-xs">{formatDateTime(order.purchaseDate)}</td>
                                         <td className="px-2 py-2"><NameLink asin={order.asin} name={order.productName} /></td>
