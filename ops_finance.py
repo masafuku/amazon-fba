@@ -3374,6 +3374,45 @@ def list_fixed_costs() -> list:
     ]
 
 
+def _estimated_price(row, buy_box_by_asin: dict):
+    """売価が未確定(Pending等で注文明細にItemPriceが無い)の注文行の見込み売価。
+    取得済みなら(価格, False)、未取得でキャンセルでなければ相場のBuy Box(価格, True)。"""
+    if row['item_price_usd'] is not None:
+        return row['item_price_usd'], False
+    if str(row['order_status'] or '').upper() in ('CANCELED', 'CANCELLED'):
+        return None, False
+    price = buy_box_by_asin.get(row['asin'])
+    return (price, True) if price else (None, False)
+
+
+def _estimated_fees_by_order(conn, since: str, actual_order_ids) -> dict:
+    """実手数料(sp_financial_events)がまだ入っていない注文の手数料見込み。Amazonは出荷の数日後に
+    手数料を確定するので、それまでは相場取得(market_prices)の紹介料率×売価+FBA手数料で仮置きする。
+    確定した注文は含めない。キャンセル・売価なしの注文も除く。"""
+    market = {
+        r[0]: (r[1], r[2], r[3], r[4]) for r in conn.execute(
+            'SELECT asin, buy_box_usd, referral_fee_usd, fba_fee_usd, other_fee_usd FROM market_prices'
+        )
+    }
+    estimated: dict = {}
+    for order_id, asin, qty, price in conn.execute(
+        '''
+        SELECT oi.order_id, oi.asin, oi.quantity, oi.item_price_usd
+        FROM sp_order_items oi JOIN sp_orders o ON o.order_id = oi.order_id
+        WHERE o.purchase_date >= ? AND UPPER(IFNULL(o.order_status, '')) NOT IN ('CANCELED', 'CANCELLED')
+        ''', (since,),
+    ):
+        if order_id in actual_order_ids or asin not in market or not qty:
+            continue
+        buy_box, referral, fba, other = market[asin]
+        if referral is None or fba is None or not buy_box:
+            continue
+        if price is None:
+            price = buy_box
+        estimated[order_id] = estimated.get(order_id, 0.0) + (referral / buy_box * price + fba + (other or 0.0)) * qty
+    return estimated
+
+
 def compute_finance_summary(days: int = 30, usd_to_jpy: float = 150.0) -> dict:
     """収支ページ用の集計。売上(sp_orders)・COGS(jp_purchase_records、ASINごと
     直近仕入単価)・実手数料(sp_financial_events)・固定費(fixed_costs月額)・
@@ -3392,7 +3431,8 @@ def compute_finance_summary(days: int = 30, usd_to_jpy: float = 150.0) -> dict:
         # だった。同期が進めば自然に解消する)。
         orders = conn.execute(
             '''
-            SELECT oi.asin AS asin, oi.quantity AS quantity, oi.item_price_usd AS item_price_usd
+            SELECT oi.asin AS asin, oi.quantity AS quantity, oi.item_price_usd AS item_price_usd,
+                   o.order_status AS order_status
             FROM sp_order_items oi
             JOIN sp_orders o ON o.order_id = oi.order_id
             WHERE o.purchase_date >= ?
@@ -3410,6 +3450,8 @@ def compute_finance_summary(days: int = 30, usd_to_jpy: float = 150.0) -> dict:
             (since,),
         ):
             fees_by_order[row['order_id']] = row['total'] or 0.0
+        estimated_fees_by_order = _estimated_fees_by_order(conn, since, set(fees_by_order))
+        buy_box_by_asin = {r[0]: r[1] for r in conn.execute('SELECT asin, buy_box_usd FROM market_prices')}
         # 着地原価(landed cost) = 商品単価 + その行に配分された送料/数量
         # (CEO: 「送料は商品ごとに配分して」— allocate_order_shipping()が
         # shipping_cost_jpyに書き込む。未配分(NULL)ならCOALESCEで0扱い)。
@@ -3427,8 +3469,16 @@ def compute_finance_summary(days: int = 30, usd_to_jpy: float = 150.0) -> dict:
         fixed_cost_rows = list_fixed_costs()
         monthly_fixed_jpy = sum(r['monthlyAmountJpy'] for r in fixed_cost_rows)
 
-    revenue_usd = sum((o['item_price_usd'] or 0) * (o['quantity'] or 0) for o in orders)
-    fees_usd = sum(fees_by_order.values())
+    revenue_usd = 0.0
+    estimated_revenue_usd = 0.0
+    for o in orders:
+        price, is_estimate = _estimated_price(o, buy_box_by_asin)
+        amount = (price or 0) * (o['quantity'] or 0)
+        revenue_usd += amount
+        if is_estimate:
+            estimated_revenue_usd += amount
+    estimated_fees_usd = sum(estimated_fees_by_order.values())
+    fees_usd = sum(fees_by_order.values()) + estimated_fees_usd
     cogs_usd = sum(
         (cost_by_asin.get(o['asin'], 0) or 0) / usd_to_jpy * (o['quantity'] or 0) for o in orders
     )
@@ -3451,8 +3501,10 @@ def compute_finance_summary(days: int = 30, usd_to_jpy: float = 150.0) -> dict:
         'periodDays': days,
         'orderCount': order_count,
         'revenueUsd': round(revenue_usd, 2),
+        'estimatedRevenueUsd': round(estimated_revenue_usd, 2),
         'cogsUsd': round(cogs_usd, 2),
         'feesUsd': round(fees_usd, 2),
+        'estimatedFeesUsd': round(estimated_fees_usd, 2),
         'fixedCostUsd': round(fixed_cost_period_usd, 2),
         'fixedCosts': fixed_costs_breakdown,
         'netProfitUsd': round(net_profit_usd, 2),
@@ -3474,7 +3526,7 @@ def get_per_product_pnl(days: int = 30, usd_to_jpy: float = 150.0) -> list:
         items = conn.execute(
             '''
             SELECT oi.order_id AS order_id, oi.asin AS asin, oi.quantity AS quantity,
-                   oi.item_price_usd AS item_price_usd
+                   oi.item_price_usd AS item_price_usd, o.order_status AS order_status
             FROM sp_order_items oi
             JOIN sp_orders o ON o.order_id = oi.order_id
             WHERE o.purchase_date >= ? AND oi.asin IS NOT NULL
@@ -3492,6 +3544,8 @@ def get_per_product_pnl(days: int = 30, usd_to_jpy: float = 150.0) -> list:
             (since,),
         ):
             fees_by_order[row['order_id']] = row['total'] or 0.0
+        estimated_fees_by_order = _estimated_fees_by_order(conn, since, set(fees_by_order))
+        buy_box_by_asin = {r[0]: r[1] for r in conn.execute('SELECT asin, buy_box_usd FROM market_prices')}
         cost_by_asin = {}
         for row in conn.execute(
             '''
@@ -3513,11 +3567,17 @@ def get_per_product_pnl(days: int = 30, usd_to_jpy: float = 150.0) -> list:
         qty = it['quantity'] or 0
         order_total_qty = qty_by_order.get(it['order_id']) or 0
         order_fee = fees_by_order.get(it['order_id'], 0.0)
+        estimated_fee = estimated_fees_by_order.get(it['order_id'], 0.0)
         allocated_fee = (order_fee * qty / order_total_qty) if order_total_qty else 0.0
-        entry = by_asin.setdefault(asin, {'units': 0, 'revenueUsd': 0.0, 'feesUsd': 0.0})
+        allocated_estimate = (estimated_fee * qty / order_total_qty) if order_total_qty else 0.0
+        entry = by_asin.setdefault(asin, {'units': 0, 'revenueUsd': 0.0, 'estimatedRevenueUsd': 0.0, 'feesUsd': 0.0, 'estimatedFeesUsd': 0.0})
         entry['units'] += qty
-        entry['revenueUsd'] += (it['item_price_usd'] or 0) * qty
-        entry['feesUsd'] += allocated_fee
+        price, is_estimate = _estimated_price(it, buy_box_by_asin)
+        entry['revenueUsd'] += (price or 0) * qty
+        if is_estimate:
+            entry['estimatedRevenueUsd'] += (price or 0) * qty
+        entry['feesUsd'] += allocated_fee + allocated_estimate
+        entry['estimatedFeesUsd'] += allocated_estimate
 
     result = []
     for asin, entry in by_asin.items():
@@ -3528,7 +3588,9 @@ def get_per_product_pnl(days: int = 30, usd_to_jpy: float = 150.0) -> list:
             'asin': asin,
             'units': entry['units'],
             'revenueUsd': round(entry['revenueUsd'], 2),
+            'estimatedRevenueUsd': round(entry['estimatedRevenueUsd'], 2),
             'feesUsd': round(entry['feesUsd'], 2),
+            'estimatedFeesUsd': round(entry['estimatedFeesUsd'], 2),
             'cogsUsd': round(cogs_usd, 2),
             'netProfitUsd': round(net_profit_usd, 2),
             'marginPct': round(100.0 * net_profit_usd / entry['revenueUsd'], 1) if entry['revenueUsd'] else None,

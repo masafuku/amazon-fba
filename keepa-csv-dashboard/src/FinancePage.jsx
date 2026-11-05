@@ -156,9 +156,15 @@ export default function FinancePage() {
             {summary && (
                 <>
                     <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
-                        <SummaryCard label="売上" value={usd(summary.revenueUsd)} />
+                        <SummaryCard
+                            label={summary.estimatedRevenueUsd > 0 ? `売上(うち見込み ${usd(summary.estimatedRevenueUsd)})` : '売上'}
+                            value={usd(summary.revenueUsd)}
+                        />
                         <SummaryCard label="原価(COGS)" value={usd(summary.cogsUsd)} />
-                        <SummaryCard label="実手数料" value={usd(summary.feesUsd)} />
+                        <SummaryCard
+                            label={summary.estimatedFeesUsd > 0 ? `手数料(うち見込み ${usd(summary.estimatedFeesUsd)})` : '実手数料'}
+                            value={usd(summary.feesUsd)}
+                        />
                         <SummaryCard label="固定費按分" value={usd(summary.fixedCostUsd)} />
                         <SummaryCard
                             label="純利益"
@@ -301,8 +307,8 @@ export default function FinancePage() {
                                     <tr key={row.asin} className="border-t border-slate-800">
                                         <td className="px-2 py-2"><AsinLink asin={row.asin} /></td>
                                         <td className="px-2 py-2">{row.units}</td>
-                                        <td className="px-2 py-2">{usd(row.revenueUsd)}</td>
-                                        <td className="px-2 py-2">{usd(row.feesUsd)}</td>
+                                        <td className="px-2 py-2">{usd(row.revenueUsd)}{row.estimatedRevenueUsd > 0 ? ' *' : ''}</td>
+                                        <td className="px-2 py-2">{usd(row.feesUsd)}{row.estimatedFeesUsd > 0 ? ' *' : ''}</td>
                                         <td className="px-2 py-2">{usd(row.cogsUsd)}</td>
                                         <td className={`px-2 py-2 font-semibold ${row.netProfitUsd >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                                             {usd(row.netProfitUsd)}
