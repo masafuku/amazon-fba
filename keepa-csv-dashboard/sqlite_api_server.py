@@ -1746,11 +1746,14 @@ def load_finance_shipments(usd_to_jpy: float = 150.0):
                    o.purchase_date AS purchase_date
             FROM sp_order_items oi
             JOIN sp_orders o ON o.order_id = oi.order_id
-            WHERE oi.asin IS NOT NULL
+            WHERE oi.asin IS NOT NULL AND o.order_status = 'Shipped'
             ORDER BY o.purchase_date ASC
             '''
         ).fetchall()
 
+    # 発送前・取消の便は原価も売上も含めない(ops_finance.get_shipment_pnlと同じ)
+    unshipped = {'WORKING', 'READY_TO_SHIP', 'CANCELLED', 'DELETED', 'ERROR'}
+    shipment_rows = [r for r in shipment_rows if (r['status'] or '').upper() not in unshipped]
     shipments = [
         {
             'shipmentId': r['shipment_id'],
