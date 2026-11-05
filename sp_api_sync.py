@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -121,6 +122,13 @@ def sync_inbound_shipments() -> None:
         for shipment_summary in plan.get("shipments", []) or []:
             shipment_id = shipment_summary["shipmentId"]
             detail = sp_client.get_inbound_shipment(plan_id, shipment_id)
+            status = detail.get("status")
+            if detail.get("shipmentConfirmationId") and status in ("SHIPPED", "IN_TRANSIT", "DELIVERED", "CHECKED_IN", "RECEIVING"):
+                # 2024-03-20のstatusはFC受領後もSHIPPEDのまま進まないため、旧API(v0)で補う
+                try:
+                    status = sp_client.get_inbound_shipment_status_v0(detail["shipmentConfirmationId"]) or status
+                except Exception as exc:
+                    logger.warning(f"v0のShipmentStatus取得に失敗({detail['shipmentConfirmationId']}): {exc}")
             window = detail.get("selectedDeliveryWindow", {}) or {}
             destination = detail.get("destination", {}) or {}
             of.upsert_sp_inbound_shipment(
@@ -128,7 +136,7 @@ def sync_inbound_shipments() -> None:
                     "shipmentId": shipment_id,
                     "planId": plan_id,
                     "shipmentConfirmationId": detail.get("shipmentConfirmationId"),
-                    "status": detail.get("status"),
+                    "status": status,
                     "destinationFc": destination.get("warehouseId"),
                     "deliveryWindowStart": window.get("startDate"),
                     "deliveryWindowEnd": window.get("endDate"),
@@ -137,6 +145,36 @@ def sync_inbound_shipments() -> None:
                 items,
             )
         time.sleep(0.5)
+    refresh_shipped_statuses()
+
+
+def refresh_shipped_statuses() -> None:
+    """listInboundPlansはACTIVEなプランしか返さず、発送済みの便は一覧から外れて状態が
+    止まる。FC受領まで進む便のstatusを、旧API(v0)で直接更新する。"""
+    with sqlite3.connect(of.DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT shipment_id, shipment_confirmation_id, status FROM sp_inbound_shipments "
+            "WHERE shipment_confirmation_id IS NOT NULL AND UPPER(IFNULL(status, '')) IN "
+            "('SHIPPED', 'IN_TRANSIT', 'DELIVERED', 'CHECKED_IN', 'RECEIVING')"
+        ).fetchall()
+        for shipment_id, confirmation_id, status in rows:
+            try:
+                latest = sp_client.get_inbound_shipment_status_v0(confirmation_id)
+            except Exception as exc:
+                logger.warning(f"v0のShipmentStatus取得に失敗({confirmation_id}): {exc}")
+                continue
+            if latest and latest.upper() != status.upper():
+                conn.execute("UPDATE sp_inbound_shipments SET status = ? WHERE shipment_id = ?", (latest, shipment_id))
+                logger.info(f"納品便 {confirmation_id}: {status} -> {latest}")
+        conn.commit()
+
+
+def orders_without_fees(days: int = 60) -> set:
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with sqlite3.connect(of.DB_PATH) as conn:
+        return {r[0] for r in conn.execute(
+            "SELECT order_id FROM sp_orders WHERE purchase_date >= ? AND UPPER(IFNULL(order_status, '')) NOT IN ('CANCELED', 'CANCELLED') "
+            "AND order_id NOT IN (SELECT order_id FROM sp_financial_events)", (since,))}
 
 
 def sync_finances(order_ids: list) -> None:
@@ -151,7 +189,7 @@ def sync_finances(order_ids: list) -> None:
                     if amount is not None:
                         events.append({
                             "eventType": fee.get("FeeType", "Unknown"),
-                            "amountUsd": float(amount),
+                            "amountUsd": -float(amount),  # Amazonは手数料をマイナスで返す。集計側は費用をプラスで扱うので反転して保存
                             "postedDate": shipment_event.get("PostedDate"),
                         })
         if events:
@@ -199,8 +237,12 @@ def run_once(lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> None:
         sync_order_items(order_ids)
         logger.info("OrderItems同期完了")
 
-        logger.info("Finances同期開始")
-        sync_finances(order_ids)
+    # 手数料は出荷の数日後に確定する(注文が更新された直後は空)ので、取得済みの注文だけでなく、
+    # 手数料がまだ入っていない直近60日の注文も毎回取り直す。
+    fee_order_ids = sorted(set(order_ids) | orders_without_fees())
+    if fee_order_ids:
+        logger.info(f"Finances同期開始({len(fee_order_ids)}件)")
+        sync_finances(fee_order_ids)
         of.set_sp_sync_state(finances_synced_at=now_iso)
         logger.info("Finances同期完了")
 
