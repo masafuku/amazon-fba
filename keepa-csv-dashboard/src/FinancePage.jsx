@@ -21,6 +21,8 @@ import {
 } from './db';
 import { formatDateTime } from './formatters';
 
+const API_BASE = import.meta.env.VITE_API_BASE || '';
+
 const PERIOD_OPTIONS = [
     { days: 7, label: '直近7日' },
     { days: 30, label: '直近30日' },
