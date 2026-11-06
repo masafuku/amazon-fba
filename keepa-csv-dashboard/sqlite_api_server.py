@@ -6,6 +6,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import threading
 import zlib
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -384,6 +385,67 @@ def control_scan_loop(action):
         detail = (result.stderr or result.stdout or '').strip()
         return {'ok': False, 'error': detail or f'systemctl start failed (exit {result.returncode})'}
     return {'ok': True, **get_scan_loop_status()}
+
+
+# 収支ページの「APIで更新」ボタン: cronと同じsp_api_sync.pyを別プロセスで1つだけ走らせる。
+SP_SYNC_SCRIPT = Path(__file__).resolve().parent.parent / 'sp_api_sync.py'
+SP_SYNC_LOG = Path(__file__).resolve().parent.parent / 'logs' / 'sp_api_sync.log'
+SP_SYNC_TIMEOUT_SECONDS = 1200
+_sp_sync_lock = threading.Lock()
+_sp_sync_state = {'running': False, 'startedAt': None, 'finishedAt': None, 'ok': None, 'error': None}
+
+
+def _sp_sync_cron_running():
+    try:
+        return subprocess.run(['pgrep', '-f', 'sp_api_sync.py'], capture_output=True, timeout=5).returncode == 0
+    except Exception:
+        return False
+
+
+def get_sp_sync_status():
+    with _sp_sync_lock:
+        state = dict(_sp_sync_state)
+    if not state['running'] and _sp_sync_cron_running():
+        state['running'] = True
+    state['lastLogAt'] = None
+    try:
+        state['lastLogAt'] = datetime.fromtimestamp(SP_SYNC_LOG.stat().st_mtime, timezone.utc).isoformat()
+    except OSError:
+        pass
+    return state
+
+
+def _run_sp_sync():
+    ok, error = False, None
+    try:
+        SP_SYNC_LOG.parent.mkdir(exist_ok=True)
+        with open(SP_SYNC_LOG, 'ab') as log:
+            result = subprocess.run(
+                [str(VENV_PYTHON), str(SP_SYNC_SCRIPT)], cwd=str(SP_SYNC_SCRIPT.parent),
+                stdout=log, stderr=log, timeout=SP_SYNC_TIMEOUT_SECONDS,
+            )
+        ok = result.returncode == 0
+        if not ok:
+            error = f'sp_api_sync.py が異常終了しました(exit {result.returncode})'
+    except subprocess.TimeoutExpired:
+        error = f'同期がタイムアウトしました({SP_SYNC_TIMEOUT_SECONDS}秒)'
+    except Exception as exc:
+        error = str(exc)
+    with _sp_sync_lock:
+        _sp_sync_state.update(running=False, finishedAt=datetime.now(timezone.utc).isoformat(), ok=ok, error=error)
+
+
+def start_sp_sync():
+    if not VENV_PYTHON.exists():
+        return {'ok': False, 'error': f'{VENV_PYTHON} が見つかりません'}
+    if _sp_sync_cron_running():
+        return {'ok': True, 'alreadyRunning': True, **get_sp_sync_status()}
+    with _sp_sync_lock:
+        if _sp_sync_state['running']:
+            return {'ok': True, 'alreadyRunning': True, **dict(_sp_sync_state)}
+        _sp_sync_state.update(running=True, startedAt=datetime.now(timezone.utc).isoformat(), finishedAt=None, ok=None, error=None)
+    threading.Thread(target=_run_sp_sync, daemon=True).start()
+    return {'ok': True, 'alreadyRunning': False, **get_sp_sync_status()}
 
 
 # セラーマイニング(ダッシュボードから直接、合格候補のセラーを特定→その
@@ -2950,6 +3012,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, {'ok': True, **get_scan_loop_status()})
             return
 
+        if parsed.path == '/api/finance/sync':
+            self._send_json(200, {'ok': True, **get_sp_sync_status()})
+            return
+
         if parsed.path == '/api/finance/summary':
             days = to_int_or_default((params.get('days') or [None])[0], 30)
             try:
@@ -3092,6 +3158,10 @@ class Handler(BaseHTTPRequestHandler):
         self._serve_static(parsed.path)
 
     def do_POST(self):
+        if self.path == '/api/finance/sync':
+            self._send_json(200, start_sp_sync())
+            return
+
         if self.path == '/api/favorites':
             length = int(self.headers.get('Content-Length', '0'))
             raw = self.rfile.read(length)

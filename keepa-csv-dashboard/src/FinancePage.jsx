@@ -107,6 +107,7 @@ export default function FinancePage() {
     const [expandedOrders, setExpandedOrders] = useState(() => new Set());
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
+    const [sync, setSync] = useState(null);
 
     const refresh = async () => {
         setLoading(true);
@@ -137,6 +138,39 @@ export default function FinancePage() {
         refresh();
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [days]);
+
+    useEffect(() => {
+        let timer;
+        let cancelled = false;
+        let wasRunning = false;
+        const poll = async () => {
+            try {
+                const res = await fetch(`${API_BASE}/api/finance/sync`);
+                const data = await res.json();
+                if (cancelled) return;
+                setSync(data);
+                if (wasRunning && !data.running) refresh();
+                wasRunning = !!data.running;
+                timer = setTimeout(poll, data.running ? 4000 : 30000);
+            } catch {
+                if (!cancelled) timer = setTimeout(poll, 30000);
+            }
+        };
+        poll();
+        return () => { cancelled = true; clearTimeout(timer); };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    const startSync = async () => {
+        try {
+            const res = await fetch(`${API_BASE}/api/finance/sync`, { method: 'POST' });
+            const data = await res.json();
+            setSync(data);
+            if (!data.ok) setError(data.error || '更新を開始できませんでした。');
+        } catch (e) {
+            setError(e?.message || '更新を開始できませんでした。');
+        }
+    };
 
     // ウォーターフォール: 売上から項目を引いていき、小計(固定費前利益)・合計(純利益)は地面から立てる。
     const chartData = useMemo(() => {
@@ -195,6 +229,18 @@ export default function FinancePage() {
                             {opt.label}
                         </button>
                     ))}
+                    <button
+                        onClick={startSync}
+                        disabled={sync?.running}
+                        className="flex items-center gap-1 rounded-lg bg-cyan-600 px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-60"
+                    >
+                        <RefreshCw size={14} className={sync?.running ? 'animate-spin' : ''} /> {sync?.running ? 'API更新中…' : 'APIで更新'}
+                    </button>
+                    {sync && !sync.running && (sync.finishedAt || sync.lastLogAt) && (
+                        <span className={`text-xs ${sync.ok === false ? 'text-rose-300' : 'text-slate-400'}`}>
+                            {sync.ok === false ? '前回失敗' : '最終更新'} {new Date(sync.finishedAt || sync.lastLogAt).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                        </span>
+                    )}
                     <button
                         onClick={refresh}
                         disabled={loading}
