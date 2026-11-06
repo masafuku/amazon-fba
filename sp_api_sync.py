@@ -150,12 +150,13 @@ def sync_inbound_shipments() -> None:
 
 def refresh_shipped_statuses() -> None:
     """listInboundPlansはACTIVEなプランしか返さず、発送済みの便は一覧から外れて状態が
-    止まる。FC受領まで進む便のstatusを、旧API(v0)で直接更新する。"""
+    止まる。取消(CANCELLED)も同様に一覧から消えるため、WORKING/READY_TO_SHIPの便も含め、
+    FC受領・取消まで進む便のstatusを旧API(v0)で直接更新する。"""
     with sqlite3.connect(of.DB_PATH) as conn:
         rows = conn.execute(
             "SELECT shipment_id, shipment_confirmation_id, status FROM sp_inbound_shipments "
             "WHERE shipment_confirmation_id IS NOT NULL AND UPPER(IFNULL(status, '')) IN "
-            "('SHIPPED', 'IN_TRANSIT', 'DELIVERED', 'CHECKED_IN', 'RECEIVING')"
+            "('WORKING', 'READY_TO_SHIP', 'SHIPPED', 'IN_TRANSIT', 'DELIVERED', 'CHECKED_IN', 'RECEIVING')"
         ).fetchall()
         for shipment_id, confirmation_id, status in rows:
             try:
