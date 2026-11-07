@@ -78,6 +78,15 @@ class TestOrderWatch(unittest.TestCase):
         self.run_watch()
         self.assertEqual(self.sent[0], '【売れた 10/26 02:01】Sanrio FriXion Ball Knock Set ×2 $13.98')
 
+    def test_pending_price_falls_back_to_listing_price_as_planned(self):
+        self.orders = [order('A-1', 'Shipped')]
+        self.run_watch()
+        self.orders.append(order('A-2'))
+        self.items = {'A-2': [{**item(qty=2), 'SellerSKU': 'SKU-1'}]}
+        with mock.patch.object(order_watch, 'fetch_listing_price', return_value=6.99):
+            self.run_watch()
+        self.assertEqual(self.sent[0], '【売れた 10/26 02:01】Sanrio FriXion Ball Knock Set ×2 予定$13.98')
+
     def test_shipped_and_cancel_are_notified(self):
         self.orders = [order('A-1', 'Pending')]
         self.run_watch()

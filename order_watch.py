@@ -3,7 +3,7 @@
 
 Amazonの標準メール通知は、FBAの場合「出荷した後に2時間ごとにまとめて」届くだけで、売れた直後には来ない。
 そのため注文そのものをポーリングして、売れた直後(最大5分遅れ)に気づけるようにする。保留中(支払い確認待ち)の注文も、
-注文の数分後にはAPIに出る。通知は商品名・販売価格・時間だけの短い文(利益・注文番号は載せない)。保留中は価格が未確定なので価格を省く。
+注文の数分後にはAPIに出る。通知は商品名・販売価格・時間だけの短い文(利益・注文番号は載せない)。保留中は価格が未確定なので、現在の出品価格を「予定$」で出す。
 
 使い方(AWSで実行):
     order_watch.py --dry-run     # 検索と通知文の表示だけ(LINEは送らない。状態も更新しない)
@@ -73,14 +73,37 @@ def _price(item: dict) -> float | None:
         return None
 
 
+def fetch_listing_price(sku: str) -> float | None:
+    """出品中の現在価格(USD)。保留中の注文は金額が未確定なので、その代わりに「予定」として使う。取れなければNone。"""
+    try:
+        from sp_api.config import settings
+        data = sp_client._request(
+            f'/listings/2021-08-01/items/{settings.seller_id}/{sku}',
+            {'marketplaceIds': settings.marketplace_id, 'includedData': 'offers'},
+        )
+        return float(data['offers'][0]['price']['amount'])
+    except Exception:
+        return None
+
+
+def _price_text(item: dict) -> str:
+    """確定価格は「$6.99」、保留中で価格が無いときは現在の出品価格×数量を「予定$6.99」と出す。"""
+    price = _price(item)
+    if price is not None:
+        return f' ${price:.2f}'
+    unit = fetch_listing_price(item['SellerSKU']) if item.get('SellerSKU') else None
+    if unit is None:
+        return ''
+    return f" 予定${unit * int(item.get('QuantityOrdered') or 1):.2f}"
+
+
 def _names(items: list[dict]) -> str:
     parts = []
     for item in items:
         qty = int(item.get('QuantityOrdered') or 1)
         title = (item.get('Title') or item.get('ASIN') or '')[:TITLE_LENGTH]
         text = f'{title} ×{qty}' if qty > 1 else title
-        price = _price(item)
-        parts.append(f'{text} ${price:.2f}' if price is not None else text)
+        parts.append(text + _price_text(item))
     return ' / '.join(parts)
 
 
