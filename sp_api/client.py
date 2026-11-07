@@ -202,6 +202,22 @@ def get_inbound_shipment(plan_id: str, shipment_id: str) -> Dict[str, Any]:
     return _request(f"/inbound/fba/2024-03-20/inboundPlans/{plan_id}/shipments/{shipment_id}")
 
 
+def get_inbound_shipment_status_v0(shipment_confirmation_id: str) -> Optional[str]:
+    """旧Inbound API(v0)のShipmentStatus。2024-03-20のgetShipmentはFC受領後もSHIPPEDのままなので、
+    CHECKED_IN/RECEIVING/CLOSEDの判定はこちらで行う。見つからなければNone。"""
+    payload = _request(
+        "/fba/inbound/v0/shipments",
+        {
+            "ShipmentStatusList": "WORKING,SHIPPED,IN_TRANSIT,DELIVERED,CHECKED_IN,RECEIVING,CLOSED,CANCELLED,DELETED,ERROR",
+            "ShipmentIdList": shipment_confirmation_id,
+            "QueryType": "SHIPMENT",
+            "MarketplaceId": settings.marketplace_id,
+        },
+    )
+    data = (payload.get("payload") or {}).get("ShipmentData") or []
+    return data[0].get("ShipmentStatus") if data else None
+
+
 def create_inbound_plan(
     items: list,
     name: str,

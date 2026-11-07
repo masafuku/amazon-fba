@@ -6,6 +6,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import threading
 import zlib
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -384,6 +385,67 @@ def control_scan_loop(action):
         detail = (result.stderr or result.stdout or '').strip()
         return {'ok': False, 'error': detail or f'systemctl start failed (exit {result.returncode})'}
     return {'ok': True, **get_scan_loop_status()}
+
+
+# 収支ページの「APIで更新」ボタン: cronと同じsp_api_sync.pyを別プロセスで1つだけ走らせる。
+SP_SYNC_SCRIPT = Path(__file__).resolve().parent.parent / 'sp_api_sync.py'
+SP_SYNC_LOG = Path(__file__).resolve().parent.parent / 'logs' / 'sp_api_sync.log'
+SP_SYNC_TIMEOUT_SECONDS = 1200
+_sp_sync_lock = threading.Lock()
+_sp_sync_state = {'running': False, 'startedAt': None, 'finishedAt': None, 'succeeded': None, 'error': None}
+
+
+def _sp_sync_cron_running():
+    try:
+        return subprocess.run(['pgrep', '-f', 'sp_api_sync.py'], capture_output=True, timeout=5).returncode == 0
+    except Exception:
+        return False
+
+
+def get_sp_sync_status():
+    with _sp_sync_lock:
+        state = dict(_sp_sync_state)
+    if not state['running'] and _sp_sync_cron_running():
+        state['running'] = True
+    state['lastLogAt'] = None
+    try:
+        state['lastLogAt'] = datetime.fromtimestamp(SP_SYNC_LOG.stat().st_mtime, timezone.utc).isoformat()
+    except OSError:
+        pass
+    return state
+
+
+def _run_sp_sync():
+    ok, error = False, None
+    try:
+        SP_SYNC_LOG.parent.mkdir(exist_ok=True)
+        with open(SP_SYNC_LOG, 'ab') as log:
+            result = subprocess.run(
+                [str(VENV_PYTHON), str(SP_SYNC_SCRIPT)], cwd=str(SP_SYNC_SCRIPT.parent),
+                stdout=log, stderr=log, timeout=SP_SYNC_TIMEOUT_SECONDS,
+            )
+        ok = result.returncode == 0
+        if not ok:
+            error = f'sp_api_sync.py が異常終了しました(exit {result.returncode})'
+    except subprocess.TimeoutExpired:
+        error = f'同期がタイムアウトしました({SP_SYNC_TIMEOUT_SECONDS}秒)'
+    except Exception as exc:
+        error = str(exc)
+    with _sp_sync_lock:
+        _sp_sync_state.update(running=False, finishedAt=datetime.now(timezone.utc).isoformat(), succeeded=ok, error=error)
+
+
+def start_sp_sync():
+    if not VENV_PYTHON.exists():
+        return {'ok': False, 'error': f'{VENV_PYTHON} が見つかりません'}
+    if _sp_sync_cron_running():
+        return {**get_sp_sync_status(), 'ok': True, 'alreadyRunning': True}
+    with _sp_sync_lock:
+        if _sp_sync_state['running']:
+            return {**dict(_sp_sync_state), 'ok': True, 'alreadyRunning': True}
+        _sp_sync_state.update(running=True, startedAt=datetime.now(timezone.utc).isoformat(), finishedAt=None, succeeded=None, error=None)
+    threading.Thread(target=_run_sp_sync, daemon=True).start()
+    return {**get_sp_sync_status(), 'ok': True, 'alreadyRunning': False}
 
 
 # セラーマイニング(ダッシュボードから直接、合格候補のセラーを特定→その
@@ -1509,6 +1571,43 @@ def load_favorites():
     return favorites
 
 
+def _estimated_price(row, buy_box_by_asin):
+    """ops_finance._estimated_priceと同一。売価未確定(Pending等)の注文行の見込み売価。"""
+    if row['item_price_usd'] is not None:
+        return row['item_price_usd'], False
+    if str(row['order_status'] or '').upper() in ('CANCELED', 'CANCELLED'):
+        return None, False
+    price = buy_box_by_asin.get(row['asin'])
+    return (price, True) if price else (None, False)
+
+
+def _estimated_fees_by_order(conn, since, actual_order_ids):
+    """ops_finance._estimated_fees_by_orderと同一。手数料が未確定の注文の見込み手数料
+    (相場取得market_pricesの紹介料率×売価+FBA手数料)。"""
+    market = {
+        r[0]: (r[1], r[2], r[3], r[4]) for r in conn.execute(
+            'SELECT asin, buy_box_usd, referral_fee_usd, fba_fee_usd, other_fee_usd FROM market_prices'
+        )
+    }
+    estimated = {}
+    for order_id, asin, qty, price in conn.execute(
+        """
+        SELECT oi.order_id, oi.asin, oi.quantity, oi.item_price_usd
+        FROM sp_order_items oi JOIN sp_orders o ON o.order_id = oi.order_id
+        WHERE o.purchase_date >= ? AND UPPER(IFNULL(o.order_status, '')) NOT IN ('CANCELED', 'CANCELLED')
+        """, (since,),
+    ):
+        if order_id in actual_order_ids or asin not in market or not qty:
+            continue
+        buy_box, referral, fba, other = market[asin]
+        if referral is None or fba is None or not buy_box:
+            continue
+        if price is None:
+            price = buy_box
+        estimated[order_id] = estimated.get(order_id, 0.0) + (referral / buy_box * price + fba + (other or 0.0)) * qty
+    return estimated
+
+
 def load_finance_summary(days: int = 30, usd_to_jpy: float = 150.0):
     """収支ページ用の集計。ops_finance.pyのcompute_finance_summary()と同一ロジック
     (二つのPythonエントリポイントはお互いをimportしないという既存方針のため、
@@ -1522,7 +1621,8 @@ def load_finance_summary(days: int = 30, usd_to_jpy: float = 150.0):
         # 売上/COGSはsp_order_items(商品明細)ベース。ops_finance.pyのcompute_finance_summary()と同一ロジック。
         orders = conn.execute(
             '''
-            SELECT oi.asin AS asin, oi.quantity AS quantity, oi.item_price_usd AS item_price_usd
+            SELECT oi.asin AS asin, oi.quantity AS quantity, oi.item_price_usd AS item_price_usd,
+                   o.order_status AS order_status
             FROM sp_order_items oi
             JOIN sp_orders o ON o.order_id = oi.order_id
             WHERE o.purchase_date >= ?
@@ -1540,6 +1640,8 @@ def load_finance_summary(days: int = 30, usd_to_jpy: float = 150.0):
             (since,),
         ):
             fees_by_order[row['order_id']] = row['total'] or 0.0
+        estimated_fees_by_order = _estimated_fees_by_order(conn, since, set(fees_by_order))
+        buy_box_by_asin = {r[0]: r[1] for r in conn.execute('SELECT asin, buy_box_usd FROM market_prices')}
         # 着地原価(landed cost) = 商品単価 + その行に配分された送料/数量
         # (CEO: 「送料は商品ごとに配分して」)。ops_finance.pyのcompute_finance_summary()と同一ロジック。
         cost_by_asin = {}
@@ -1556,8 +1658,16 @@ def load_finance_summary(days: int = 30, usd_to_jpy: float = 150.0):
         ).fetchall()
         monthly_fixed_jpy = sum(row['monthly_amount_jpy'] for row in fixed_cost_rows)
 
-    revenue_usd = sum((o['item_price_usd'] or 0) * (o['quantity'] or 0) for o in orders)
-    fees_usd = sum(fees_by_order.values())
+    revenue_usd = 0.0
+    estimated_revenue_usd = 0.0
+    for o in orders:
+        price, is_estimate = _estimated_price(o, buy_box_by_asin)
+        amount = (price or 0) * (o['quantity'] or 0)
+        revenue_usd += amount
+        if is_estimate:
+            estimated_revenue_usd += amount
+    estimated_fees_usd = sum(estimated_fees_by_order.values())
+    fees_usd = sum(fees_by_order.values()) + estimated_fees_usd
     cogs_usd = sum((cost_by_asin.get(o['asin'], 0) or 0) / usd_to_jpy * (o['quantity'] or 0) for o in orders)
     fixed_cost_period_usd = (monthly_fixed_jpy / usd_to_jpy) * (days / 30.0)
     net_profit_usd = revenue_usd - fees_usd - cogs_usd - fixed_cost_period_usd
@@ -1579,14 +1689,40 @@ def load_finance_summary(days: int = 30, usd_to_jpy: float = 150.0):
         'periodDays': days,
         'orderCount': order_count,
         'revenueUsd': round(revenue_usd, 2),
+        'estimatedRevenueUsd': round(estimated_revenue_usd, 2),
         'cogsUsd': round(cogs_usd, 2),
         'feesUsd': round(fees_usd, 2),
+        'estimatedFeesUsd': round(estimated_fees_usd, 2),
         'fixedCostUsd': round(fixed_cost_period_usd, 2),
         'fixedCosts': fixed_costs_breakdown,
         'netProfitUsd': round(net_profit_usd, 2),
         'fixedCostCoveragePct': round(100.0 * (revenue_usd - fees_usd - cogs_usd) / fixed_cost_period_usd, 1)
         if fixed_cost_period_usd > 0 else None,
     }
+
+
+def _product_names(conn, asins):
+    """ASIN→商品名。仕入れ記録(SDの商品名)→候補の英語タイトル→お気に入りの順に引く。"""
+    names = {}
+    wanted = sorted({a for a in asins if a})
+    if not wanted:
+        return names
+    marks = ','.join('?' * len(wanted))
+    for table, col, order in (
+        ('jp_purchase_records', 'product_name', 'order_date DESC'),
+        ('favorites', 'title', 'updated_at DESC'),
+        ('agent_candidates', 'title', 'id DESC'),
+    ):
+        try:
+            rows = conn.execute(
+                f'SELECT asin, {col} FROM {table} WHERE asin IN ({marks}) AND {col} IS NOT NULL AND {col} != "" ORDER BY {order}',
+                wanted,
+            ).fetchall()
+        except sqlite3.Error:
+            continue
+        for asin, name in rows:
+            names.setdefault(asin, name)
+    return names
 
 
 def load_fba_inventory(days_for_velocity: int = 30):
@@ -1597,13 +1733,26 @@ def load_fba_inventory(days_for_velocity: int = 30):
         sold_by_asin = {
             row['asin']: row['total_qty']
             for row in conn.execute(
-                'SELECT asin, SUM(quantity) AS total_qty FROM sp_orders WHERE purchase_date >= ? GROUP BY asin',
+                '''SELECT oi.asin, SUM(oi.quantity) AS total_qty FROM sp_order_items oi
+                   JOIN sp_orders o ON o.order_id = oi.order_id
+                   WHERE o.purchase_date >= ? AND o.order_status != 'Canceled' GROUP BY oi.asin''',
                 (since,),
+            )
+        }
+        # アマゾンへ送付した数(未発送・取消の便は除く)
+        sent_by_asin = {
+            row[0]: row[1]
+            for row in conn.execute(
+                '''SELECT i.asin, SUM(i.quantity) FROM sp_inbound_shipment_items i
+                   JOIN sp_inbound_shipments s ON s.shipment_id = i.shipment_id
+                   WHERE UPPER(IFNULL(s.status, '')) NOT IN ('WORKING', 'READY_TO_SHIP', 'CANCELLED', 'DELETED', 'ERROR')
+                   GROUP BY i.asin'''
             )
         }
         inventory = conn.execute(
             'SELECT asin, sku, fnsku, fulfillable_quantity, snapshot_at FROM sp_fba_inventory'
         ).fetchall()
+        names = _product_names(conn, [r['asin'] for r in inventory])
 
     result = []
     for row in inventory:
@@ -1612,8 +1761,10 @@ def load_fba_inventory(days_for_velocity: int = 30):
         days_of_stock = (row['fulfillable_quantity'] / daily_rate) if daily_rate > 0 else None
         result.append({
             'asin': row['asin'],
+            'productName': names.get(row['asin']) or row['sku'],
             'sku': row['sku'],
             'fnsku': row['fnsku'],
+            'sentQuantity': sent_by_asin.get(row['asin'], 0) or 0,
             'fulfillableQuantity': row['fulfillable_quantity'],
             'snapshotAt': row['snapshot_at'],
             'soldLast30d': sold,
@@ -1627,15 +1778,19 @@ def load_sp_orders(days: int = 30, limit: int = 100):
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute(
             '''
-            SELECT order_id, purchase_date, asin, sku, quantity, item_price_usd, order_status
-            FROM sp_orders WHERE purchase_date >= ?
-            ORDER BY purchase_date DESC LIMIT ?
+            SELECT o.order_id, o.purchase_date, COALESCE(i.asin, o.asin), COALESCE(i.sku, o.sku),
+                   COALESCE(i.quantity, o.quantity), COALESCE(i.item_price_usd, o.item_price_usd), o.order_status
+            FROM sp_orders o LEFT JOIN sp_order_items i ON i.order_id = o.order_id
+            WHERE o.purchase_date >= ?
+            ORDER BY o.purchase_date DESC LIMIT ?
             ''',
             (since, limit),
         ).fetchall()
+        names = _product_names(conn, [r[2] for r in rows])
     return [
         {
             'orderId': order_id, 'purchaseDate': purchase_date, 'asin': asin, 'sku': sku,
+            'productName': names.get(asin) or sku,
             'quantity': quantity, 'itemPriceUsd': item_price_usd, 'orderStatus': order_status,
         }
         for order_id, purchase_date, asin, sku, quantity, item_price_usd, order_status in rows
@@ -1652,7 +1807,7 @@ def load_finance_products(days: int = 30, usd_to_jpy: float = 150.0):
         items = conn.execute(
             '''
             SELECT oi.order_id AS order_id, oi.asin AS asin, oi.quantity AS quantity,
-                   oi.item_price_usd AS item_price_usd
+                   oi.item_price_usd AS item_price_usd, o.order_status AS order_status
             FROM sp_order_items oi
             JOIN sp_orders o ON o.order_id = oi.order_id
             WHERE o.purchase_date >= ? AND oi.asin IS NOT NULL
@@ -1670,6 +1825,8 @@ def load_finance_products(days: int = 30, usd_to_jpy: float = 150.0):
             (since,),
         ):
             fees_by_order[row['order_id']] = row['total'] or 0.0
+        estimated_fees_by_order = _estimated_fees_by_order(conn, since, set(fees_by_order))
+        buy_box_by_asin = {r[0]: r[1] for r in conn.execute('SELECT asin, buy_box_usd FROM market_prices')}
         cost_by_asin = {}
         for row in conn.execute(
             '''
@@ -1690,12 +1847,20 @@ def load_finance_products(days: int = 30, usd_to_jpy: float = 150.0):
         qty = it['quantity'] or 0
         order_total_qty = qty_by_order.get(it['order_id']) or 0
         order_fee = fees_by_order.get(it['order_id'], 0.0)
+        estimated_fee = estimated_fees_by_order.get(it['order_id'], 0.0)
         allocated_fee = (order_fee * qty / order_total_qty) if order_total_qty else 0.0
-        entry = by_asin.setdefault(asin, {'units': 0, 'revenueUsd': 0.0, 'feesUsd': 0.0})
+        allocated_estimate = (estimated_fee * qty / order_total_qty) if order_total_qty else 0.0
+        entry = by_asin.setdefault(asin, {'units': 0, 'revenueUsd': 0.0, 'estimatedRevenueUsd': 0.0, 'feesUsd': 0.0, 'estimatedFeesUsd': 0.0})
         entry['units'] += qty
-        entry['revenueUsd'] += (it['item_price_usd'] or 0) * qty
-        entry['feesUsd'] += allocated_fee
+        price, is_estimate = _estimated_price(it, buy_box_by_asin)
+        entry['revenueUsd'] += (price or 0) * qty
+        if is_estimate:
+            entry['estimatedRevenueUsd'] += (price or 0) * qty
+        entry['feesUsd'] += allocated_fee + allocated_estimate
+        entry['estimatedFeesUsd'] += allocated_estimate
 
+    with sqlite3.connect(DB_PATH) as name_conn:
+        names = _product_names(name_conn, list(by_asin))
     result = []
     for asin, entry in by_asin.items():
         cogs_jpy_per_unit = cost_by_asin.get(asin, 0) or 0
@@ -1703,15 +1868,35 @@ def load_finance_products(days: int = 30, usd_to_jpy: float = 150.0):
         net_profit_usd = entry['revenueUsd'] - entry['feesUsd'] - cogs_usd
         result.append({
             'asin': asin,
+            'productName': names.get(asin) or asin,
             'units': entry['units'],
             'revenueUsd': round(entry['revenueUsd'], 2),
+            'estimatedRevenueUsd': round(entry['estimatedRevenueUsd'], 2),
             'feesUsd': round(entry['feesUsd'], 2),
+            'estimatedFeesUsd': round(entry['estimatedFeesUsd'], 2),
             'cogsUsd': round(cogs_usd, 2),
             'netProfitUsd': round(net_profit_usd, 2),
             'marginPct': round(100.0 * net_profit_usd / entry['revenueUsd'], 1) if entry['revenueUsd'] else None,
         })
     result.sort(key=lambda r: r['revenueUsd'], reverse=True)
     return result
+
+
+# 便ごとの収支に入れる国際送料・関税の見積り(TNK請求書が届くまで)。第一便の概算
+# (運賃4,373+燃油2,044+発送代行1,500=7,917円÷90個。国内送料は原価に入っているので除く)。
+# 関税は仕入れ単価の12.5%(pricing_rule.IMPORT_DUTY_RATEと同じ)。実額は shipment_intl_costs に
+# 入れると、その便だけ見積りを置き換える。
+INTL_SHIPPING_JPY_PER_UNIT_ESTIMATE = 7917 / 90
+IMPORT_DUTY_RATE_ESTIMATE = 0.125
+SHIPMENT_INTL_COSTS_DDL = '''
+    CREATE TABLE IF NOT EXISTS shipment_intl_costs (
+        shipment_confirmation_id TEXT PRIMARY KEY,
+        shipping_jpy REAL NOT NULL,
+        duty_jpy REAL NOT NULL DEFAULT 0,
+        note TEXT,
+        updated_at TEXT
+    )
+'''
 
 
 def load_finance_shipments(usd_to_jpy: float = 150.0):
@@ -1742,15 +1927,24 @@ def load_finance_shipments(usd_to_jpy: float = 150.0):
         ).fetchall()
         sold_items = conn.execute(
             '''
-            SELECT oi.asin AS asin, oi.quantity AS quantity, oi.item_price_usd AS item_price_usd,
-                   o.purchase_date AS purchase_date
+            SELECT oi.order_id AS order_id, oi.asin AS asin, oi.quantity AS quantity,
+                   oi.item_price_usd AS item_price_usd, o.purchase_date AS purchase_date,
+                   o.order_status AS order_status
             FROM sp_order_items oi
             JOIN sp_orders o ON o.order_id = oi.order_id
-            WHERE oi.asin IS NOT NULL
+            WHERE oi.asin IS NOT NULL AND UPPER(IFNULL(o.order_status, '')) NOT IN ('CANCELED', 'CANCELLED')
             ORDER BY o.purchase_date ASC
             '''
         ).fetchall()
+        buy_box_by_asin = {r[0]: r[1] for r in conn.execute('SELECT asin, buy_box_usd FROM market_prices')}
+        # 注文ごとの手数料: 確定分があればそれ、無ければ見込み(ops_finance.get_shipment_pnlと同じ)
+        actual_fee_by_order = {r[0]: r[1] or 0.0 for r in conn.execute(
+            'SELECT order_id, SUM(amount_usd) FROM sp_financial_events GROUP BY order_id')}
+        estimated_fee_by_order = _estimated_fees_by_order(conn, '2000-01-01', set(actual_fee_by_order))
 
+    # 発送前・取消の便は原価も売上も含めない(ops_finance.get_shipment_pnlと同じ)
+    unshipped = {'WORKING', 'READY_TO_SHIP', 'CANCELLED', 'DELETED', 'ERROR'}
+    shipment_rows = [r for r in shipment_rows if (r['status'] or '').upper() not in unshipped]
     shipments = [
         {
             'shipmentId': r['shipment_id'],
@@ -1767,10 +1961,12 @@ def load_finance_shipments(usd_to_jpy: float = 150.0):
     ]
 
     purchases_by_asin = {}
+    domestic_by_asin = {}
     for row in cost_by_asin_rows:
         shipping_per_unit = (row['shipping_cost_jpy'] / row['quantity']) if row['quantity'] else 0
         landed = (row['unit_price_jpy'] or 0) + shipping_per_unit
         purchases_by_asin.setdefault(row['asin'], []).append((row['order_date'] or '', landed))
+        domestic_by_asin.setdefault(row['asin'], []).append((row['order_date'] or '', shipping_per_unit))
 
     def landed_cost_for(asin, as_of_date):
         history = purchases_by_asin.get(asin)
@@ -1781,26 +1977,61 @@ def load_finance_shipments(usd_to_jpy: float = 150.0):
         candidates = [cost for date, cost in history if date <= as_of_date]
         return candidates[-1] if candidates else history[0][1]
 
+    def domestic_shipping_for(asin, as_of_date):
+        # landed_cost_for と同じ仕入れ(その日付以前で最新)の、1個あたり国内送料(仕入れ先→TNK倉庫)
+        history = domestic_by_asin.get(asin)
+        if not history:
+            return 0.0
+        if not as_of_date:
+            return history[-1][1]
+        candidates = [cost for date, cost in history if date <= as_of_date]
+        return candidates[-1] if candidates else history[0][1]
+
     sales_queue = {}
+    qty_by_order = {}
     for row in sold_items:
-        sales_queue.setdefault(row['asin'], []).append(
-            {'qty': row['quantity'] or 0, 'unitRevenue': row['item_price_usd'] or 0}
-        )
+        qty_by_order[row['order_id']] = qty_by_order.get(row['order_id'], 0) + (row['quantity'] or 0)
+    for row in sold_items:
+        order_fee = actual_fee_by_order.get(row['order_id'], estimated_fee_by_order.get(row['order_id'], 0.0))
+        order_qty = qty_by_order.get(row['order_id']) or 0
+        price, _ = _estimated_price(row, buy_box_by_asin)
+        sales_queue.setdefault(row['asin'], []).append({
+            'qty': row['quantity'] or 0, 'unitRevenue': price or 0,
+            'unitFee': (order_fee / order_qty) if order_qty else 0.0,
+            'estimated': row['order_id'] not in actual_fee_by_order,
+        })
 
     shipments_sorted = sorted(shipments, key=lambda s: s['deliveryWindowStart'] or s['createdAt'] or '')
+
+    intl_costs = {}
+    try:
+        with sqlite3.connect(DB_PATH) as cost_conn:
+            cost_conn.execute(SHIPMENT_INTL_COSTS_DDL)
+            for sid, ship_jpy, duty_jpy in cost_conn.execute(
+                'SELECT shipment_confirmation_id, shipping_jpy, duty_jpy FROM shipment_intl_costs'
+            ):
+                intl_costs[sid] = (ship_jpy or 0, duty_jpy or 0)
+    except sqlite3.Error:
+        pass
 
     result = []
     for shipment in shipments_sorted:
         as_of = shipment['deliveryWindowStart'] or shipment['createdAt']
         total_cost_usd = 0.0
         total_revenue_usd = 0.0
+        total_fees_usd = 0.0
+        estimated_fees_usd = 0.0
         total_units_shipped = 0
         total_units_sold = 0
+        duty_estimate_usd = 0.0
+        domestic_shipping_usd = 0.0
         for item in shipment['items']:
             asin = item['asin']
             qty_shipped = item['quantity'] or 0
             total_units_shipped += qty_shipped
             total_cost_usd += (landed_cost_for(asin, as_of) / usd_to_jpy) * qty_shipped
+            domestic_shipping_usd += (domestic_shipping_for(asin, as_of) / usd_to_jpy) * qty_shipped
+            duty_estimate_usd += (landed_cost_for(asin, as_of) / usd_to_jpy) * qty_shipped * IMPORT_DUTY_RATE_ESTIMATE
 
             remaining = qty_shipped
             queue = sales_queue.get(asin, [])
@@ -1808,13 +2039,23 @@ def load_finance_shipments(usd_to_jpy: float = 150.0):
                 sale = queue[0]
                 take = min(remaining, sale['qty'])
                 total_revenue_usd += take * sale['unitRevenue']
+                total_fees_usd += take * sale['unitFee']
+                if sale['estimated']:
+                    estimated_fees_usd += take * sale['unitFee']
                 total_units_sold += take
                 sale['qty'] -= take
                 remaining -= take
                 if sale['qty'] <= 0:
                     queue.pop(0)
 
-        net_profit_usd = total_revenue_usd - total_cost_usd
+        actual_intl = intl_costs.get(shipment['shipmentConfirmationId']) or intl_costs.get(shipment['shipmentId'])
+        if actual_intl:
+            intl_shipping_usd = actual_intl[0] / usd_to_jpy
+            duty_usd = actual_intl[1] / usd_to_jpy
+        else:
+            intl_shipping_usd = total_units_shipped * INTL_SHIPPING_JPY_PER_UNIT_ESTIMATE / usd_to_jpy
+            duty_usd = duty_estimate_usd
+        net_profit_usd = total_revenue_usd - total_fees_usd - total_cost_usd - intl_shipping_usd - duty_usd
         result.append({
             'shipmentId': shipment['shipmentId'],
             'shipmentConfirmationId': shipment['shipmentConfirmationId'],
@@ -1825,7 +2066,13 @@ def load_finance_shipments(usd_to_jpy: float = 150.0):
             'unitsShipped': total_units_shipped,
             'unitsSold': total_units_sold,
             'costUsd': round(total_cost_usd, 2),
+            'domesticShippingUsd': round(domestic_shipping_usd, 2),
             'revenueUsd': round(total_revenue_usd, 2),
+            'feesUsd': round(total_fees_usd, 2),
+            'estimatedFeesUsd': round(estimated_fees_usd, 2),
+            'intlShippingUsd': round(intl_shipping_usd, 2),
+            'dutyUsd': round(duty_usd, 2),
+            'intlCostEstimated': not actual_intl,
             'netProfitUsd': round(net_profit_usd, 2),
             'items': shipment['items'],
         })
@@ -1993,6 +2240,14 @@ GATED_BRAND_TERMS = {
     'タカラトミー': ('takara tomy', 'takaratomy', 'タカラトミー', 'beyblade', 'ベイブレード'),
     # MUJI: 卸ルートが無く、ネットストアの規約が転売目的の購入を禁止(2026-09-27、CEO判断で見送り)。
     '無印良品(MUJI)': ('muji', '無印良品', '良品計画'),
+    # パイロット・三菱鉛筆: 新規のブランド承認申請の受付が停止(2026-10-30、CEOが申請ページで確認)。
+    'パイロット': ('pilot', 'パイロット', 'frixion', 'フリクション'),
+    '三菱鉛筆': ('mitsubishi pencil', '三菱鉛筆', 'uni-ball', 'uniball', 'uni ball', 'jetstream', 'ジェットストリーム',
+              'kuru toga', 'クルトガ', 'ユニボール'),
+    # 呉竹: 新規のブランド承認申請の受付が停止(2026-10-30、CEOが申請ページで確認。ASIN B0B87XPWB2)。
+    '呉竹': ('kuretake', '呉竹'),
+    # ほぼ日: 同上(2026-10-31、ASIN B07DKKVQ9M)。
+    'ほぼ日': ('hobonichi', 'ほぼ日'),
 }
 
 
@@ -2759,6 +3014,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, {'ok': True, **get_scan_loop_status()})
             return
 
+        if parsed.path == '/api/finance/sync':
+            self._send_json(200, {**get_sp_sync_status(), 'ok': True})
+            return
+
         if parsed.path == '/api/finance/summary':
             days = to_int_or_default((params.get('days') or [None])[0], 30)
             try:
@@ -2901,6 +3160,10 @@ class Handler(BaseHTTPRequestHandler):
         self._serve_static(parsed.path)
 
     def do_POST(self):
+        if self.path == '/api/finance/sync':
+            self._send_json(200, start_sp_sync())
+            return
+
         if self.path == '/api/favorites':
             length = int(self.headers.get('Content-Length', '0'))
             raw = self.rfile.read(length)
