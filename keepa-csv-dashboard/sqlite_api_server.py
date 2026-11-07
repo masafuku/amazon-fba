@@ -1778,9 +1778,11 @@ def load_sp_orders(days: int = 30, limit: int = 100):
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute(
             '''
-            SELECT order_id, purchase_date, asin, sku, quantity, item_price_usd, order_status
-            FROM sp_orders WHERE purchase_date >= ?
-            ORDER BY purchase_date DESC LIMIT ?
+            SELECT o.order_id, o.purchase_date, COALESCE(i.asin, o.asin), COALESCE(i.sku, o.sku),
+                   COALESCE(i.quantity, o.quantity), COALESCE(i.item_price_usd, o.item_price_usd), o.order_status
+            FROM sp_orders o LEFT JOIN sp_order_items i ON i.order_id = o.order_id
+            WHERE o.purchase_date >= ?
+            ORDER BY o.purchase_date DESC LIMIT ?
             ''',
             (since, limit),
         ).fetchall()
