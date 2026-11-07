@@ -201,7 +201,12 @@ export default function FinancePage() {
 
     const coveragePct = summary?.fixedCostCoveragePct;
     const invS = useSort(inventory);
-    const prodS = useSort(products);
+    // ROI = 純利益 ÷ 原価(原価に対する利益率。マージンは売上に対する率)
+    const productsWithRoi = useMemo(
+        () => products.map((row) => ({ ...row, roiPct: row.cogsUsd > 0 ? Math.round((row.netProfitUsd / row.cogsUsd) * 1000) / 10 : null })),
+        [products],
+    );
+    const prodS = useSort(productsWithRoi);
     const shipS = useSort(shipments);
     const poS = useSort(purchaseOrders);
     const ordS = useSort(orders);
@@ -425,6 +430,7 @@ export default function FinancePage() {
                                     {prodS.th('原価', 'cogsUsd')}
                                     {prodS.th('純利益', 'netProfitUsd')}
                                     {prodS.th('利益率', 'marginPct')}
+                                    {prodS.th('ROI', 'roiPct')}
                                 </tr>
                             </thead>
                             <tbody>
@@ -441,6 +447,7 @@ export default function FinancePage() {
                                         <td className="px-2 py-2">
                                             {row.marginPct === null || row.marginPct === undefined ? '-' : `${row.marginPct}%`}
                                         </td>
+                                        <td className="px-2 py-2">{row.roiPct === null ? '-' : `${row.roiPct}%`}</td>
                                     </tr>
                                 ))}
                             </tbody>
