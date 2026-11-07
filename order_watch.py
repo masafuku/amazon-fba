@@ -3,7 +3,7 @@
 
 Amazonの標準メール通知は、FBAの場合「出荷した後に2時間ごとにまとめて」届くだけで、売れた直後には来ない。
 そのため注文そのものをポーリングして、売れた直後(最大5分遅れ)に気づけるようにする。保留中(支払い確認待ち)の注文も、
-注文の数分後にはAPIに出る。通知は商品名と時間だけの短い文(価格・利益・注文番号は載せない)。
+注文の数分後にはAPIに出る。通知は商品名・販売価格・時間だけの短い文(利益・注文番号は載せない)。保留中は価格が未確定なので価格を省く。
 
 使い方(AWSで実行):
     order_watch.py --dry-run     # 検索と通知文の表示だけ(LINEは送らない。状態も更新しない)
@@ -65,12 +65,22 @@ def fetch_items(order_id: str) -> list[dict]:
     return sp_client.get_order_items(order_id).get('payload', {}).get('OrderItems', [])
 
 
+def _price(item: dict) -> float | None:
+    """注文明細の販売価格(数量ぶんの合計, USD)。保留中などでAmazonがまだ返さないときはNone。"""
+    try:
+        return float((item.get('ItemPrice') or {}).get('Amount'))
+    except (TypeError, ValueError):
+        return None
+
+
 def _names(items: list[dict]) -> str:
     parts = []
     for item in items:
         qty = int(item.get('QuantityOrdered') or 1)
         title = (item.get('Title') or item.get('ASIN') or '')[:TITLE_LENGTH]
-        parts.append(f'{title} ×{qty}' if qty > 1 else title)
+        text = f'{title} ×{qty}' if qty > 1 else title
+        price = _price(item)
+        parts.append(f'{text} ${price:.2f}' if price is not None else text)
     return ' / '.join(parts)
 
 

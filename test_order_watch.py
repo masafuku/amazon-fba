@@ -14,8 +14,11 @@ def order(order_id, status='Pending', date='2026-10-25T17:01:49Z'):
     return {'AmazonOrderId': order_id, 'OrderStatus': status, 'PurchaseDate': date}
 
 
-def item(asin='B0FKTF2XVZ', qty=1, title='Sanrio FriXion Ball Knock Set'):
-    return {'ASIN': asin, 'QuantityOrdered': qty, 'Title': title}
+def item(asin='B0FKTF2XVZ', qty=1, title='Sanrio FriXion Ball Knock Set', price=None):
+    result = {'ASIN': asin, 'QuantityOrdered': qty, 'Title': title}
+    if price is not None:
+        result['ItemPrice'] = {'CurrencyCode': 'USD', 'Amount': str(price)}
+    return result
 
 
 class TestOrderWatch(unittest.TestCase):
@@ -49,7 +52,7 @@ class TestOrderWatch(unittest.TestCase):
         self.assertEqual(self.sent, [])
         self.assertEqual(order_watch._state(), {'A-1': 'Shipped'})
 
-    def test_new_order_is_notified_once_with_name_and_time_only(self):
+    def test_new_order_is_notified_once_with_name_and_time(self):
         self.orders = [order('A-1', 'Shipped')]
         self.run_watch()
         self.orders = [order('A-1', 'Shipped'), order('A-2')]
@@ -66,6 +69,14 @@ class TestOrderWatch(unittest.TestCase):
         self.items = {'A-2': [item(qty=3)]}
         self.run_watch()
         self.assertIn('Sanrio FriXion Ball Knock Set ×3', self.sent[0])
+
+    def test_price_is_shown_when_amazon_returns_it(self):
+        self.orders = [order('A-1', 'Shipped')]
+        self.run_watch()
+        self.orders.append(order('A-2', 'Unshipped'))
+        self.items = {'A-2': [item(qty=2, price='13.98')]}
+        self.run_watch()
+        self.assertEqual(self.sent[0], '【売れた 10/26 02:01】Sanrio FriXion Ball Knock Set ×2 $13.98')
 
     def test_shipped_and_cancel_are_notified(self):
         self.orders = [order('A-1', 'Pending')]
