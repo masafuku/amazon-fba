@@ -165,6 +165,7 @@ export default function FinancePage() {
 
     const startSync = async () => {
         try {
+            setError('');
             const res = await fetch(`${API_BASE}/api/finance/sync`, { method: 'POST' });
             const data = await res.json();
             setSync(data);
@@ -239,8 +240,8 @@ export default function FinancePage() {
                         <RefreshCw size={14} className={sync?.running ? 'animate-spin' : ''} /> {sync?.running ? 'API更新中…' : 'APIで更新'}
                     </button>
                     {sync && !sync.running && (sync.finishedAt || sync.lastLogAt) && (
-                        <span className={`text-xs ${sync.ok === false ? 'text-rose-300' : 'text-slate-400'}`}>
-                            {sync.ok === false ? '前回失敗' : '最終更新'} {new Date(sync.finishedAt || sync.lastLogAt).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                        <span className={`text-xs ${sync.succeeded === false ? 'text-rose-300' : 'text-slate-400'}`}>
+                            {sync.succeeded === false ? '前回失敗' : '最終更新'} {new Date(sync.finishedAt || sync.lastLogAt).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
                         </span>
                     )}
                     <button

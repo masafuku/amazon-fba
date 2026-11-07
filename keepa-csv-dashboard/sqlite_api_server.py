@@ -392,7 +392,7 @@ SP_SYNC_SCRIPT = Path(__file__).resolve().parent.parent / 'sp_api_sync.py'
 SP_SYNC_LOG = Path(__file__).resolve().parent.parent / 'logs' / 'sp_api_sync.log'
 SP_SYNC_TIMEOUT_SECONDS = 1200
 _sp_sync_lock = threading.Lock()
-_sp_sync_state = {'running': False, 'startedAt': None, 'finishedAt': None, 'ok': None, 'error': None}
+_sp_sync_state = {'running': False, 'startedAt': None, 'finishedAt': None, 'succeeded': None, 'error': None}
 
 
 def _sp_sync_cron_running():
@@ -432,20 +432,20 @@ def _run_sp_sync():
     except Exception as exc:
         error = str(exc)
     with _sp_sync_lock:
-        _sp_sync_state.update(running=False, finishedAt=datetime.now(timezone.utc).isoformat(), ok=ok, error=error)
+        _sp_sync_state.update(running=False, finishedAt=datetime.now(timezone.utc).isoformat(), succeeded=ok, error=error)
 
 
 def start_sp_sync():
     if not VENV_PYTHON.exists():
         return {'ok': False, 'error': f'{VENV_PYTHON} が見つかりません'}
     if _sp_sync_cron_running():
-        return {'ok': True, 'alreadyRunning': True, **get_sp_sync_status()}
+        return {**get_sp_sync_status(), 'ok': True, 'alreadyRunning': True}
     with _sp_sync_lock:
         if _sp_sync_state['running']:
-            return {'ok': True, 'alreadyRunning': True, **dict(_sp_sync_state)}
-        _sp_sync_state.update(running=True, startedAt=datetime.now(timezone.utc).isoformat(), finishedAt=None, ok=None, error=None)
+            return {**dict(_sp_sync_state), 'ok': True, 'alreadyRunning': True}
+        _sp_sync_state.update(running=True, startedAt=datetime.now(timezone.utc).isoformat(), finishedAt=None, succeeded=None, error=None)
     threading.Thread(target=_run_sp_sync, daemon=True).start()
-    return {'ok': True, 'alreadyRunning': False, **get_sp_sync_status()}
+    return {**get_sp_sync_status(), 'ok': True, 'alreadyRunning': False}
 
 
 # セラーマイニング(ダッシュボードから直接、合格候補のセラーを特定→その
@@ -3013,7 +3013,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == '/api/finance/sync':
-            self._send_json(200, {'ok': True, **get_sp_sync_status()})
+            self._send_json(200, {**get_sp_sync_status(), 'ok': True})
             return
 
         if parsed.path == '/api/finance/summary':
