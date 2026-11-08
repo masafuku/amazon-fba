@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AWSのcronで5分ごとに動かす注文確認: Orders API(SP-API)を見て、新しい注文・状態の変化(出荷・キャンセル)をLINEで通知する。
+"""AWSのcronで5分ごとに動かす注文確認: Orders API(SP-API)を見て、新しい注文・状態の変化(支払い確定・キャンセルなど。出荷は通知しない)をLINEで通知する。
 
 Amazonの標準メール通知は、FBAの場合「出荷した後に2時間ごとにまとめて」届くだけで、売れた直後には来ない。
 そのため注文そのものをポーリングして、売れた直後(最大5分遅れ)に気づけるようにする。保留中(支払い確認待ち)の注文も、
@@ -29,11 +29,9 @@ LOOKBACK_DAYS = 2  # LastUpdatedAfter。5分ごとに動かしても、取りこ
 BASELINE_DAYS = 14
 MAX_SEEN = 2000
 TITLE_LENGTH = 44
-# 新規注文以外で通知する状態の表示名(これ以外の状態への変化は、通知せずに記録だけする)
+# 新規注文以外で通知する状態の表示名(これ以外の状態への変化は、通知せずに記録だけする。出荷は通知しない)
 STATUS_LABEL = {
     'Unshipped': '支払い確定',
-    'PartiallyShipped': '一部出荷',
-    'Shipped': '出荷',
     'Canceled': '⚠ キャンセル',
     'Unfulfillable': '⚠ 出荷不可',
 }

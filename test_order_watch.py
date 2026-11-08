@@ -87,15 +87,16 @@ class TestOrderWatch(unittest.TestCase):
             self.run_watch()
         self.assertEqual(self.sent[0], '【売れた 10/26 02:01】Sanrio FriXion Ball Knock Set ×2 予定$13.98')
 
-    def test_shipped_and_cancel_are_notified(self):
+    def test_shipped_is_silent_but_cancel_is_notified(self):
         self.orders = [order('A-1', 'Pending')]
         self.run_watch()
         self.orders = [order('A-1', 'Shipped')]
         self.run_watch()
-        self.assertEqual(self.sent[0], '【出荷 10/26 12:00】Sanrio FriXion Ball Knock Set')
+        self.assertEqual(self.sent, [])
+        self.assertEqual(order_watch._state(), {'A-1': 'Shipped'})
         self.orders = [order('A-1', 'Canceled')]
         self.run_watch()
-        self.assertEqual(self.sent[1], '【⚠ キャンセル 10/26 12:00】Sanrio FriXion Ball Knock Set')
+        self.assertEqual(self.sent[0], '【⚠ キャンセル 10/26 12:00】Sanrio FriXion Ball Knock Set')
 
     def test_change_to_pending_is_recorded_silently(self):
         self.orders = [order('A-1', 'Unshipped')]
