@@ -2219,6 +2219,10 @@ def load_candidates_by_supplier(supplier_name):
                 if needle in shop_name:
                     matched_supplier = shop_name
                     break
+        if matched_supplier is None and not data.get('manual_suppliers') and data.get('wholesale_raw_jpy') is not None:
+            pipeline_shop = (data.get('supplier') or '').replace('Zoomy_BUNGU', 'Zoomy BUNGU')  # supplier_pipeline.py登録行
+            if pipeline_shop and needle in pipeline_shop:
+                matched_supplier = pipeline_shop
         seen_asins.add(asin)
         if matched_supplier is None:
             continue
