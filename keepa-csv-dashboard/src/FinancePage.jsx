@@ -4,6 +4,8 @@ import {
     Bar,
     BarChart,
     CartesianGrid,
+    Cell,
+    LabelList,
     ResponsiveContainer,
     Tooltip,
     XAxis,
@@ -18,6 +20,8 @@ import {
     loadFinanceSummary,
 } from './db';
 import { formatDateTime } from './formatters';
+
+const API_BASE = import.meta.env.VITE_API_BASE || '';
 
 const PERIOD_OPTIONS = [
     { days: 7, label: '直近7日' },
@@ -42,6 +46,19 @@ function AsinLink({ asin }) {
     );
 }
 
+function NameLink({ asin, name }) {
+    if (!asin) return <span>-</span>;
+    return (
+        <a
+            href={`#candidate/${encodeURIComponent(asin)}`}
+            title={name || asin}
+            className="block max-w-[16rem] truncate text-cyan-400 hover:underline"
+        >
+            {name || asin}
+        </a>
+    );
+}
+
 function SupplierLink({ name }) {
     if (!name) return <span>-</span>;
     return (
@@ -49,6 +66,36 @@ function SupplierLink({ name }) {
             {name}
         </a>
     );
+}
+
+
+// 見出しクリックで昇順/降順に並べ替える。値が無い行(null)は常に末尾。
+function useSort(rows, defaultKey = null, defaultDir = 'desc') {
+    const [sort, setSort] = useState({ key: defaultKey, dir: defaultDir });
+    const sorted = useMemo(() => {
+        if (!sort.key) return rows;
+        const sign = sort.dir === 'asc' ? 1 : -1;
+        return [...rows].sort((a, b) => {
+            const x = a[sort.key];
+            const y = b[sort.key];
+            const xn = x === null || x === undefined || x === '';
+            const yn = y === null || y === undefined || y === '';
+            if (xn && yn) return 0;
+            if (xn) return 1;
+            if (yn) return -1;
+            if (typeof x === 'number' && typeof y === 'number') return (x - y) * sign;
+            return String(x).localeCompare(String(y), 'ja') * sign;
+        });
+    }, [rows, sort]);
+    const th = (label, key) => (
+        <th
+            className="cursor-pointer select-none whitespace-nowrap px-2 py-2 hover:text-slate-200"
+            onClick={() => setSort((p) => (p.key === key ? { key, dir: p.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: 'asc' }))}
+        >
+            {label}{sort.key === key ? (sort.dir === 'asc' ? ' ▲' : ' ▼') : ''}
+        </th>
+    );
+    return { rows: sorted, th };
 }
 
 export default function FinancePage() {
@@ -62,6 +109,7 @@ export default function FinancePage() {
     const [expandedOrders, setExpandedOrders] = useState(() => new Set());
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
+    const [sync, setSync] = useState(null);
 
     const refresh = async () => {
         setLoading(true);
@@ -93,18 +141,76 @@ export default function FinancePage() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [days]);
 
+    useEffect(() => {
+        let timer;
+        let cancelled = false;
+        let wasRunning = false;
+        const poll = async () => {
+            try {
+                const res = await fetch(`${API_BASE}/api/finance/sync`);
+                const data = await res.json();
+                if (cancelled) return;
+                setSync(data);
+                if (wasRunning && !data.running) refresh();
+                wasRunning = !!data.running;
+                timer = setTimeout(poll, data.running ? 4000 : 30000);
+            } catch {
+                if (!cancelled) timer = setTimeout(poll, 30000);
+            }
+        };
+        poll();
+        return () => { cancelled = true; clearTimeout(timer); };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    const startSync = async () => {
+        try {
+            setError('');
+            const res = await fetch(`${API_BASE}/api/finance/sync`, { method: 'POST' });
+            const data = await res.json();
+            setSync(data);
+            if (!data.ok) setError(data.error || '更新を開始できませんでした。');
+        } catch (e) {
+            setError(e?.message || '更新を開始できませんでした。');
+        }
+    };
+
+    // ウォーターフォール: 売上から項目を引いていき、小計(固定費前利益)・合計(純利益)は地面から立てる。
     const chartData = useMemo(() => {
         if (!summary) return [];
-        return [
-            { name: '売上', value: summary.revenueUsd },
-            { name: '原価', value: -summary.cogsUsd },
-            { name: '手数料', value: -summary.feesUsd },
-            { name: '固定費', value: -summary.fixedCostUsd },
-            { name: '純利益', value: summary.netProfitUsd },
+        const gross = summary.revenueUsd - summary.feesUsd - summary.cogsUsd;
+        const steps = [
+            { name: '売上', kind: 'up', delta: summary.revenueUsd },
+            { name: '原価', kind: 'down', delta: -summary.cogsUsd },
+            { name: '手数料', kind: 'down', delta: -summary.feesUsd },
+            { name: '固定費前利益', kind: 'total', total: gross },
+            { name: '固定費', kind: 'down', delta: -summary.fixedCostUsd },
+            { name: '純利益', kind: 'total', total: summary.netProfitUsd },
         ];
+        let running = 0;
+        return steps.map((step) => {
+            if (step.kind === 'total') {
+                running = step.total;
+                return { name: step.name, kind: 'total', amount: step.total, range: [Math.min(0, step.total), Math.max(0, step.total)] };
+            }
+            const from = running;
+            running += step.delta;
+            return { name: step.name, kind: step.kind, amount: step.delta, range: [Math.min(from, running), Math.max(from, running)] };
+        });
     }, [summary]);
 
     const coveragePct = summary?.fixedCostCoveragePct;
+    const invS = useSort(inventory);
+    // ROI = 純利益 ÷ 原価(原価に対する利益率。マージンは売上に対する率)
+    const productsWithRoi = useMemo(
+        () => products.map((row) => ({ ...row, roiPct: row.cogsUsd > 0 ? Math.round((row.netProfitUsd / row.cogsUsd) * 1000) / 10 : null })),
+        [products],
+    );
+    const prodS = useSort(productsWithRoi);
+    const shipS = useSort(shipments);
+    const poS = useSort(purchaseOrders);
+    const ordS = useSort(orders);
+
     const isNoDataYet = summary && summary.orderCount === 0 && inventory.length === 0;
 
     const toggleOrder = (key) => {
@@ -132,6 +238,18 @@ export default function FinancePage() {
                         </button>
                     ))}
                     <button
+                        onClick={startSync}
+                        disabled={sync?.running}
+                        className="flex items-center gap-1 rounded-lg bg-cyan-600 px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-60"
+                    >
+                        <RefreshCw size={14} className={sync?.running ? 'animate-spin' : ''} /> {sync?.running ? 'API更新中…' : 'APIで更新'}
+                    </button>
+                    {sync && !sync.running && (sync.finishedAt || sync.lastLogAt) && (
+                        <span className={`text-xs ${sync.succeeded === false ? 'text-rose-300' : 'text-slate-400'}`}>
+                            {sync.succeeded === false ? '前回失敗' : '最終更新'} {new Date(sync.finishedAt || sync.lastLogAt).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                        </span>
+                    )}
+                    <button
                         onClick={refresh}
                         disabled={loading}
                         className="flex items-center gap-1 rounded-lg bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-300 disabled:opacity-50"
@@ -156,9 +274,20 @@ export default function FinancePage() {
             {summary && (
                 <>
                     <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
-                        <SummaryCard label="売上" value={usd(summary.revenueUsd)} />
+                        <SummaryCard
+                            label={summary.estimatedRevenueUsd > 0 ? `売上(うち見込み ${usd(summary.estimatedRevenueUsd)})` : '売上'}
+                            value={usd(summary.revenueUsd)}
+                        />
                         <SummaryCard label="原価(COGS)" value={usd(summary.cogsUsd)} />
-                        <SummaryCard label="実手数料" value={usd(summary.feesUsd)} />
+                        <SummaryCard
+                            label={summary.estimatedFeesUsd > 0 ? `手数料(うち見込み ${usd(summary.estimatedFeesUsd)})` : '実手数料'}
+                            value={usd(summary.feesUsd)}
+                        />
+                        <SummaryCard
+                            label="固定費前利益"
+                            value={usd(summary.revenueUsd - summary.feesUsd - summary.cogsUsd)}
+                            emphasis={summary.revenueUsd - summary.feesUsd - summary.cogsUsd >= 0 ? 'positive' : 'negative'}
+                        />
                         <SummaryCard label="固定費按分" value={usd(summary.fixedCostUsd)} />
                         <SummaryCard
                             label="純利益"
@@ -225,17 +354,23 @@ export default function FinancePage() {
                     </div>
 
                     <div className="rounded-xl bg-slate-900 p-4">
-                        <h2 className="mb-3 text-sm font-semibold text-slate-300">内訳(期間合計)</h2>
+                        <h2 className="mb-1 text-sm font-semibold text-slate-300">内訳(期間合計)</h2>
+                        <p className="mb-3 text-xs text-slate-500"><span className="text-blue-400">■</span> 増加 <span className="text-orange-400">■</span> 減少 <span className="text-slate-400">■</span> 小計・合計</p>
                         <ResponsiveContainer width="100%" height={220}>
                             <BarChart data={chartData}>
                                 <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
                                 <XAxis dataKey="name" stroke="#94a3b8" fontSize={12} />
                                 <YAxis stroke="#94a3b8" fontSize={12} />
                                 <Tooltip
-                                    formatter={(value) => usd(value)}
+                                    formatter={(value, name, item) => usd(item.payload.amount)}
                                     contentStyle={{ backgroundColor: '#0f172a', border: '1px solid #334155' }}
                                 />
-                                <Bar dataKey="value" fill="#22d3ee" radius={[4, 4, 0, 0]} />
+                                <Bar dataKey="range" radius={[3, 3, 0, 0]}>
+                                    {chartData.map((d) => (
+                                        <Cell key={d.name} fill={d.kind === 'up' ? '#3b82f6' : d.kind === 'down' ? '#f97316' : '#94a3b8'} />
+                                    ))}
+                                    <LabelList dataKey="amount" position="top" fill="#cbd5e1" fontSize={11} formatter={(v) => usd(v)} />
+                                </Bar>
                             </BarChart>
                         </ResponsiveContainer>
                     </div>
@@ -253,18 +388,19 @@ export default function FinancePage() {
                         <table className="w-full text-left text-sm">
                             <thead>
                                 <tr className="text-slate-400">
-                                    <th className="px-2 py-2">ASIN</th>
-                                    <th className="px-2 py-2">SKU</th>
-                                    <th className="px-2 py-2">在庫数</th>
-                                    <th className="px-2 py-2">直近30日販売数</th>
-                                    <th className="px-2 py-2">在庫日数</th>
+                                    {invS.th('商品名', 'productName')}
+                                    {invS.th('SKU', 'sku')}
+                                    {invS.th('アマゾン送付数', 'sentQuantity')}{invS.th('在庫数', 'fulfillableQuantity')}
+                                    {invS.th('直近30日販売数', 'soldLast30d')}
+                                    {invS.th('在庫日数', 'daysOfStock')}
                                 </tr>
                             </thead>
                             <tbody>
-                                {inventory.map((item) => (
+                                {invS.rows.map((item) => (
                                     <tr key={item.asin} className="border-t border-slate-800">
-                                        <td className="px-2 py-2"><AsinLink asin={item.asin} /></td>
+                                        <td className="px-2 py-2"><NameLink asin={item.asin} name={item.productName} /></td>
                                         <td className="px-2 py-2 text-xs">{item.sku}</td>
+                                        <td className="px-2 py-2">{item.sentQuantity}</td>
                                         <td className="px-2 py-2">{item.fulfillableQuantity}</td>
                                         <td className="px-2 py-2">{item.soldLast30d}</td>
                                         <td className="px-2 py-2">
@@ -287,22 +423,23 @@ export default function FinancePage() {
                         <table className="w-full text-left text-sm">
                             <thead>
                                 <tr className="text-slate-400">
-                                    <th className="px-2 py-2">ASIN</th>
-                                    <th className="px-2 py-2">数量</th>
-                                    <th className="px-2 py-2">売上</th>
-                                    <th className="px-2 py-2">手数料</th>
-                                    <th className="px-2 py-2">原価</th>
-                                    <th className="px-2 py-2">純利益</th>
-                                    <th className="px-2 py-2">利益率</th>
+                                    {prodS.th('商品名', 'productName')}
+                                    {prodS.th('数量', 'units')}
+                                    {prodS.th('売上', 'revenueUsd')}
+                                    {prodS.th('手数料', 'feesUsd')}
+                                    {prodS.th('原価', 'cogsUsd')}
+                                    {prodS.th('純利益', 'netProfitUsd')}
+                                    {prodS.th('利益率', 'marginPct')}
+                                    {prodS.th('ROI', 'roiPct')}
                                 </tr>
                             </thead>
                             <tbody>
-                                {products.map((row) => (
+                                {prodS.rows.map((row) => (
                                     <tr key={row.asin} className="border-t border-slate-800">
-                                        <td className="px-2 py-2"><AsinLink asin={row.asin} /></td>
+                                        <td className="px-2 py-2"><NameLink asin={row.asin} name={row.productName} /></td>
                                         <td className="px-2 py-2">{row.units}</td>
-                                        <td className="px-2 py-2">{usd(row.revenueUsd)}</td>
-                                        <td className="px-2 py-2">{usd(row.feesUsd)}</td>
+                                        <td className="px-2 py-2">{usd(row.revenueUsd)}{row.estimatedRevenueUsd > 0 ? ' *' : ''}</td>
+                                        <td className="px-2 py-2">{usd(row.feesUsd)}{row.estimatedFeesUsd > 0 ? ' *' : ''}</td>
                                         <td className="px-2 py-2">{usd(row.cogsUsd)}</td>
                                         <td className={`px-2 py-2 font-semibold ${row.netProfitUsd >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                                             {usd(row.netProfitUsd)}
@@ -310,6 +447,7 @@ export default function FinancePage() {
                                         <td className="px-2 py-2">
                                             {row.marginPct === null || row.marginPct === undefined ? '-' : `${row.marginPct}%`}
                                         </td>
+                                        <td className="px-2 py-2">{row.roiPct === null ? '-' : `${row.roiPct}%`}</td>
                                     </tr>
                                 ))}
                             </tbody>
@@ -333,19 +471,21 @@ export default function FinancePage() {
                         <table className="w-full text-left text-sm">
                             <thead>
                                 <tr className="text-slate-400">
-                                    <th className="px-2 py-2">FBA Shipment ID</th>
-                                    <th className="px-2 py-2">状態</th>
-                                    <th className="px-2 py-2">納品先FC</th>
-                                    <th className="px-2 py-2">納品期間</th>
-                                    <th className="px-2 py-2">出荷数</th>
-                                    <th className="px-2 py-2">販売数(概算)</th>
-                                    <th className="px-2 py-2">原価</th>
-                                    <th className="px-2 py-2">売上(概算)</th>
-                                    <th className="px-2 py-2">純利益(概算)</th>
+                                    {shipS.th('FBA Shipment ID', 'shipmentConfirmationId')}
+                                    {shipS.th('状態', 'status')}
+                                    {shipS.th('納品先FC', 'destinationFc')}
+                                    {shipS.th('納品期間', 'deliveryWindowStart')}
+                                    {shipS.th('出荷数', 'unitsShipped')}
+                                    {shipS.th('販売数(概算)', 'unitsSold')}
+                                    {shipS.th('原価(うち国内送料)', 'costUsd')}
+                                    {shipS.th('売上(概算)', 'revenueUsd')}
+                                    {shipS.th('手数料(* 見込み含む)', 'feesUsd')}
+                                    {shipS.th('国際送料・関税(* 見積り)', 'intlShippingUsd')}
+                                    {shipS.th('純利益(概算)', 'netProfitUsd')}
                                 </tr>
                             </thead>
                             <tbody>
-                                {shipments.map((row) => (
+                                {shipS.rows.map((row) => (
                                     <tr
                                         key={row.shipmentId}
                                         className="cursor-pointer border-t border-slate-800 hover:bg-slate-800/40"
@@ -362,8 +502,10 @@ export default function FinancePage() {
                                         </td>
                                         <td className="px-2 py-2">{row.unitsShipped}</td>
                                         <td className="px-2 py-2">{row.unitsSold}</td>
-                                        <td className="px-2 py-2">{usd(row.costUsd)}</td>
+                                        <td className="px-2 py-2">{usd(row.costUsd)}<span className="text-xs text-slate-500"> ({usd(row.domesticShippingUsd)})</span></td>
                                         <td className="px-2 py-2">{usd(row.revenueUsd)}</td>
+                                        <td className="px-2 py-2">{usd(row.feesUsd)}{row.estimatedFeesUsd > 0 ? ' *' : ''}</td>
+                                        <td className="px-2 py-2">{usd((row.intlShippingUsd || 0) + (row.dutyUsd || 0))}{row.intlCostEstimated ? ' *' : ''}</td>
                                         <td className={`px-2 py-2 font-semibold ${row.netProfitUsd >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                                             {usd(row.netProfitUsd)}
                                         </td>
@@ -390,15 +532,15 @@ export default function FinancePage() {
                             <thead>
                                 <tr className="text-slate-400">
                                     <th className="px-2 py-2" />
-                                    <th className="px-2 py-2">発注日</th>
-                                    <th className="px-2 py-2">仕入先</th>
-                                    <th className="px-2 py-2">商品点数</th>
-                                    <th className="px-2 py-2">合計数量</th>
-                                    <th className="px-2 py-2">合計金額</th>
+                                    {poS.th('発注日', 'orderDate')}
+                                    {poS.th('仕入先', 'supplierName')}
+                                    {poS.th('商品点数', 'itemCount')}
+                                    {poS.th('合計数量', 'totalQuantity')}
+                                    {poS.th('合計金額', 'totalAmountJpy')}
                                 </tr>
                             </thead>
                             <tbody>
-                                {purchaseOrders.map((po) => {
+                                {poS.rows.map((po) => {
                                     const key = `${po.orderDate}__${po.supplierName}`;
                                     const isOpen = expandedOrders.has(key);
                                     return (
@@ -472,18 +614,18 @@ export default function FinancePage() {
                         <table className="w-full text-left text-sm">
                             <thead>
                                 <tr className="text-slate-400">
-                                    <th className="px-2 py-2">注文日</th>
-                                    <th className="px-2 py-2">ASIN</th>
-                                    <th className="px-2 py-2">数量</th>
-                                    <th className="px-2 py-2">金額</th>
-                                    <th className="px-2 py-2">状態</th>
+                                    {ordS.th('注文日', 'purchaseDate')}
+                                    {ordS.th('商品名', 'productName')}
+                                    {ordS.th('数量', 'quantity')}
+                                    {ordS.th('金額', 'itemPriceUsd')}
+                                    {ordS.th('状態', 'orderStatus')}
                                 </tr>
                             </thead>
                             <tbody>
-                                {orders.map((order) => (
+                                {ordS.rows.map((order) => (
                                     <tr key={order.orderId} className="border-t border-slate-800">
                                         <td className="px-2 py-2 text-xs">{formatDateTime(order.purchaseDate)}</td>
-                                        <td className="px-2 py-2"><AsinLink asin={order.asin} /></td>
+                                        <td className="px-2 py-2"><NameLink asin={order.asin} name={order.productName} /></td>
                                         <td className="px-2 py-2">{order.quantity}</td>
                                         <td className="px-2 py-2">{usd(order.itemPriceUsd)}</td>
                                         <td className="px-2 py-2 text-xs">{order.orderStatus}</td>
