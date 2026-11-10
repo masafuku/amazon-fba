@@ -1725,10 +1725,71 @@ def _product_names(conn, asins):
     return names
 
 
+MIN_IN_STOCK_DAYS = 7  # 在庫があった日数がこれ未満だと販売ペースがぶれるので、在庫日数は参考値扱い
+
+
+def _in_stock_days_by_asin(conn, since: str, today: str) -> dict:
+    """ASINごとに、since〜today(両端含む)のうちFBAに販売可能在庫があった日数。
+    ops_finance.pyのin_stock_days_by_asin()と同一ロジック(根拠と仮定はそちらのdocstring)。"""
+    since_d = datetime.fromisoformat(since).date() + timedelta(days=1)  # 30日分(sinceの翌日〜today)で数える
+    today_d = datetime.fromisoformat(today).date()
+    events = {}
+    for event_type, occurred_on, asin in conn.execute(
+        """SELECT event_type, occurred_on, ref FROM ops_events
+           WHERE event_type IN ('fba_in_stock', 'fba_stock_out') ORDER BY occurred_on, id"""
+    ):
+        events.setdefault(asin, []).append((event_type, datetime.fromisoformat(occurred_on).date()))
+    received_on = {
+        asin: datetime.fromisoformat(day).date()
+        for asin, day in conn.execute(
+            """SELECT i.asin, MIN(e.occurred_on) FROM ops_events e
+               JOIN sp_inbound_shipments s ON s.shipment_confirmation_id = e.ref
+               JOIN sp_inbound_shipment_items i ON i.shipment_id = s.shipment_id
+               WHERE e.event_type IN ('fba_checked_in', 'fba_receiving') GROUP BY i.asin"""
+        )
+    }
+    current = {asin: qty or 0 for asin, qty in conn.execute('SELECT asin, fulfillable_quantity FROM sp_fba_inventory')}
+    last_sale = {
+        asin: datetime.fromisoformat(day[:10]).date()
+        for asin, day in conn.execute(
+            """SELECT oi.asin, MAX(o.purchase_date) FROM sp_order_items oi JOIN sp_orders o ON o.order_id = oi.order_id
+               WHERE IFNULL(o.order_status, '') != 'Canceled' GROUP BY oi.asin"""
+        )
+    }
+
+    result = {}
+    for asin in set(events) | set(current) | set(last_sale):
+        evs = events.get(asin, [])
+        intervals, start = [], None
+        if evs:
+            first_type, first_day = evs[0]
+            if first_type == 'fba_stock_out':
+                start = min(received_on.get(asin, since_d), first_day)
+        elif current.get(asin) or asin in last_sale:
+            start = received_on.get(asin, since_d)
+        for event_type, day in evs:
+            if event_type == 'fba_in_stock' and start is None:
+                start = day
+            elif event_type == 'fba_stock_out' and start is not None:
+                intervals.append((start, day))
+                start = None
+        if start is not None:
+            intervals.append((start, today_d if current.get(asin) else last_sale.get(asin, today_d)))
+        result[asin] = sum(
+            max((min(end, today_d) - max(begin, since_d)).days + 1, 0) for begin, end in intervals
+        )
+    return result
+
+
 def load_fba_inventory(days_for_velocity: int = 30):
     """在庫日数付きのFBA在庫一覧。ops_finance.pyのget_sp_fba_inventory_with_days_of_stock()と同一ロジック。"""
     since = (datetime.now(timezone.utc) - timedelta(days=days_for_velocity)).date().isoformat()
+    today = datetime.now(timezone.utc).date().isoformat()
     with sqlite3.connect(DB_PATH) as conn:
+        try:
+            in_stock_days = _in_stock_days_by_asin(conn, since, today)
+        except sqlite3.Error:
+            in_stock_days = {}
         conn.row_factory = sqlite3.Row
         sold_by_asin = {
             row['asin']: row['total_qty']
@@ -1757,7 +1818,8 @@ def load_fba_inventory(days_for_velocity: int = 30):
     result = []
     for row in inventory:
         sold = sold_by_asin.get(row['asin'], 0) or 0
-        daily_rate = sold / days_for_velocity if days_for_velocity else 0
+        stocked_days = in_stock_days.get(row['asin'], days_for_velocity)
+        daily_rate = sold / max(stocked_days, 1)
         days_of_stock = (row['fulfillable_quantity'] / daily_rate) if daily_rate > 0 else None
         result.append({
             'asin': row['asin'],
@@ -1768,7 +1830,9 @@ def load_fba_inventory(days_for_velocity: int = 30):
             'fulfillableQuantity': row['fulfillable_quantity'],
             'snapshotAt': row['snapshot_at'],
             'soldLast30d': sold,
+            'inStockDays': stocked_days,
             'daysOfStock': round(days_of_stock, 1) if days_of_stock is not None else None,
+            'daysOfStockTentative': days_of_stock is not None and stocked_days < MIN_IN_STOCK_DAYS,
         })
     return result
 

@@ -392,6 +392,7 @@ export default function FinancePage() {
                                     {invS.th('SKU', 'sku')}
                                     {invS.th('アマゾン送付数', 'sentQuantity')}{invS.th('在庫数', 'fulfillableQuantity')}
                                     {invS.th('直近30日販売数', 'soldLast30d')}
+                                    {invS.th('うち在庫あり日数', 'inStockDays')}
                                     {invS.th('在庫日数', 'daysOfStock')}
                                 </tr>
                             </thead>
@@ -403,8 +404,10 @@ export default function FinancePage() {
                                         <td className="px-2 py-2">{item.sentQuantity}</td>
                                         <td className="px-2 py-2">{item.fulfillableQuantity}</td>
                                         <td className="px-2 py-2">{item.soldLast30d}</td>
+                                        <td className="px-2 py-2">{item.inStockDays}日</td>
                                         <td className="px-2 py-2">
                                             {item.daysOfStock === null ? '-' : `${item.daysOfStock}日`}
+                                            {item.daysOfStockTentative && <span className="ml-1 text-xs text-slate-500">(参考)</span>}
                                         </td>
                                     </tr>
                                 ))}

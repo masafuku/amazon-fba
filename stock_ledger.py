@@ -588,13 +588,18 @@ def stock_pipeline(today: str | None = None) -> list:
         ):
             row_for(asin)['sold_30d'] = qty or 0
 
+        in_stock_days = of.in_stock_days_by_asin(conn, since, today_date.isoformat())
+
     result = []
     for row in rows.values():
         sent = row['planned'] + row['at_tnk'] + row['intl_transit'] + row['fc_received_inbound']
         row['at_home'] = max(row['received'] - sent, 0)
         pipeline_total = row['at_home'] + row['planned'] + row['at_tnk'] + row['intl_transit'] + row['fba_available']
-        daily = row['sold_30d'] / 30
+        # 30日で割ると在庫切れの期間の分だけ販売ペースが低く出るので、在庫があった日数で割る
+        row['in_stock_days'] = in_stock_days.get(row['asin'], 0)
+        daily = row['sold_30d'] / max(row['in_stock_days'], 1)
         row['days_of_cover'] = round(pipeline_total / daily, 1) if daily else None
+        row['cover_tentative'] = row['days_of_cover'] is not None and row['in_stock_days'] < of.MIN_IN_STOCK_DAYS
         result.append(row)
     result.sort(key=lambda r: (r['days_of_cover'] is None, r['days_of_cover'] or 0, r['asin']))
     return result
@@ -627,6 +632,11 @@ def record_sp_changes() -> list:
                 continue
             if _record_event(conn, source_id, event_type, today, cid, {'status': status}):
                 new_events.append(f'{event_type} {cid}')
+        # 売り切れて在庫一覧から消えたASINも在庫切れとして扱う
+        for asin in previous['inventory'].keys() - inventory.keys():
+            if previous['inventory'][asin] > 0 and _record_event(
+                    conn, source_id, FBA_STOCK_OUT, today, asin, {'before': previous['inventory'][asin]}):
+                new_events.append(f'{FBA_STOCK_OUT} {asin}')
         for asin, qty in inventory.items():
             before = previous['inventory'].get(asin, 0)
             if before > 0 and qty == 0:
@@ -742,7 +752,7 @@ def build_ledger_digest(since_iso: str | None, today: str | None = None) -> str:
             parts.append(f"自宅{row['at_home']}")
         cover = row['days_of_cover']
         mark = '▲発注目安 ' if cover is not None and cover < REORDER_COVER_DAYS else ''
-        cover_text = f' 在庫{cover}日' if cover is not None else ''
+        cover_text = f" 在庫{cover}日{'(参考)' if row['cover_tentative'] else ''}" if cover is not None else ''
         stock_lines.append(f"・{mark}{_short(row['name'])} {'/'.join(parts)}{cover_text}")
     if stock_lines:
         lines.append('■在庫')
@@ -757,7 +767,8 @@ def format_pipeline(rows: list) -> str:
     lines = []
     for row in rows:
         parts = [f'{label}{row[key]}' for key, label in columns if row[key]]
-        cover = f" 在庫日数{row['days_of_cover']}" if row['days_of_cover'] is not None else ''
+        cover = (f" 在庫日数{row['days_of_cover']}{'(参考)' if row['cover_tentative'] else ''}"
+                 f"(在庫あり{row['in_stock_days']}日)" if row['days_of_cover'] is not None else '')
         lines.append(f"{row['asin']} {row['name'] or ''}: {' / '.join(parts) or '在庫なし'}{cover}")
     return '\n'.join(lines)
 

@@ -293,7 +293,41 @@ class TestIngest(StockLedgerTestCase):
             conn.execute("INSERT INTO sp_order_items (order_id, asin, quantity) VALUES ('o1', 'A1', 15), ('o2', 'A1', 99)")
         row = sl.stock_pipeline(today='2026-10-10')[0]
         self.assertEqual(row['sold_30d'], 15)
+        self.assertEqual(row['in_stock_days'], 30)
         self.assertEqual(row['days_of_cover'], 40.0)
+
+    def test_days_of_cover_divides_by_days_in_stock(self):
+        with sqlite3.connect(ops_finance.DB_PATH) as conn:
+            conn.execute("INSERT INTO sp_inbound_shipments (shipment_id, shipment_confirmation_id, status) VALUES ('sh1', 'FBA1', 'CLOSED')")
+            conn.execute("INSERT INTO sp_inbound_shipment_items (shipment_id, asin, sku, quantity) VALUES ('sh1', 'A1', 'S', 20), ('sh1', 'C1', 'S3', 5)")
+            conn.execute("INSERT INTO sp_fba_inventory (asin, sku, fulfillable_quantity) VALUES ('A1', 'S', 5), ('B1', 'S2', 4)")
+            conn.execute("INSERT INTO sp_orders (order_id, purchase_date, order_status) VALUES ('o1', '2026-10-15T00:00:00Z', 'Shipped')")
+            conn.execute("INSERT INTO sp_order_items (order_id, asin, quantity) VALUES ('o1', 'A1', 10), ('o1', 'B1', 2)")
+            for event_type, day, ref in [('fba_receiving', '2026-10-01', 'FBA1'),
+                                         ('fba_in_stock', '2026-10-05', 'A1'),
+                                         ('fba_stock_out', '2026-10-10', 'C1'),   # 最初が在庫切れなら受領開始日(10/1)から在庫あり
+                                         ('fba_stock_out', '2026-10-20', 'A1'),
+                                         ('fba_in_stock', '2026-10-28', 'A1'),
+                                         ('fba_in_stock', '2026-10-28', 'B1')]:
+                conn.execute('INSERT INTO ops_events (source_id, event_type, occurred_on, ref, detail, recorded_at) VALUES (?, ?, ?, ?, ?, ?)',
+                             (f't:{event_type}:{day}', event_type, day, ref, '{}', '2026-10-30T00:00:00Z'))
+        rows = {r['asin']: r for r in sl.stock_pipeline(today='2026-10-30')}
+        self.assertEqual(rows['A1']['in_stock_days'], 16 + 3)   # 10/5〜10/20 と 10/28〜10/30
+        self.assertEqual(rows['A1']['days_of_cover'], 9.5)      # 5 ÷ (10/19)。30日で割ると15.0日
+        self.assertFalse(rows['A1']['cover_tentative'])
+        self.assertEqual(rows['C1']['in_stock_days'], 10)
+        self.assertEqual(rows['B1']['in_stock_days'], 3)
+        self.assertTrue(rows['B1']['cover_tentative'])
+        self.assertIn('在庫6.0日(参考)', sl.build_ledger_digest('2000-01-01T00:00:00+00:00', today='2026-10-30'))
+
+    def test_sold_out_asin_dropping_from_inventory_is_stock_out(self):
+        with sqlite3.connect(ops_finance.DB_PATH) as conn:
+            conn.execute("INSERT INTO sp_fba_inventory (asin, sku, fulfillable_quantity) VALUES ('A1', 'S1', 3)")
+        sl.record_sp_changes()
+        with sqlite3.connect(ops_finance.DB_PATH) as conn:
+            conn.execute("DELETE FROM sp_fba_inventory")
+        self.assertEqual(sl.record_sp_changes(), ['fba_stock_out A1'])
+        self.assertEqual(sl.record_sp_changes(), [])
 
 
 class TestShipmentCosts(StockLedgerTestCase):
