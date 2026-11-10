@@ -2,7 +2,7 @@
 """価格の提案(ドライラン)。価格は一切変更しない。反映はCEOの承認後に手で行う(pricing-rule スキル)。
 
 1日1回(AWSのcron):
-- fetch(深夜): 在庫がある/輸送中のASINについて、Keepaで競合の出品(価格・在庫)を取り、価格帯ごとに
+- fetch(検索ループ scripts/run_all_day.sh の中で朝4時、セラーマイニングの後): 在庫がある/輸送中のASINについて、Keepaで競合の出品(価格・在庫)を取り、価格帯ごとに
   まとめて competitor_layers に保存する(自社の出品は除く。約11トークン/ASIN。トークンが足りなければ待つ)。
 - propose(朝、price_review.py の後): 最新の競合の価格帯・自社の売れ行き(在庫あり日数で割る)・在庫・
   手数料の実額での利益から、SKUごとに値上げ/値下げ/据え置きを決めて price_proposals に保存する。
@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
@@ -45,6 +46,9 @@ MAX_CUT = 0.10            # 1回の値下げ幅の上限
 NO_SALE_DAYS = 14         # 在庫ありでこの日数売れなければ「売れない」とみなす
 KEEPA_TOKENS_PER_ASIN = 11
 STATE_KEY = 'price_digest_sent_on'
+FETCH_STATE_KEY = 'competitor_fetched_on_jst'
+JST = timezone(timedelta(hours=9))
+ALREADY_FETCHED_EXIT = 10   # fetch --once-per-day で今日の分が取得済みのときの終了コード(検索ループが見る)
 
 
 def keep(reason: str) -> dict:
@@ -132,7 +136,19 @@ def _stock_rows() -> dict:
     return rows
 
 
+def _jst_today() -> str:
+    return datetime.now(JST).date().isoformat()
+
+
+def fetched_today() -> bool:
+    of.init_ops_tables()
+    with sqlite3.connect(of.DB_PATH) as conn:
+        return stock_ledger._get_state(conn, FETCH_STATE_KEY) == _jst_today()
+
+
 def fetch() -> list:
+    """Keepaのトークンは検索ループ(scripts/run_all_day.sh)と共有なので、ループの中から1日1回呼ぶ(朝4時、
+    セラーマイニングの後)。ループの外から並行して呼ぶと、トークンを取り合って両方が遅くなる。"""
     from keepa_mcp import keepa_client as k
     from keepa_mcp.config import settings as keepa_settings
     from sp_api.config import settings as sp_settings
@@ -150,6 +166,8 @@ def fetch() -> list:
                 conn.execute('INSERT OR REPLACE INTO competitor_layers (fetched_on, asin, monthly_sold, layers_json) VALUES (?, ?, ?, ?)',
                              (today, p['asin'], p.get('monthlySold'), json.dumps(_offer_layers(p, sp_settings.seller_id))))
             done.append(p['asin'])
+    with sqlite3.connect(of.DB_PATH) as conn:
+        stock_ledger._set_state(conn, FETCH_STATE_KEY, _jst_today())
     return done
 
 
@@ -187,11 +205,20 @@ def propose(fee_fn=None) -> list:
     return results
 
 
+def _short_name(name: str) -> str:
+    """在庫台帳の商品名(商品名+内訳)で重なる語を1回にする(例: 「ウカンムリクリップ ウカンムリクリップ　ピーチ」)。"""
+    words = []
+    for w in re.split(r'[\s　]+', name or ''):
+        if w and w not in words:
+            words.append(w)
+    return ' '.join(words)
+
+
 def latest_proposals(conn: sqlite3.Connection) -> tuple[str | None, list]:
     day = conn.execute('SELECT MAX(proposed_on) FROM price_proposals').fetchone()[0]
     if not day:
         return None, []
-    names = {r['asin']: r['name'] for r in stock_ledger.stock_pipeline()}
+    names = {r['asin']: _short_name(r['name']) for r in stock_ledger.stock_pipeline()}
     rows = []
     for sku, asin, action, cur, target, pn, pt, reason in conn.execute(
         'SELECT sku, asin, action, current_min, target, profit_now, profit_target, reason FROM price_proposals WHERE proposed_on = ?', (day,)
@@ -223,7 +250,7 @@ def build_price_digest() -> str | None:
         if not day or stock_ledger._get_state(conn, STATE_KEY) == day:
             return None
         today = datetime.now(timezone.utc).date()
-        names = {r['asin']: r['name'] for r in stock_ledger.stock_pipeline()}
+        names = {r['asin']: _short_name(r['name']) for r in stock_ledger.stock_pipeline()}
         conn.row_factory = sqlite3.Row
         changes = [dict(r) for r in conn.execute('SELECT * FROM price_changes WHERE changed_on >= ? ORDER BY changed_on',
                                                  ((today - timedelta(days=60)).isoformat(),))]
@@ -254,8 +281,11 @@ def mark_digest_sent() -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="価格の提案(ドライラン。価格は変更しない)")
     parser.add_argument("cmd", choices=["fetch", "propose", "report"])
+    parser.add_argument("--once-per-day", action="store_true", help="fetch: 今日(JST)の分が取得済みなら何もせず終了コード10")
     args = parser.parse_args()
     if args.cmd == "fetch":
+        if args.once_per_day and fetched_today():
+            raise SystemExit(ALREADY_FETCHED_EXIT)
         print(f"競合の価格帯を取得: {fetch()}")
         return
     if args.cmd == "propose":

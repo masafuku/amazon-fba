@@ -481,7 +481,7 @@ export default function SellerMiningPage() {
                 <h2 className="mb-1 text-lg font-semibold text-white">セラー別統計</h2>
                 <p className="mb-4 text-sm text-slate-400">
                     合格候補から自動発見・ダッシュボードから手動発見したセラーの一覧です。統計は常に全期間の
-                    集計(このセラーを再訪すべきかの恒久的な参考情報のため)。深夜1:00〜6:00(JST、既定)の間、
+                    集計(このセラーを再訪すべきかの恒久的な参考情報のため)。深夜1:00〜4:00(JST、既定)の間、
                     run_all_day.shがここから調査回数の少ないセラーを1件ずつ選んでマイニングします
                     (<span className="text-cyan-300">次回選択</span>マークが目印)。カテゴリ列は現時点では未実装のプレースホルダーです。
                 </p>

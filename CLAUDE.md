@@ -135,7 +135,8 @@ and turns `keepa_mcp` output into decisions:
   into `seller_pool`, and a pooled seller's own storefront (`expand_from_seller`, 1 token/seller)
   gets run through the same qualify pipeline (`source_type='seller'` in `agent_candidates`).
   **Seller discovery and mining both run only in the nightly window** (`--seller-mining`, JST
-  1–6am by default via `scripts/run_all_day.sh`), never inline during a daytime keyword-search
+  1–4am by default via `scripts/run_all_day.sh`; 4–8am the same loop runs the once-a-day
+  `price_strategy.py fetch` competitor check first, so the two never compete for Keepa tokens), never inline during a daytime keyword-search
   cycle — `run_daily_scan()` only searches/evaluates/persists, full stop. Each night,
   `run_seller_mining_cycle()` first calls `discover_sellers_for_pending_candidates()` (finds
   daytime candidates not yet seller-registered, `seller_pool.seed_asin` marks "already handled"),
