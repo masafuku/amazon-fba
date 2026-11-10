@@ -550,7 +550,7 @@ def stock_pipeline(today: str | None = None) -> list:
     def row_for(asin, name=None):
         if asin not in rows:
             rows[asin] = {'asin': asin, 'name': name, 'awaiting_supplier': 0, 'domestic_transit': 0, 'received': 0,
-                          'planned': 0, 'at_tnk': 0, 'intl_transit': 0, 'fc_received_inbound': 0,
+                          'planned': 0, 'at_tnk': 0, 'intl_transit': 0, 'fc_received_inbound': 0, 'fc_arrived': 0,
                           'fba_available': 0, 'sold_30d': 0, 'shipments': []}
         if name and not rows[asin]['name']:
             rows[asin]['name'] = name
@@ -572,12 +572,15 @@ def stock_pipeline(today: str | None = None) -> list:
 
         for confirmation_id, sp_status, asin, sku, qty in conn.execute(
             '''SELECT s.shipment_confirmation_id, s.status, i.asin, i.sku, i.quantity
-               FROM sp_inbound_shipment_items i JOIN sp_inbound_shipments s ON s.shipment_id = i.shipment_id'''
+               FROM sp_inbound_shipment_items i JOIN sp_inbound_shipments s ON s.shipment_id = i.shipment_id
+               WHERE UPPER(IFNULL(s.status, '')) NOT IN ('CANCELLED', 'DELETED', 'ERROR')'''
         ):
             stage = _shipment_stage(conn, confirmation_id, sp_status)
             row = row_for(asin, sku)
             # FCに着いた便の数は足さない(受領済みの分はFBA在庫と二重になる)。受領中の数はAmazonの在庫データから取る
-            if stage != 'fc_received':
+            if stage == 'fc_received':
+                row['fc_arrived'] += qty or 0
+            else:
                 row[stage] += qty or 0
             row['shipments'].append({'id': confirmation_id, 'stage': stage, 'qty': qty})
 
@@ -597,7 +600,7 @@ def stock_pipeline(today: str | None = None) -> list:
 
     result = []
     for row in rows.values():
-        sent = row['planned'] + row['at_tnk'] + row['intl_transit'] + row['fc_received_inbound']
+        sent = row['planned'] + row['at_tnk'] + row['intl_transit'] + row['fc_arrived']
         row['at_home'] = max(row['received'] - sent, 0)
         pipeline_total = row['at_home'] + row['planned'] + row['at_tnk'] + row['intl_transit'] + row['fba_available']
         # 30日で割ると在庫切れの期間の分だけ販売ペースが低く出るので、在庫があった日数で割る

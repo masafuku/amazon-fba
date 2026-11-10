@@ -323,6 +323,15 @@ class TestIngest(StockLedgerTestCase):
         self.assertTrue(rows['B1']['cover_tentative'])
         self.assertIn('在庫6.0日(参考)', sl.build_ledger_digest('2000-01-01T00:00:00+00:00', today='2026-10-30'))
 
+    def test_cancelled_plans_are_ignored_and_fc_arrivals_leave_home(self):
+        with sqlite3.connect(ops_finance.DB_PATH) as conn:
+            conn.execute("INSERT INTO jp_purchase_records (sd_reception_no, product_name, quantity, asin, received_at) VALUES ('r1', 'X', 20, 'A1', '2026-10-01')")
+            conn.execute("INSERT INTO sp_inbound_shipments (shipment_id, shipment_confirmation_id, status) VALUES ('sh1', 'FBA1', 'CLOSED'), ('sh2', 'FBA2', 'CANCELLED')")
+            conn.execute("INSERT INTO sp_inbound_shipment_items (shipment_id, asin, sku, quantity) VALUES ('sh1', 'A1', 'S', 20), ('sh2', 'A1', 'S', 20)")
+            conn.execute("INSERT INTO sp_fba_inventory (asin, sku, fulfillable_quantity, inbound_receiving_quantity) VALUES ('A1', 'S', 13, 0)")
+        row = sl.stock_pipeline()[0]
+        self.assertEqual((row['at_home'], row['planned'], row['fc_received_inbound'], row['fba_available']), (0, 0, 0, 13))
+
     def test_sold_out_asin_dropping_from_inventory_is_stock_out(self):
         with sqlite3.connect(ops_finance.DB_PATH) as conn:
             conn.execute("INSERT INTO sp_fba_inventory (asin, sku, fulfillable_quantity) VALUES ('A1', 'S1', 3)")
