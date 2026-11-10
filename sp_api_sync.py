@@ -30,7 +30,6 @@ from datetime import datetime, timedelta, timezone
 
 import ops_finance as of
 import market_prices
-import review_request
 import stock_ledger
 from sp_api import client as sp_client
 from sp_api.config import settings as sp_settings
@@ -267,12 +266,6 @@ def run_once(lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> None:
         logger.info(f"相場取得: {market_prices.refresh()}")
     except Exception as exc:
         logger.warning(f"相場取得に失敗: {exc}")
-
-    # 出荷済みの注文にレビューとセラー評価のお願いを送る(Amazon定型文。返金があった注文は除く)
-    try:
-        logger.info(f"レビューのリクエスト: {review_request.run()}")
-    except Exception as exc:
-        logger.warning(f"レビューのリクエストに失敗: {exc}")
 
 
 def main() -> None:
