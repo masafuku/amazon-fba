@@ -576,11 +576,16 @@ def stock_pipeline(today: str | None = None) -> list:
         ):
             stage = _shipment_stage(conn, confirmation_id, sp_status)
             row = row_for(asin, sku)
-            row['fc_received_inbound' if stage == 'fc_received' else stage] += qty or 0
+            # FCに着いた便の数は足さない(受領済みの分はFBA在庫と二重になる)。受領中の数はAmazonの在庫データから取る
+            if stage != 'fc_received':
+                row[stage] += qty or 0
             row['shipments'].append({'id': confirmation_id, 'stage': stage, 'qty': qty})
 
-        for asin, sku, qty in conn.execute('SELECT asin, sku, fulfillable_quantity FROM sp_fba_inventory'):
-            row_for(asin, sku)['fba_available'] = qty or 0
+        for asin, sku, qty, receiving in conn.execute(
+                'SELECT asin, sku, fulfillable_quantity, inbound_receiving_quantity FROM sp_fba_inventory'):
+            row = row_for(asin, sku)
+            row['fba_available'] = qty or 0
+            row['fc_received_inbound'] = receiving or 0
 
         for asin, qty in conn.execute(
             '''SELECT i.asin, SUM(i.quantity) FROM sp_order_items i JOIN sp_orders o ON o.order_id = i.order_id

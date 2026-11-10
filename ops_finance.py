@@ -508,6 +508,11 @@ def init_ops_tables():
         if 'inbound_synced_at' not in sp_sync_state_columns:
             conn.execute('ALTER TABLE sp_sync_state ADD COLUMN inbound_synced_at TEXT')
 
+        sp_fba_inventory_columns = {row[1] for row in conn.execute('PRAGMA table_info(sp_fba_inventory)').fetchall()}
+        if 'inbound_receiving_quantity' not in sp_fba_inventory_columns:
+            # FCに着いて受領処理中の数(Amazonの数え方)。便の納品数から引き算すると受領済みの便を二重に数えるため
+            conn.execute('ALTER TABLE sp_fba_inventory ADD COLUMN inbound_receiving_quantity INTEGER')
+
         # seller_poolの一度きりの自動バックフィル: 既にsource_type='seller'の
         # 実績がagent_candidatesにある(過去のセラーマイニング結果)場合、
         # seller_poolがまだ空ならそこから再構築する。INSERT OR IGNOREなので
@@ -2886,17 +2891,17 @@ def upsert_sp_financial_events(order_id: str, events: list) -> int:
 
 
 def replace_sp_fba_inventory(items: list) -> int:
-    """items: [{asin, sku, fnsku, fulfillableQuantity}, ...]. 毎回スナップショット全洗い替え。"""
+    """items: [{asin, sku, fnsku, fulfillableQuantity, inboundReceivingQuantity}, ...]. 毎回スナップショット全洗い替え。"""
     init_ops_tables()
     now = datetime.now(timezone.utc).isoformat()
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute('DELETE FROM sp_fba_inventory')
         conn.executemany(
             '''
-            INSERT OR REPLACE INTO sp_fba_inventory (asin, sku, fnsku, fulfillable_quantity, snapshot_at)
-            VALUES (:asin, :sku, :fnsku, :fulfillableQuantity, :snapshotAt)
+            INSERT OR REPLACE INTO sp_fba_inventory (asin, sku, fnsku, fulfillable_quantity, inbound_receiving_quantity, snapshot_at)
+            VALUES (:asin, :sku, :fnsku, :fulfillableQuantity, :inboundReceivingQuantity, :snapshotAt)
             ''',
-            [{**i, 'snapshotAt': now} for i in items],
+            [{'inboundReceivingQuantity': 0, **i, 'snapshotAt': now} for i in items],
         )
     return len(items)
 

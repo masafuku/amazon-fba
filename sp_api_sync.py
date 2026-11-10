@@ -210,6 +210,7 @@ def sync_inventory() -> None:
                 "sku": s.get("sellerSku"),
                 "fnsku": s.get("fnSku"),
                 "fulfillableQuantity": details.get("fulfillableQuantity", 0),
+                "inboundReceivingQuantity": details.get("inboundReceivingQuantity", 0),
             })
         next_token = payload.get("payload", {}).get("nextToken")
         if not next_token:

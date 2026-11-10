@@ -244,8 +244,11 @@ class TestIngest(StockLedgerTestCase):
         self.assertEqual(sl.stock_pipeline()[0]['intl_transit'] + sl.stock_pipeline()[0]['planned'], 10)
         events = sl.ingest_email({'id': 'f1', 'subject': 'FBA Inbound Shipment Checked-In (FBA19RGV6RMN)', 'date': '2026-10-09T07:32:51Z', 'body': ''})
         self.assertEqual(events, ['FBA着荷 FBA19RGV6RMN'])
+        with sqlite3.connect(ops_finance.DB_PATH) as conn:
+            conn.execute("INSERT INTO sp_fba_inventory (asin, sku, fulfillable_quantity, inbound_receiving_quantity) VALUES ('A1', 'S', 4, 6)")
         row = sl.stock_pipeline()[0]
-        self.assertEqual((row['planned'], row['intl_transit'], row['fc_received_inbound']), (0, 0, 10))
+        # 受領中はAmazonの数(6)。便の10個を足すと、受領済みの4個がFBA在庫と二重になる
+        self.assertEqual((row['planned'], row['intl_transit'], row['fc_received_inbound'], row['fba_available']), (0, 0, 6, 4))
 
     def test_price_suppression_email_becomes_event_and_alert(self):
         body = ("amazon.co.jpでの商品の出品において、出品価格の誤設定の可能性が検出されました。\n"

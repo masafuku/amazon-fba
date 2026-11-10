@@ -1379,6 +1379,8 @@ def init_db() -> None:
             )
             '''
         )
+        if 'inbound_receiving_quantity' not in {row[1] for row in conn.execute('PRAGMA table_info(sp_fba_inventory)')}:
+            conn.execute('ALTER TABLE sp_fba_inventory ADD COLUMN inbound_receiving_quantity INTEGER')
 
         conn.execute(
             '''
