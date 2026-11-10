@@ -423,6 +423,30 @@ def init_ops_tables():
                 UNIQUE (sku, changed_on)
             );
 
+            -- 競合の価格帯ごとの在庫(price_strategy.py fetch が1日1回Keepaから。自社の出品は除く)。
+            -- layers_json = [[価格, 出品者数, 在庫], ...] 価格の安い順。
+            CREATE TABLE IF NOT EXISTS competitor_layers (
+                fetched_on TEXT NOT NULL,
+                asin TEXT NOT NULL,
+                monthly_sold INTEGER,
+                layers_json TEXT,
+                PRIMARY KEY (fetched_on, asin)
+            );
+
+            -- 価格の提案(ドライラン。price_strategy.py propose が1日1回。価格は変更しない)。
+            CREATE TABLE IF NOT EXISTS price_proposals (
+                proposed_on TEXT NOT NULL,
+                sku TEXT NOT NULL,
+                asin TEXT,
+                action TEXT,                      -- raise / cut / feedback / keep
+                current_min REAL,
+                target REAL,
+                profit_now REAL,
+                profit_target REAL,
+                reason TEXT,
+                PRIMARY KEY (proposed_on, sku)
+            );
+
             -- SDの後払い(Paid)。出荷されるたびに届く「決済確定」メール1通=1行。ご利用月(settled_on)ごとに
             -- 月末締め・翌月初3営業日に請求書が出る。paid_onはその月の請求を払った日(入金確認メールには金額が
             -- 無いので、stock_ledger.py paid で月ごとに登録する)。

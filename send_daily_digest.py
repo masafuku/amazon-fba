@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 
+import price_strategy
 import stock_ledger
 from config import Settings
 from notify_line import send_line_message
@@ -58,6 +59,14 @@ def main() -> None:
     candidate_message = build_daily_digest_message(candidates, keywords, period_label, budget_alerts=budget_alerts)
     # 在庫・物流と候補を別の吹き出しにする(1回の送信なので送信数は増えない)
     messages = [stock_ledger.build_ledger_digest(since_iso), candidate_message]
+    # 価格の提案と振り返り(price_strategy.py。まだ送っていない日の分だけ。朝7:30に作るので、ふつうは朝のまとめに入る)
+    try:
+        price_message = price_strategy.build_price_digest()
+    except Exception as exc:   # 価格の部分が壊れても、在庫・候補のまとめは送る
+        print(f"[WARN] 価格の提案を組み立てられませんでした: {exc}")
+        price_message = None
+    if price_message:
+        messages.append(price_message)
 
     print(f"[INFO] 対象期間: {effective_since} 〜 現在 (前回送信: {since_iso or 'なし(初回)'})")
     print(f"[INFO] 検索キーワード: {len(keywords)}件 / 合格候補: {len(candidates)}件(重複除く)")
@@ -82,6 +91,8 @@ def main() -> None:
         target = settings.line_user_id or "友だち全員へbroadcast"
         print(f"[INFO] LINEダイジェストを送信しました ({target})。")
         set_last_digest_sent_at(datetime.now(timezone.utc).isoformat())
+        if price_message:
+            price_strategy.mark_digest_sent()
     except Exception as exc:
         print(f"[ERROR] LINE送信失敗: {exc}")
         raise SystemExit(1)
