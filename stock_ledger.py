@@ -597,7 +597,7 @@ def stock_pipeline(today: str | None = None) -> list:
         pipeline_total = row['at_home'] + row['planned'] + row['at_tnk'] + row['intl_transit'] + row['fba_available']
         # 30日で割ると在庫切れの期間の分だけ販売ペースが低く出るので、在庫があった日数で割る
         row['in_stock_days'] = in_stock_days.get(row['asin'], 0)
-        daily = row['sold_30d'] / max(row['in_stock_days'], 1)
+        daily = row['sold_30d'] / row['in_stock_days'] if row['in_stock_days'] else 0   # 在庫0日=予約注文のみ
         row['days_of_cover'] = round(pipeline_total / daily, 1) if daily else None
         row['cover_tentative'] = row['days_of_cover'] is not None and row['in_stock_days'] < of.MIN_IN_STOCK_DAYS
         result.append(row)

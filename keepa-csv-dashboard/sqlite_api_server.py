@@ -1765,7 +1765,7 @@ def _in_stock_days_by_asin(conn, since: str, today: str) -> dict:
             first_type, first_day = evs[0]
             if first_type == 'fba_stock_out':
                 start = min(received_on.get(asin, since_d), first_day)
-        elif current.get(asin) or asin in last_sale:
+        elif current.get(asin):
             start = received_on.get(asin, since_d)
         for event_type, day in evs:
             if event_type == 'fba_in_stock' and start is None:
@@ -1819,7 +1819,7 @@ def load_fba_inventory(days_for_velocity: int = 30):
     for row in inventory:
         sold = sold_by_asin.get(row['asin'], 0) or 0
         stocked_days = in_stock_days.get(row['asin'], days_for_velocity)
-        daily_rate = sold / max(stocked_days, 1)
+        daily_rate = sold / stocked_days if stocked_days else 0   # 在庫0日=予約注文のみ。ペースは出さない
         days_of_stock = (row['fulfillable_quantity'] / daily_rate) if daily_rate > 0 else None
         result.append({
             'asin': row['asin'],

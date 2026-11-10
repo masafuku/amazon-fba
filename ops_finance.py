@@ -3685,7 +3685,8 @@ def in_stock_days_by_asin(conn: sqlite3.Connection, since: str, today: str) -> d
 
     根拠はstock_ledgerが記録するfba_in_stock/fba_stock_outイベント。ただし:
     - 最初のイベントがfba_stock_outなら、それまではFC受領開始日(fba_checked_in/fba_receiving。無ければsince)から在庫ありとみなす。
-    - イベントが無いASINは、在庫か販売があれば受領開始日(無ければsince)から在庫ありとみなす。
+    - イベントが無いASINは、今在庫があれば受領開始日(無ければsince)から在庫ありとみなす。在庫が無ければ0日
+      (入荷前の予約注文だけ売れたASIN。イベントは販売開始より前の2026-10-22から記録しているので、それ以外の漏れは無い)。
     - 在庫ありのまま終わっているのに今の販売可能在庫が0(在庫一覧から消えた等)なら、最後に売れた日で在庫切れとみなす。"""
     since_d = datetime.fromisoformat(since).date() + timedelta(days=1)  # 30日分(sinceの翌日〜today)で数える
     today_d = datetime.fromisoformat(today).date()
@@ -3721,7 +3722,7 @@ def in_stock_days_by_asin(conn: sqlite3.Connection, since: str, today: str) -> d
             first_type, first_day = evs[0]
             if first_type == 'fba_stock_out':
                 start = min(received_on.get(asin, since_d), first_day)
-        elif current.get(asin) or asin in last_sale:
+        elif current.get(asin):
             start = received_on.get(asin, since_d)
         for event_type, day in evs:
             if event_type == 'fba_in_stock' and start is None:
@@ -3772,7 +3773,7 @@ def get_sp_fba_inventory_with_days_of_stock(days_for_velocity: int = 30) -> list
     for row in inventory:
         sold = sold_by_asin.get(row['asin'], 0) or 0
         stocked_days = in_stock_days.get(row['asin'], days_for_velocity)
-        daily_rate = sold / max(stocked_days, 1)
+        daily_rate = sold / stocked_days if stocked_days else 0   # 在庫0日=予約注文のみ。ペースは出さない
         days_of_stock = (row['fulfillable_quantity'] / daily_rate) if daily_rate > 0 else None
         result.append(
             {
