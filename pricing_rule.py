@@ -26,7 +26,7 @@ EXCHANGE_RATE = 150.0
 REFERRAL_FEE_RATE = 0.15
 FBA_FEE_USD = 3.5
 IMPORT_DUTY_RATE = 0.125
-INTL_SHIPPING_USD = round(8667 / 90 / EXCHANGE_RATE, 3)  # 1個あたり物流費。第一便の概算 (運賃4,373+燃油2,044(仮定)+発送代行1,500+国内送料750)÷90個。請求書で実額に差し替える
+INTL_SHIPPING_USD = round(10017 / 90 / EXCHANGE_RATE, 3)  # 1個あたり物流費。第一便の実額 (TNK請求書202610-2996 ¥9,267+国内送料約750)÷90個。関税は後日請求の可能性あり
 MIN_ROI = 0.20  # 損益分岐点に原価の20%分の利益を上乗せ(価格競争に巻き込まれすぎないため。Tier合格ライン ROI20% と同じ)
 MAX_MULTIPLE = 2.0
 
@@ -116,6 +116,7 @@ def main() -> None:
     parser.add_argument("--costs", required=True, help="{asin: 1個あたり原価(円)}のJSON")
     parser.add_argument("--rule-id", help="省略時は利用可能なルールが1つならそれを使う")
     parser.add_argument("--apply", action="store_true", help="実際に反映する(省略時は検証のみ)")
+    parser.add_argument("--skip-sku", action="append", default=[], help="対象外にするSKU(最低価格を手で固定中のもの)。複数回指定可")
     args = parser.parse_args()
 
     with open(args.costs, encoding="utf-8") as f:
@@ -133,6 +134,9 @@ def main() -> None:
     for l in sorted(listings, key=lambda x: x["sku"]):
         label = f"{l['sku']} {l['asin']}"
         cost = costs.get(l["asin"])
+        if l["sku"] in args.skip_sku:
+            print(f"SKIP {label}: 最低価格を固定中")
+            continue
         if cost is None or l["price"] is None:
             print(f"SKIP {label}: {'原価なし' if cost is None else '現在価格なし'}")
             continue
