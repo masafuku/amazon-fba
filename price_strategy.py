@@ -151,6 +151,7 @@ def fetch() -> list:
     セラーマイニングの後)。ループの外から並行して呼ぶと、トークンを取り合って両方が遅くなる。"""
     from keepa_mcp import keepa_client as k
     from keepa_mcp.config import settings as keepa_settings
+    from keepa_mcp.server import TOKEN_RESERVE
     from sp_api.config import settings as sp_settings
 
     of.init_ops_tables()
@@ -159,7 +160,8 @@ def fetch() -> list:
     done = []
     for i in range(0, len(asins), 3):
         batch = asins[i:i + 3]
-        while k.get_token_status(keepa_settings.keepa_api_key)['tokens_left'] < KEEPA_TOKENS_PER_ASIN * len(batch) + 1:
+        # 検索ループと同じく、手動の調査用の予備(TOKEN_RESERVE)は残す
+        while k.get_token_status(keepa_settings.keepa_api_key)['tokens_left'] < KEEPA_TOKENS_PER_ASIN * len(batch) + TOKEN_RESERVE:
             time.sleep(60)
         for p in k.get_products(keepa_settings.keepa_api_key, 'US', asins=batch, offers_limit=20, include_stock=True):
             with sqlite3.connect(of.DB_PATH) as conn:
