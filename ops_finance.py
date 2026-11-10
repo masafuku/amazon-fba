@@ -388,6 +388,41 @@ def init_ops_tables():
                 fetched_at TEXT
             );
 
+            -- 価格の振り返り用(price_review.pyが1日1回。読み取りのみで価格は動かさない)。
+            -- SKUごとの1日1行: 自社の価格・最低/最高価格、その時点の相場(market_pricesの写し)と販売可能在庫。
+            CREATE TABLE IF NOT EXISTS price_snapshots (
+                snapshot_on TEXT NOT NULL,        -- YYYY-MM-DD(UTC)
+                sku TEXT NOT NULL,
+                asin TEXT,
+                item_name TEXT,
+                our_price REAL,
+                min_price REAL,
+                max_price REAL,
+                buy_box_usd REAL,
+                lowest_fba_usd REAL,
+                offer_count INTEGER,
+                fulfillable INTEGER,
+                PRIMARY KEY (snapshot_on, sku)
+            );
+
+            -- 価格の変更(最低価格か、自動価格設定に任せていない価格の変更)。前日のスナップショットとの
+            -- 差分で自動記録し、理由は price_review.py note で後から付ける。見込み利益は変更時の手数料の実額で出す。
+            CREATE TABLE IF NOT EXISTS price_changes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sku TEXT NOT NULL,
+                asin TEXT,
+                changed_on TEXT NOT NULL,         -- YYYY-MM-DD(この日から新しい価格)
+                old_price REAL,
+                new_price REAL,
+                old_min REAL,
+                new_min REAL,
+                old_unit_profit REAL,
+                new_unit_profit REAL,
+                reason TEXT,
+                recorded_at TEXT,
+                UNIQUE (sku, changed_on)
+            );
+
             -- SDの後払い(Paid)。出荷されるたびに届く「決済確定」メール1通=1行。ご利用月(settled_on)ごとに
             -- 月末締め・翌月初3営業日に請求書が出る。paid_onはその月の請求を払った日(入金確認メールには金額が
             -- 無いので、stock_ledger.py paid で月ごとに登録する)。
