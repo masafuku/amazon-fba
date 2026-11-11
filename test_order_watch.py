@@ -87,6 +87,19 @@ class TestOrderWatch(unittest.TestCase):
             self.run_watch()
         self.assertEqual(self.sent[0], '【売れた 10/26 02:01】Sanrio FriXion Ball Knock Set ×2 予定$13.98')
 
+    def test_profit_is_shown_without_international_shipping(self):
+        import sqlite3
+        with sqlite3.connect(ops_finance.DB_PATH) as conn:
+            conn.execute("INSERT INTO jp_purchase_records (asin, quantity, amount_jpy) VALUES ('B0FKTF2XVZ', 10, 7150)")
+        self.orders = [order('A-1', 'Shipped')]
+        self.run_watch()
+        self.orders.append(order('A-2', 'Unshipped'))
+        self.items = {'A-2': [item(qty=2, price='29.78')]}
+        with mock.patch.object(order_watch, 'fetch_fees', return_value=6.0):
+            self.run_watch()
+        # 1個: 14.89 - 6.00 - (715/150)*1.125 = 3.5275 → 2個で 7.06
+        self.assertEqual(self.sent[0], '【売れた 10/26 02:01】Sanrio FriXion Ball Knock Set ×2 $29.78 利益$7.06')
+
     def test_shipped_is_silent_but_cancel_is_notified(self):
         self.orders = [order('A-1', 'Pending')]
         self.run_watch()

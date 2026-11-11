@@ -3,7 +3,8 @@
 
 Amazonの標準メール通知は、FBAの場合「出荷した後に2時間ごとにまとめて」届くだけで、売れた直後には来ない。
 そのため注文そのものをポーリングして、売れた直後(最大5分遅れ)に気づけるようにする。保留中(支払い確認待ち)の注文も、
-注文の数分後にはAPIに出る。通知は商品名・販売価格・時間だけの短い文(利益・注文番号は載せない)。保留中は価格が未確定なので、現在の出品価格を「予定$」で出す。
+注文の数分後にはAPIに出る。通知は商品名・販売価格・利益・時間の短い文(注文番号は載せない)。保留中は価格が未確定なので、現在の出品価格を「予定$」で出す。
+利益 = 販売価格 − Amazonの手数料(その価格での見積もり) − 仕入れ原価 − 関税。国際送料は引かない(CEO 2026-11-11)。原価が無い商品は利益を出さない。
 
 使い方(AWSで実行):
     order_watch.py --dry-run     # 検索と通知文の表示だけ(LINEは送らない。状態も更新しない)
@@ -20,6 +21,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import ops_finance as of
+import pricing_rule as pr
 import stock_ledger
 from sp_api import client as sp_client
 
@@ -84,15 +86,45 @@ def fetch_listing_price(sku: str) -> float | None:
         return None
 
 
+def fetch_fees(asin: str, unit_price: float) -> float | None:
+    """その価格で売ったときのAmazonの手数料(1個, USD)。取れなければNone。"""
+    try:
+        return sp_client.get_fees_estimate(asin, round(unit_price, 2))['total']
+    except Exception:
+        return None
+
+
+def _unit_cost_jpy(asin: str | None) -> float | None:
+    """仕入れ金額(税抜)の平均。pricing_rule と同じ考え方。"""
+    if not asin:
+        return None
+    with sqlite3.connect(of.DB_PATH) as conn:
+        row = conn.execute('SELECT SUM(IFNULL(amount_jpy, 0)) / SUM(quantity) FROM jp_purchase_records '
+                           'WHERE asin = ? AND quantity > 0', (asin,)).fetchone()
+    return row[0] if row and row[0] else None
+
+
+def _profit_text(item: dict, unit_price: float, qty: int) -> str:
+    """「 利益$3.25」。国際送料は引かない。原価か手数料が取れないときは出さない。"""
+    cost = _unit_cost_jpy(item.get('ASIN'))
+    fees = fetch_fees(item['ASIN'], unit_price) if cost else None
+    if fees is None:
+        return ''
+    cost_usd = cost / pr.EXCHANGE_RATE
+    profit = (unit_price - fees - cost_usd * (1 + pr.IMPORT_DUTY_RATE)) * qty
+    return f' 利益${profit:.2f}'
+
+
 def _price_text(item: dict) -> str:
-    """確定価格は「$6.99」、保留中で価格が無いときは現在の出品価格×数量を「予定$6.99」と出す。"""
+    """確定価格は「$6.99」、保留中で価格が無いときは現在の出品価格×数量を「予定$6.99」と出し、利益を添える。"""
+    qty = int(item.get('QuantityOrdered') or 1)
     price = _price(item)
     if price is not None:
-        return f' ${price:.2f}'
+        return f' ${price:.2f}' + _profit_text(item, price / qty, qty)
     unit = fetch_listing_price(item['SellerSKU']) if item.get('SellerSKU') else None
     if unit is None:
         return ''
-    return f" 予定${unit * int(item.get('QuantityOrdered') or 1):.2f}"
+    return f" 予定${unit * qty:.2f}" + _profit_text(item, unit, qty)
 
 
 def _names(items: list[dict]) -> str:
