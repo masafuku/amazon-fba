@@ -99,6 +99,16 @@ def list_listings() -> list:
                 amount = (offer.get("price") or {}).get("amount")
                 if amount is not None:
                     price = float(amount)
+            if price is None:
+                # FBAで在庫がまだ無い出品は一覧にofferが出ないので、出品データの価格(our_price)を読む
+                attrs = client._request(
+                    f"/listings/2021-08-01/items/{client.settings.seller_id}/{item['sku']}",
+                    {"marketplaceIds": client.settings.marketplace_id, "includedData": "attributes"},
+                ).get("attributes") or {}
+                try:
+                    price = float(attrs["purchasable_offer"][0]["our_price"][0]["schedule"][0]["value_with_tax"])
+                except (KeyError, IndexError, TypeError, ValueError):
+                    price = None
             rows.append({
                 "sku": item["sku"],
                 "asin": summary.get("asin"),
