@@ -32,7 +32,6 @@ import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
 
-import market_prices
 import ops_finance as of
 import price_review as prv
 import stock_ledger
@@ -46,7 +45,6 @@ LOW_STOCK_UNITS = 10      # 在庫がこれ未満なら値下げしない
 MAX_CUT = 0.10            # 1回の値下げ幅の上限
 NO_SALE_DAYS = 14         # 在庫ありでこの日数売れなければ「売れない」とみなす
 KEEPA_TOKENS_PER_ASIN = 11
-STATE_KEY = 'price_digest_sent_on'
 FETCH_STATE_KEY = 'competitor_fetched_on_jst'
 JST = timezone(timedelta(hours=9))
 ALREADY_FETCHED_EXIT = 10   # fetch --once-per-day で今日の分が取得済みのときの終了コード(検索ループが見る)
@@ -243,47 +241,6 @@ def format_lines(rows: list) -> list:
         lines.append(f"・{label[r['action']]} {r['name']}{price}{profit}")
         lines.append(f"  {r['reason']}")
     return lines
-
-
-def build_price_digest() -> str | None:
-    """LINEの朝のまとめ用。まだ送っていない日の提案と振り返りを1通にする(送ったら mark_digest_sent)。"""
-    of.init_ops_tables()
-    with sqlite3.connect(of.DB_PATH) as conn:
-        day, rows = latest_proposals(conn)
-        if not day or stock_ledger._get_state(conn, STATE_KEY) == day:
-            return None
-        today = datetime.now(timezone.utc).date()
-        names = {r['asin']: _short_name(r['name']) for r in stock_ledger.stock_pipeline()}
-        conn.row_factory = sqlite3.Row
-        changes = [dict(r) for r in conn.execute('SELECT * FROM price_changes WHERE changed_on >= ? ORDER BY changed_on',
-                                                 ((today - timedelta(days=60)).isoformat(),))]
-        conn.row_factory = None
-        judged = []
-        for c in changes:
-            verdict = prv.review_change(conn, c, today)
-            if not verdict['verdict'].startswith('途中経過'):
-                note = f" ※{verdict['market_note']}" if verdict['market_note'] else ''
-                judged.append(f"・{names.get(c['asin']) or c['sku']}({c['changed_on'][5:]} 最低${c['old_min']:.2f}→${c['new_min']:.2f}):"
-                              f" {verdict['verdict']}{note}")
-    counts = {a: sum(1 for r in rows if r['action'] == a) for a in ('raise', 'cut', 'feedback')}
-    lines = [f"【価格の提案(ドライラン・価格は変えていません)】{day}",
-             f"値上げ{counts['raise']}件 / 値下げ{counts['cut']}件 / 評価の問題{counts['feedback']}件"]
-    lines += format_lines(rows) or ["提案はありません。"]
-    lines.append(f"振り返り中の価格変更: {len(changes)}件(判定が出たもの {len(judged)}件)")
-    lines += judged
-    low = [r for r in market_prices.roi_rows() if r['roi'] is not None and r['roi'] < market_prices.ROI_ALERT_THRESHOLD]
-    if low:
-        lines.append(f"相場での利益率が{market_prices.ROI_ALERT_THRESHOLD:.0%}未満:")
-        lines += [f"・{names.get(r['asin']) or r['name'] or r['asin']} 相場${r['buy_box']:.2f}で利益${r['profit']:.2f}(利益率{r['roi']:.0%})"
-                  for r in low]
-    return "\n".join(lines)
-
-
-def mark_digest_sent() -> None:
-    with sqlite3.connect(of.DB_PATH) as conn:
-        day = conn.execute('SELECT MAX(proposed_on) FROM price_proposals').fetchone()[0]
-        if day:
-            stock_ledger._set_state(conn, STATE_KEY, day)
 
 
 def main() -> None:

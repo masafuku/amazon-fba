@@ -27,7 +27,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 
-import price_strategy
+import daily_report
 import stock_ledger
 from config import Settings
 from notify_line import send_line_message
@@ -56,22 +56,27 @@ def main() -> None:
     budget_alerts = check_budget_alert(this_month)
 
     period_label = f"{args.period}候補" if args.period else "候補"
-    candidate_message = build_daily_digest_message(candidates, keywords, period_label, budget_alerts=budget_alerts)
-    # 在庫・物流と候補を別の吹き出しにする(1回の送信なので送信数は増えない)
-    messages = [stock_ledger.build_ledger_digest(since_iso), candidate_message]
-    # 価格の提案と振り返り(price_strategy.py。まだ送っていない日の分だけ。朝7:30に作るので、ふつうは朝のまとめに入る)
+    evening = args.period.startswith("夜")
+    # 1通目: 売上・やること・在庫の変化・動き・価格(daily_report.py。CEO 2026-11-11「要点を絞って」)。
+    # 夜は新しいことが無ければNone。壊れても候補のまとめは送れるよう、失敗時は従来の在庫・物流欄にする。
+    alerts_now = None
     try:
-        price_message = price_strategy.build_price_digest()
-    except Exception as exc:   # 価格の部分が壊れても、在庫・候補のまとめは送る
-        print(f"[WARN] 価格の提案を組み立てられませんでした: {exc}")
-        price_message = None
-    if price_message:
-        messages.append(price_message)
+        report, alerts_now = daily_report.build_report(since_iso, evening=evening)
+    except Exception as exc:
+        print(f"[WARN] まとめ本文を組み立てられませんでした(従来の形式で送ります): {exc}")
+        report = stock_ledger.build_ledger_digest(since_iso)
+    messages = [report] if report else []
+    # 2通目: 仕入れ候補(合格候補か予算アラートがあるときだけ)
+    if candidates or budget_alerts:
+        messages.append(build_daily_digest_message(candidates, keywords, period_label, budget_alerts=budget_alerts))
+    if not messages:
+        print("[INFO] 新しいことが無いので送りません(次のまとめにまとめて入ります)。")
+        return
 
     print(f"[INFO] 対象期間: {effective_since} 〜 現在 (前回送信: {since_iso or 'なし(初回)'})")
     print(f"[INFO] 検索キーワード: {len(keywords)}件 / 合格候補: {len(candidates)}件(重複除く)")
     print("--- 通知内容 ---")
-    print("\n\n----- (2通目) -----\n\n".join(messages))
+    print("\n\n----- (次の吹き出し) -----\n\n".join(messages))
 
     if args.dry_run:
         print("[INFO] --dry-run のため送信しません。")
@@ -91,8 +96,8 @@ def main() -> None:
         target = settings.line_user_id or "友だち全員へbroadcast"
         print(f"[INFO] LINEダイジェストを送信しました ({target})。")
         set_last_digest_sent_at(datetime.now(timezone.utc).isoformat())
-        if price_message:
-            price_strategy.mark_digest_sent()
+        if alerts_now is not None:
+            daily_report.mark_sent(alerts_now)
     except Exception as exc:
         print(f"[ERROR] LINE送信失敗: {exc}")
         raise SystemExit(1)

@@ -665,12 +665,9 @@ def _short(name: str | None, length: int = 18) -> str:
     return name if len(name) <= length else name[:length] + '…'
 
 
-def build_ledger_digest(since_iso: str | None, today: str | None = None) -> str:
-    """LINEダイジェスト冒頭の「在庫・物流」欄。前回通知以降の動き・販売・要対応・在庫。"""
-    of.init_ops_tables()
-    since_iso = since_iso or (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-    pipeline = stock_pipeline(today=today)
-    names = {r['asin']: r['name'] for r in pipeline}
+def movements(since_iso: str, names: dict, include_stock_changes: bool = True) -> list:
+    """前回通知以降の動き(発注・出荷・入庫・ブランド等)を、便・企業ごとにまとめた1行ずつのリスト。
+    include_stock_changes=Falseなら、ASINごとのFBA在庫化・在庫切れは含めない(在庫の変化として別に書くとき)。"""
     groups = {}
 
     def add(key, label, qty=0, items=None):
@@ -707,9 +704,9 @@ def build_ledger_digest(since_iso: str | None, today: str | None = None) -> str:
                 add((event_type, ref), f'FBA受領開始 {ref}')
             elif event_type == FBA_CLOSED:
                 add((event_type, ref), f'FBA受領完了 {ref}')
-            elif event_type == FBA_IN_STOCK:
+            elif event_type == FBA_IN_STOCK and include_stock_changes:
                 add((event_type, ref), f"FBA在庫化 {_short(names.get(ref))} {detail.get('qty')}個")
-            elif event_type == FBA_STOCK_OUT:
+            elif event_type == FBA_STOCK_OUT and include_stock_changes:
                 add((event_type, ref), f'在庫切れ {_short(names.get(ref))}')
             elif event_type in (BRAND_APPROVED, BRAND_REJECTED, BRAND_PENDING):
                 label = {BRAND_APPROVED: '承認', BRAND_REJECTED: '却下', BRAND_PENDING: '審査中'}[event_type]
@@ -719,6 +716,25 @@ def build_ledger_digest(since_iso: str | None, today: str | None = None) -> str:
             elif event_type == PRICE_SUPPRESSED:
                 add((event_type, ref), f"価格誤設定で出品停止 {detail.get('marketplace')} {ref}")
 
+    result = []
+    for group in groups.values():
+        text = group['label']
+        if group['items']:
+            text += f" {len(group['items'])}品{group['qty']}個"
+        if group.get('amount'):
+            text += f" ¥{group['amount']:,.0f}"
+        result.append(text)
+    return result
+
+
+def build_ledger_digest(since_iso: str | None, today: str | None = None) -> str:
+    """LINEダイジェスト冒頭の「在庫・物流」欄。前回通知以降の動き・販売・要対応・在庫。"""
+    of.init_ops_tables()
+    since_iso = since_iso or (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    pipeline = stock_pipeline(today=today)
+    names = {r['asin']: r['name'] for r in pipeline}
+    moved = movements(since_iso, names)
+    with sqlite3.connect(of.DB_PATH) as conn:
         sales = conn.execute(
             '''SELECT i.asin, SUM(i.quantity), SUM(i.item_price_usd) FROM sp_order_items i
                JOIN sp_orders o ON o.order_id = i.order_id
@@ -726,16 +742,7 @@ def build_ledger_digest(since_iso: str | None, today: str | None = None) -> str:
                GROUP BY i.asin ORDER BY SUM(i.quantity) DESC''', (since_iso,)
         ).fetchall()
 
-    lines = ['【在庫・物流】', '■動き']
-    for group in groups.values():
-        text = group['label']
-        if group['items']:
-            text += f" {len(group['items'])}品{group['qty']}個"
-        if group.get('amount'):
-            text += f" ¥{group['amount']:,.0f}"
-        lines.append(f'・{text}')
-    if len(lines) == 2:
-        lines.append('・なし')
+    lines = ['【在庫・物流】', '■動き'] + [f'・{m}' for m in moved or ['なし']]
 
     if sales:
         units = sum(r[1] or 0 for r in sales)
