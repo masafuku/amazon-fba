@@ -44,7 +44,8 @@ class TestMarketPrices(unittest.TestCase):
         alerts = mp.roi_alerts()
         self.assertEqual(len(alerts), 1)
         self.assertIn('SKU2', alerts[0])
-        self.assertTrue(any('ROI低下' in a for a in stock_ledger.alerts()))
+        # 要対応には出さない(価格の提案の方に出す。CEO 2026-11-11)
+        self.assertFalse(any('ROI低下' in a for a in stock_ledger.alerts()))
 
     def test_failed_asin_keeps_previous_value(self):
         with mock.patch.object(client, 'get_offers_summary', side_effect=self.offers), \

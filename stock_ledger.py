@@ -25,7 +25,6 @@ import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 
-import market_prices
 import ops_finance as of
 import sd_email_parser as sdp
 
@@ -517,7 +516,7 @@ def alerts(today: str | None = None) -> list:
     for m in payments_summary(today)['months']:
         if m['paid_on'] is None and m['month'] < this_month:
             result.append(f"SDの支払い未確認: {m['month']}分 ¥{m['total']:,.0f}（請求書は発行済み。払ったら paid --month {m['month']} で登録）")
-    result += market_prices.roi_alerts()
+    # 相場での利益低下(ROI)は価格戦略の話なので、要対応ではなく価格の提案(price_strategy.build_price_digest)に出す(CEO 2026-11-11)
     return result
 
 

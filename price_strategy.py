@@ -32,6 +32,7 @@ import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
 
+import market_prices
 import ops_finance as of
 import price_review as prv
 import stock_ledger
@@ -270,6 +271,11 @@ def build_price_digest() -> str | None:
     lines += format_lines(rows) or ["提案はありません。"]
     lines.append(f"振り返り中の価格変更: {len(changes)}件(判定が出たもの {len(judged)}件)")
     lines += judged
+    low = [r for r in market_prices.roi_rows() if r['roi'] is not None and r['roi'] < market_prices.ROI_ALERT_THRESHOLD]
+    if low:
+        lines.append(f"相場での利益率が{market_prices.ROI_ALERT_THRESHOLD:.0%}未満:")
+        lines += [f"・{names.get(r['asin']) or r['name'] or r['asin']} 相場${r['buy_box']:.2f}で利益${r['profit']:.2f}(利益率{r['roi']:.0%})"
+                  for r in low]
     return "\n".join(lines)
 
 
