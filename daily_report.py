@@ -116,6 +116,11 @@ def _in_transit(row: dict) -> int:
     return row['at_home'] + row['planned'] + row['at_tnk'] + row['intl_transit']
 
 
+def _on_order(row: dict) -> int:
+    """発注済みでまだFBAに届いていない数(仕入れ先の発送待ちから国際輸送中まで)。"""
+    return row['awaiting_supplier'] + row['domestic_transit'] + _in_transit(row)
+
+
 def stock_change_lines(conn: sqlite3.Connection, since_iso: str, pipeline: list, sold: list) -> list:
     """変化があった商品だけ「起きたこと → 今の状態」。"""
     rows = {r['asin']: r for r in pipeline}
@@ -154,7 +159,8 @@ def todo_lines(conn: sqlite3.Connection, pipeline: list, price_count: int) -> tu
     found = [short_alert(a) for a in sl.alerts()]
     previous = set(json.loads(sl._get_state(conn, ALERTS_STATE_KEY) or '[]'))
     reorder = [f"{display_name(r['name'])}: 残り{_remaining(r)}個（約{r['days_of_cover']:.0f}日分）→ 発注の検討"
-               for r in pipeline if r['days_of_cover'] is not None and r['days_of_cover'] < sl.REORDER_COVER_DAYS]
+               for r in pipeline if r['days_of_cover'] is not None and r['days_of_cover'] < sl.REORDER_COVER_DAYS
+               and not _on_order(r)]   # 発注済みの商品は出さない(CEO 2026-11-11)
     # 納品前に高めにした価格(CEO 2026-11-11)は、販売できるようになったら手で戻す(CEO「手で戻す」)
     preorder = json.loads(sl._get_state(conn, PREORDER_STATE_KEY) or '{}')
     stock_by_asin = {r['asin']: r for r in pipeline}

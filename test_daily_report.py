@@ -71,6 +71,15 @@ class TestDailyReport(unittest.TestCase):
         self.assertIn('パタップ ブルー: 販売開始（40個）→ 価格を通常に戻す', text)
         self.assertNotIn('A9', text)
 
+    def test_reorder_alert_skips_items_already_on_order(self):
+        row = {'asin': 'A1', 'name': 'ポチャッコ シール', 'fba_available': 0, 'fc_received_inbound': 5, 'days_of_cover': 8.3,
+               'awaiting_supplier': 0, 'domestic_transit': 0, 'at_home': 0, 'planned': 0, 'at_tnk': 0, 'intl_transit': 0}
+        with mock.patch.object(sl, 'alerts', return_value=[]):
+            lines, _ = dr.todo_lines(self.conn, [row], 0)
+            self.assertIn('発注の検討', '\n'.join(lines))
+            lines, _ = dr.todo_lines(self.conn, [dict(row, awaiting_supplier=30)], 0)
+            self.assertEqual(lines, [])
+
     def test_evening_without_news_is_not_sent(self):
         with mock.patch.object(sl, 'alerts', return_value=[]):
             text, _ = dr.build_report('2026-11-11T00:00:00+00:00', evening=True, now=NOW)
