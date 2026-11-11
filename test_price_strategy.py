@@ -41,7 +41,7 @@ class TestDecide(unittest.TestCase):
         # 在庫60個・30日で6個(在庫あり30日) → 300日分。最安$7.00に2社。市場は月90個
         p = ps.decide(7.5, 7.5, [[7.0, 2, 10], [7.5, 3, 30]], 90, 60, 6, 30, lambda x: round(x - 5.0, 2))
         self.assertEqual((p['action'], p['target']), ('cut', 6.99))
-        self.assertIn('最安$7.00', p['reason'])
+        self.assertIn('最安の他社$7.00', p['reason'])
 
     def test_no_cut_below_break_even_or_when_stock_is_low(self):
         layers = [[7.0, 2, 10]]

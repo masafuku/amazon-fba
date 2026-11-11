@@ -172,6 +172,7 @@ def price_lines(conn: sqlite3.Connection, names: dict) -> tuple[list, int]:
         gain = r['profit_target'] - r['profit_now']
         lines.append(f"・{label[r['action']]} {display_name(r['name'])} 最低{_money(r['current_min'])}→{_money(r['target'])}"
                      f"（1個の利益{'+' if gain >= 0 else ''}{_money(gain)}）")
+        lines.append(f"  理由: {r['reason']}")
     if len(proposals) > MAX_PRICE_ITEMS:
         lines.append(f"・ほか{len(proposals) - MAX_PRICE_ITEMS}件（ダッシュボード）")
     feedback = [display_name(r['name']) for r in rows if r['action'] == 'feedback']

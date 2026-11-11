@@ -82,10 +82,10 @@ def decide(cur_min: float, cur_price: float | None, layers: list, monthly_sold: 
         keep30 = min(stock, (our_rate or 0) * 30) * profit(cur_price)
         cut30 = min(stock, rate_cut * 30) * cut_profit
         if cut30 > keep30:
-            cover_text = f"約{cover:.0f}日分" if cover != math.inf else "売れていない"
+            cover_text = f"売り切るのに約{cover:.0f}日" if cover != math.inf else "売れていない"
             return {"action": "cut", "target": target,
-                    "reason": f"在庫{stock}個({cover_text})。最安${lowest[0]:.2f}({lowest[1]}社{lowest[2]}個)の下へ。"
-                              f"30日の見込み利益 ${keep30:.0f}→${cut30:.0f}"}
+                    "reason": f"在庫が多い({stock}個、{cover_text})。最安の他社${lowest[0]:.2f}({lowest[1]}社{lowest[2]}個)より安くして、"
+                              f"30日の利益を${keep30:.0f}→${cut30:.0f}に"}
         return keep(f"在庫{stock}個(約{cover:.0f}日分)だが、値下げしても見込み利益が増えない")
 
     best = None
@@ -103,10 +103,14 @@ def decide(cur_min: float, cur_price: float | None, layers: list, monthly_sold: 
             best = (target, gain, cheaper, above)
     if best:
         target, gain, cheaper, above = best
-        clear = f"市場の約{cheaper / market_daily:.0f}日分" if market_daily else "市場の販売数は不明"
-        above_text = f"、その上は${above[0]:.2f}に{above[2]}個" if above else ""
-        return {"action": "raise", "target": target,
-                "reason": f"${target:.2f}より安い他社在庫は{cheaper}個({clear}){above_text}"}
+        if not cheaper:
+            clear = "うちより安い他社の在庫は無い"
+        elif market_daily:
+            clear = f"${target:.2f}より安い他社の在庫は{cheaper}個だけ(約{max(cheaper / market_daily, 1):.0f}日で売り切れる)"
+        else:
+            clear = f"${target:.2f}より安い他社の在庫は{cheaper}個だけ"
+        above_text = f"。次に安い他社は${above[0]:.2f}({above[2]}個)" if above else "。上に他社なし"
+        return {"action": "raise", "target": target, "reason": clear + above_text}
     return keep("値上げ・値下げの余地なし")
 
 
