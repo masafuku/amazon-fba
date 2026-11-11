@@ -27,6 +27,7 @@ import stock_ledger as sl
 
 JST = timezone(timedelta(hours=9))
 ALERTS_STATE_KEY = 'report_alerts_sent'
+PREORDER_STATE_KEY = 'preorder_priced_skus'   # {SKU: ASIN} 納品前で価格を高めにしているもの。戻したら消す
 MAX_PRICE_ITEMS = 2
 
 # alerts() の文にはCLIの使い方(台帳の更新コマンド)が入っているが、LINEでは要らないので外す
@@ -154,7 +155,12 @@ def todo_lines(conn: sqlite3.Connection, pipeline: list, price_count: int) -> tu
     previous = set(json.loads(sl._get_state(conn, ALERTS_STATE_KEY) or '[]'))
     reorder = [f"{display_name(r['name'])}: 残り{_remaining(r)}個（約{r['days_of_cover']:.0f}日分）→ 発注の検討"
                for r in pipeline if r['days_of_cover'] is not None and r['days_of_cover'] < sl.REORDER_COVER_DAYS]
-    items = found + reorder
+    # 納品前に高めにした価格(CEO 2026-11-11)は、販売できるようになったら手で戻す(CEO「手で戻す」)
+    preorder = json.loads(sl._get_state(conn, PREORDER_STATE_KEY) or '{}')
+    stock_by_asin = {r['asin']: r for r in pipeline}
+    restore = [f"{display_name(stock_by_asin[a]['name'])}: 販売開始（{stock_by_asin[a]['fba_available']}個）→ 価格を通常に戻す"
+               for a in sorted(set(preorder.values())) if a in stock_by_asin and stock_by_asin[a]['fba_available'] > 0]
+    items = found + reorder + restore
     ordered = [a for a in items if a not in previous] + [a for a in items if a in previous]
     lines = [f"{n}. {'新 ' if a not in previous else ''}{a}" for n, a in enumerate(ordered, 1)]
     if price_count:

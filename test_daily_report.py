@@ -63,6 +63,14 @@ class TestDailyReport(unittest.TestCase):
             text, _ = dr.build_report(SINCE, now=NOW)
             self.assertIn('1. SDの支払い未確認', text)   # 2回目は「新」が付かない
 
+    def test_preorder_priced_item_with_stock_asks_to_restore_the_price(self):
+        sl._set_state(self.conn, dr.PREORDER_STATE_KEY, json.dumps({'S1': 'A1', 'S9': 'A9'}))
+        self.conn.commit()
+        with mock.patch.object(sl, 'alerts', return_value=[]):
+            text, _ = dr.build_report(SINCE, now=NOW)
+        self.assertIn('パタップ ブルー: 販売開始（40個）→ 価格を通常に戻す', text)
+        self.assertNotIn('A9', text)
+
     def test_evening_without_news_is_not_sent(self):
         with mock.patch.object(sl, 'alerts', return_value=[]):
             text, _ = dr.build_report('2026-11-11T00:00:00+00:00', evening=True, now=NOW)
