@@ -153,6 +153,14 @@ class TestParsing(unittest.TestCase):
         self.assertEqual(sl.parse_brand(subject, 'are reviewing the information'), ('SUN-STAR', sl.BRAND_PENDING))
 
 
+class TestBrandAlerts(StockLedgerTestCase):
+    def test_dropped_brand_leaves_the_alerts(self):
+        sl.record_brand_status('パイロット', 'rejected', on='2026-10-30')
+        self.assertTrue(any('ブランド却下: パイロット' in a for a in sl.alerts(today='2026-11-11')))
+        sl.record_brand_status('パイロット', 'dropped', note='CEO 11/11 見送り', on='2026-11-11')
+        self.assertFalse(any('パイロット' in a for a in sl.alerts(today='2026-11-11')))
+
+
 class TestIngest(StockLedgerTestCase):
     def test_order_then_schedule_then_ship_then_receive(self):
         sl.set_sd_product_asin('11916786S3', 'B0CNKDP9WP')

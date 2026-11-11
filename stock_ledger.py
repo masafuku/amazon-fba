@@ -39,6 +39,7 @@ TNK_ARRIVED = 'tnk_arrived'
 TNK_SHIPPED = 'tnk_shipped'
 BRAND_APPROVED = 'brand_approved'
 BRAND_REJECTED = 'brand_rejected'
+BRAND_DROPPED = 'brand_dropped'   # 却下のまま見送り(CEO判断)。要対応に出さない
 BRAND_PENDING = 'brand_pending'
 LISTING_CREATED = 'listing_created'
 FBA_CHECKED_IN = 'fba_checked_in'
@@ -411,7 +412,8 @@ def gmail_since(default_days: int = 14) -> str:
 
 def record_brand_status(brand: str, status: str, note: str = '', on: str | None = None) -> None:
     """再申請など、メール以外で分かったブランド状況を登録する。"""
-    event_type = {'approved': BRAND_APPROVED, 'rejected': BRAND_REJECTED, 'pending': BRAND_PENDING}[status]
+    event_type = {'approved': BRAND_APPROVED, 'rejected': BRAND_REJECTED, 'pending': BRAND_PENDING,
+                  'dropped': BRAND_DROPPED}[status]
     of.init_ops_tables()
     with sqlite3.connect(of.DB_PATH) as conn:
         _record_event(conn, f'manual:{_now()}', event_type, on or datetime.now(JST).date().isoformat(), brand, {'note': note})
@@ -464,10 +466,10 @@ def alerts(today: str | None = None) -> list:
 
         for brand, event_type, on in conn.execute(
             '''SELECT ref, event_type, occurred_on FROM ops_events e
-               WHERE event_type IN (?, ?, ?) AND id = (
-                   SELECT id FROM ops_events WHERE ref = e.ref AND event_type IN (?, ?, ?)
+               WHERE event_type IN (?, ?, ?, ?) AND id = (
+                   SELECT id FROM ops_events WHERE ref = e.ref AND event_type IN (?, ?, ?, ?)
                    ORDER BY occurred_on DESC, id DESC LIMIT 1)''',
-            (BRAND_APPROVED, BRAND_REJECTED, BRAND_PENDING) * 2,
+            (BRAND_APPROVED, BRAND_REJECTED, BRAND_PENDING, BRAND_DROPPED) * 2,
         ):
             if event_type == BRAND_REJECTED:
                 result.append(f'ブランド却下: {brand}（{on}）。仕入れ済み・発注予定があれば再申請か販路変更を判断')
@@ -850,7 +852,8 @@ def main() -> None:
     digest.add_argument('--since', help='ISO日時(省略時は前回のダイジェスト送信時刻)')
     brand = sub.add_parser('brand', help='メール以外で分かったブランド状況を登録')
     brand.add_argument('name')
-    brand.add_argument('status', choices=['approved', 'rejected', 'pending'])
+    brand.add_argument('status', choices=['approved', 'rejected', 'pending', 'dropped'],
+                       help='dropped=却下のまま見送り(要対応に出さない)')
     brand.add_argument('--note', default='')
     stock = sub.add_parser('stock')
     stock.add_argument('--json', action='store_true')
