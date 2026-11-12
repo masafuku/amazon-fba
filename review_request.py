@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 
 import ops_finance as of
@@ -30,6 +31,8 @@ STATE_KEY = 'review_request_done'
 LOOKBACK_DAYS = 40
 # 配達の5日後から送れる。それより新しい注文はAPIを呼ぶだけ無駄なので見ない
 MIN_AGE_DAYS = 5
+# Solicitations APIは毎秒1回まで(続けて呼ぶと429)
+API_INTERVAL_SEC = 1.1
 
 
 def _state() -> dict:
@@ -59,17 +62,20 @@ def shipped_orders(now: datetime) -> list[dict]:
 
 
 def can_request(order_id: str) -> bool:
-    data = sp_client._request(f'/solicitations/v1/orders/{order_id}', {'marketplaceIds': settings.marketplace_id})
+    time.sleep(API_INTERVAL_SEC)
+    data =sp_client._request(f'/solicitations/v1/orders/{order_id}', {'marketplaceIds': settings.marketplace_id})
     return any(link.get('name') == 'productReviewAndSellerFeedback'
                for link in (data.get('_links') or {}).get('actions') or [])
 
 
 def has_refund(order_id: str) -> bool:
-    events = sp_client._request(f'/finances/v0/orders/{order_id}/financialEvents').get('payload', {})
+    time.sleep(API_INTERVAL_SEC)
+    events =sp_client._request(f'/finances/v0/orders/{order_id}/financialEvents').get('payload', {})
     return bool((events.get('FinancialEvents') or {}).get('RefundEventList'))
 
 
 def send_request(order_id: str) -> None:
+    time.sleep(API_INTERVAL_SEC)
     sp_client._request(f'/solicitations/v1/orders/{order_id}/solicitations/productReviewAndSellerFeedback',
                        {'marketplaceIds': settings.marketplace_id}, 'POST')
 
