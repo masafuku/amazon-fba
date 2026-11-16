@@ -57,6 +57,19 @@ class TestReviewRequest(unittest.TestCase):
         self.assertEqual(self.sent, [])
         self.assertEqual(review_request._state(), {})
 
+    def test_preview_lists_without_sending(self):
+        with sqlite3.connect(ops_finance.DB_PATH) as conn:
+            conn.execute("INSERT INTO sp_order_items (order_id, asin, sku, quantity) VALUES ('OK-1', 'B0X', 'SKU-X', 2)")
+        res = review_request.preview(now=NOW)
+        self.assertEqual([e['order_id'] for e in res['eligible']], ['OK-1'])
+        self.assertEqual(res['eligible'][0]['products'], 'SKU-X×2')
+        self.assertEqual([e['order_id'] for e in res['refunded']], ['REFUND-1'])
+        self.assertEqual([(e['order_id'], e['unexplained']) for e in res['unavailable']], [('NOT-YET', True)])
+        self.assertEqual([e['order_id'] for e in res['upcoming']], ['TOO-NEW'])
+        self.assertEqual(self.sent, [])
+        self.assertEqual(review_request._state(), {})
+        self.assertIn('今送れる: 1件', review_request.format_preview(res))
+
 
 if __name__ == '__main__':
     unittest.main()

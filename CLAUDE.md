@@ -14,6 +14,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 必ず `.claude/skills/mail-check/SKILL.md`（スキル `mail-check`）の手順で、SD・TNK・Amazonのメールを
 在庫台帳（`stock_ledger.py`、AWSのDB）に取り込み、領収書を整理してから報告する。要約だけで終わらせない。
 在庫・便の中身・次の発注を聞かれたら、メールを探さずAWSで `stock_ledger.py stock` を見る。
+「在庫状況」「入庫は進んでる？」「どれが買える状態？」はスキル `fba-status`（`fba_status.py`）、
+レビュー依頼はスキル `review-request`（予行演習→CEO承認→送信。自動では送らない）。
 **DBはAWSのもの（`/home/ubuntu/work/amazon-fba/keepa-csv-dashboard/keepa_imports.sqlite3`）が唯一の正本で、ローカルのsqliteは古いコピーなので使わない。**
 
 ## 自動価格設定（ダイナミックプライシング）の設定・更新

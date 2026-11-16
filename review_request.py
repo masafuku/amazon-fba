@@ -10,7 +10,7 @@
 - 送った・見送った注文は ledger_state(キー review_request_done: {注文番号: 'sent'|'refunded'})に記録し、二度と見ない。
 
 使い方(AWSで手動実行。同期には組み込まない):
-    review_request.py --dry-run   # 送れる注文の一覧だけ(送らない・記録しない)
+    review_request.py --dry-run   # 送れる注文・送れない注文・これから送れる注文の一覧(送らない・記録しない)
     review_request.py             # 送る
 """
 from __future__ import annotations
@@ -102,11 +102,81 @@ def run(dry_run: bool = False, now: datetime | None = None) -> dict:
     return {'sent': sent, 'skipped_refunded': refunded}
 
 
+# Amazonが「送れない」と言う注文のうち、注文からこの日数を過ぎたものは理由不明として報告する
+# (配達5日後から送れるので、普通は注文の1〜2週間後には送れるようになる)
+UNEXPLAINED_AFTER_DAYS = 12
+
+
+def _names() -> dict:
+    import daily_report
+    names = {r['asin']: daily_report.display_name(r['name']) for r in stock_ledger.stock_pipeline()}
+    return {a: n for a, n in names.items() if n != '(名前なし)'}
+
+
+def _order_products(conn, order_id: str, names: dict) -> str:
+    rows = conn.execute('SELECT asin, sku, quantity FROM sp_order_items WHERE order_id = ?', (order_id,)).fetchall()
+    return '、'.join(f"{names.get(a) or s}{'×' + str(q) if (q or 1) > 1 else ''}" for a, s, q in rows) or '(明細なし)'
+
+
+def preview(now: datetime | None = None) -> dict:
+    """送る前の確認用(何も送らず、記録もしない)。
+    eligible=今送れる(返金なし) / refunded=送れるが返金ありで送らない /
+    unavailable=Amazonが送れないと言う注文(注文からUNEXPLAINED_AFTER_DAYS日以上は理由不明として印を付ける) /
+    upcoming=まだ注文から5日たっていない注文(未出荷を含む)。これから送れるようになる見込み。"""
+    now = now or datetime.now(timezone.utc)
+    done = _state()
+    names = _names()
+    result = {'sent_so_far': sum(1 for v in done.values() if v == 'sent'),
+              'eligible': [], 'refunded': [], 'unavailable': [], 'upcoming': []}
+    with sqlite3.connect(of.DB_PATH) as conn:
+        for order in shipped_orders(now):
+            order_id = order['order_id']
+            if order_id in done:
+                continue
+            age = (now - datetime.fromisoformat(order['purchase_date'].replace('Z', '+00:00'))).days
+            entry = {'order_id': order_id, 'date': order['purchase_date'][:10], 'age_days': age,
+                     'products': _order_products(conn, order_id, names)}
+            if not can_request(order_id):
+                entry['unexplained'] = age >= UNEXPLAINED_AFTER_DAYS
+                result['unavailable'].append(entry)
+            elif has_refund(order_id):
+                result['refunded'].append(entry)
+            else:
+                result['eligible'].append(entry)
+        since = (now - timedelta(days=MIN_AGE_DAYS)).isoformat()
+        for order_id, purchase_date, status in conn.execute(
+                "SELECT order_id, purchase_date, order_status FROM sp_orders WHERE purchase_date > ? "
+                "AND IFNULL(order_status, '') != 'Canceled' ORDER BY purchase_date", (since,)):
+            result['upcoming'].append({'order_id': order_id, 'date': purchase_date[:10], 'status': status,
+                                       'products': _order_products(conn, order_id, names)})
+    return result
+
+
+def format_preview(res: dict) -> str:
+    out = [f"これまでに送った数: {res['sent_so_far']}件",
+           f"== 今送れる: {len(res['eligible'])}件"]
+    out += [f"  {e['date']} {e['products']} ({e['order_id']})" for e in res['eligible']]
+    if res['refunded']:
+        out.append(f"== 返金ありのため送らない: {len(res['refunded'])}件(送信時に記録される)")
+        out += [f"  {e['date']} {e['products']} ({e['order_id']})" for e in res['refunded']]
+    out.append(f"== Amazonが送れないと言う注文: {len(res['unavailable'])}件(配達5日前か、理由不明)")
+    out += [f"  {e['date']} {e['products']} 注文から{e['age_days']}日{' ←理由不明' if e['unexplained'] else ''} ({e['order_id']})"
+            for e in res['unavailable']]
+    out.append(f"== これから(注文から5日未満): {len(res['upcoming'])}件")
+    out += [f"  {e['date']} {e['products']} [{e['status']}]" for e in res['upcoming']]
+    return '\n'.join(out)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description='出荷済みの注文にレビューとセラー評価のお願いを送る')
     parser.add_argument('--dry-run', action='store_true', help='送れる注文の一覧だけ(送らない・記録しない)')
+    parser.add_argument('--json', action='store_true', help='--dry-run の結果をJSONで出す')
     args = parser.parse_args()
-    print(json.dumps(run(dry_run=args.dry_run), ensure_ascii=False))
+    if args.dry_run:
+        res = preview()
+        print(json.dumps(res, ensure_ascii=False) if args.json else format_preview(res))
+    else:
+        print(json.dumps(run(), ensure_ascii=False))
 
 
 if __name__ == '__main__':
