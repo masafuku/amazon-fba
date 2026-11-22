@@ -9,6 +9,10 @@ class FakeAnalysis:
     素朴なdictキー読み出しに差し替えたもの(product dictは各テストで自作する)。"""
 
     @staticmethod
+    def package_dims_cm(product):
+        return product.get("dims_cm")
+
+    @staticmethod
     def current_price(product, domain="US"):
         return product.get("price")
 

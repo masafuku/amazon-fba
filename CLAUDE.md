@@ -14,6 +14,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 必ず `.claude/skills/mail-check/SKILL.md`（スキル `mail-check`）の手順で、SD・TNK・Amazonのメールを
 在庫台帳（`stock_ledger.py`、AWSのDB）に取り込み、領収書を整理してから報告する。要約だけで終わらせない。
 在庫・便の中身・次の発注を聞かれたら、メールを探さずAWSで `stock_ledger.py stock` を見る。
+「在庫状況」「入庫は進んでる？」「どれが買える状態？」はスキル `fba-status`（`fba_status.py`）、
+レビュー依頼はスキル `review-request`（予行演習→CEO承認→送信。自動では送らない）。
 **DBはAWSのもの（`/home/ubuntu/work/amazon-fba/keepa-csv-dashboard/keepa_imports.sqlite3`）が唯一の正本で、ローカルのsqliteは古いコピーなので使わない。**
 
 ## 自動価格設定（ダイナミックプライシング）の設定・更新
@@ -135,7 +137,8 @@ and turns `keepa_mcp` output into decisions:
   into `seller_pool`, and a pooled seller's own storefront (`expand_from_seller`, 1 token/seller)
   gets run through the same qualify pipeline (`source_type='seller'` in `agent_candidates`).
   **Seller discovery and mining both run only in the nightly window** (`--seller-mining`, JST
-  1–6am by default via `scripts/run_all_day.sh`), never inline during a daytime keyword-search
+  1–4am by default via `scripts/run_all_day.sh`; 4–8am the same loop runs the once-a-day
+  `price_strategy.py fetch` competitor check first, so the two never compete for Keepa tokens), never inline during a daytime keyword-search
   cycle — `run_daily_scan()` only searches/evaluates/persists, full stop. Each night,
   `run_seller_mining_cycle()` first calls `discover_sellers_for_pending_candidates()` (finds
   daytime candidates not yet seller-registered, `seller_pool.seed_asin` marks "already handled"),

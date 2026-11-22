@@ -15,6 +15,7 @@ from ops_finance import (
     _is_searchable_keyword,
     _shipping_cost_jpy_for_weight,
     calc_unit_profit,
+    estimate_intl_shipping_usd,
     evaluate_mcp_candidates,
     is_qualified_priority_tier,
     normalize_jp_cost_for_tax,
@@ -35,11 +36,31 @@ class TestCalcUnitProfitShipping(unittest.TestCase):
     EMS料金表ベース(実見積もりでスケール済み)に当てはめて計算する。
     """
 
-    def test_shipping_cost_is_zero(self):
-        # CEO指示(2026-09-22): 想定輸送費は妥当でないため0円として扱う
-        for price, cost, weight in [(50.0, 300.0, 0.1), (200.0, 60000.0, 2.0), (50.0, 1000.0, 0.01)]:
-            result = calc_unit_profit(us_price_usd=price, jp_cost_jpy=cost, weight_kg=weight)
-            self.assertEqual(result['shipping_cost_usd'], 0.0)
+    def test_shipping_cost_flat_when_weight_and_size_unknown(self):
+        # 重さが仮値で寸法も無い: 第1便の実額(¥10,017÷90個÷¥150)の一律額
+        result = calc_unit_profit(us_price_usd=50.0, jp_cost_jpy=300.0, weight_kg=0.5, weight_known=False)
+        self.assertEqual(result['shipping_cost_usd'], 0.74)
+
+    def test_shipping_cost_uses_larger_of_weight_and_volume(self):
+        # CEO 2026-11-15: 重さと容積重量(縦×横×高さ÷5000)の大きいほうで按分
+        light_bulky = estimate_intl_shipping_usd(0.05, (14.5, 10.2, 3.8))   # ウカンムリ: 容積重量0.112kg
+        self.assertEqual(light_bulky['basis'], 'volume')
+        heavy_small = estimate_intl_shipping_usd(0.17, (25.7, 18.2, 0.6))   # ルーズリーフ: 重さ0.17kg
+        self.assertEqual(heavy_small['basis'], 'weight')
+        tiny = estimate_intl_shipping_usd(0.009, (9.4, 7.0, 1.3))
+        self.assertLess(tiny['usd'], 0.74)
+        self.assertGreater(light_bulky['usd'], 0.74)
+        same = estimate_intl_shipping_usd(0.05, None, volume_cm3=14.5 * 10.2 * 3.8)
+        self.assertEqual(same['usd'], light_bulky['usd'])
+
+    def test_shipping_reduces_profit_of_cheap_items(self):
+        # $4.99・原価¥91.3・FBA$2.86(トンボのダストキャッチ消しゴム、19g・5.5×2.3×1.1cm): 送料抜きでは+$0.70だった
+        result = calc_unit_profit(us_price_usd=4.99, jp_cost_jpy=91.3, weight_kg=0.019, fba_fee_usd=2.86, dims_cm=(5.5, 2.3, 1.1))
+        self.assertAlmostEqual(result['unit_profit_usd'], 0.70 - result['shipping_cost_usd'], places=2)
+        # CEO 2026-11-16: 20kg箱で按分(19g ÷ 19kg × ¥28,090 ≒ ¥28 = $0.19)
+        self.assertAlmostEqual(result['shipping_cost_usd'], 0.19, places=2)
+        zero = calc_unit_profit(us_price_usd=4.99, jp_cost_jpy=91.3, weight_kg=0.019, fba_fee_usd=2.86, intl_shipping_usd=0.0)
+        self.assertAlmostEqual(zero['unit_profit_usd'], 0.70, places=2)
 
     def test_forwarder_quote_calibration_point_is_exact(self):
         # 実見積もり(容積重量7.20kg -> ¥13,034)そのものを回帰テストとして固定する
@@ -303,7 +324,8 @@ class TestEvaluateMcpCandidatesQualifiedBoundary(unittest.TestCase):
     def test_low_margin_high_roi_with_sales_evidence_is_qualified(self):
         # 利益率13.8%(旧15%安全弁を割っている)だが、ROI27.5%(>=20%)・強い実売(100件)
         # があるので合格する(旧ロジックならmarginで弾かれconsiderだった組み合わせ)
-        result = evaluate_mcp_candidates({'candidates': [self._candidate(price=20.0, jp_cost=1500.0)]})
+        # 2026-11-15から国際送料(重さ・容積で按分)も引くため、価格を$20→$21にして同じ組み合わせを作る
+        result = evaluate_mcp_candidates({'candidates': [self._candidate(price=21.0, jp_cost=1500.0)]})
         self.assertEqual(len(result['qualified']), 1)
         self.assertLess(result['qualified'][0]['margin_pct'], 0.15)
         self.assertEqual(result['qualified'][0]['priority_tier'], 'A+')

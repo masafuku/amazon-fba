@@ -122,6 +122,13 @@ def list_listings() -> list:
             return rows
 
 
+# サンスター文具の知的財産の申し立て(2026-11-17・11-19)で出品を止めた7SKU。価格を付けると出品が復活するので、
+# 自動価格設定の対象から外す(CEO 2026-11-20「異議申し立てはしない。出品は停止のまま」)。再開するときはここから外す。
+STOPPED_SKUS = frozenset({
+    "KADOMARU-PRO-1", "8F-QTEQ-C12Z", "UE-OV76-X4YC", "KP-ZVF5-Z7K0", "RJ-HH0F-RQC0", "UKANMURI-718736", "UKANMURI-718767",
+})
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="全SKUを自動価格設定ルールに紐付ける")
     parser.add_argument("--costs", required=True, help="{asin: 1個あたり原価(円)}のJSON")
@@ -145,6 +152,9 @@ def main() -> None:
     for l in sorted(listings, key=lambda x: x["sku"]):
         label = f"{l['sku']} {l['asin']}"
         cost = costs.get(l["asin"])
+        if l["sku"] in STOPPED_SKUS:
+            print(f"SKIP {label}: 出品停止中(サンスターの申し立て)")
+            continue
         if l["sku"] in args.skip_sku:
             print(f"SKIP {label}: 最低価格を固定中")
             continue

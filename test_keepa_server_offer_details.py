@@ -107,3 +107,15 @@ class TestSummarizeProductIncludesDemandSignal(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestWaitForBudgetKeepsReserve(unittest.TestCase):
+    """CEO: 「常に10トークンぐらいは残して」— 検索ループは予備を残して待つ。"""
+
+    def test_waits_until_needed_plus_reserve_and_returns_spendable_budget(self):
+        balances = iter([12, 15, 21])
+        with patch.object(server, "get_token_status",
+                          side_effect=lambda key: {"tokens_left": next(balances), "refill_rate_per_minute": 1}), \
+             patch.object(server.time, "sleep") as sleep:
+            self.assertEqual(server._wait_for_budget("k", 11, 0), 11)   # 21 - 予備10
+        self.assertEqual(sleep.call_count, 2)

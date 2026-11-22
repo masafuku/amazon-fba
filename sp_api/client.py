@@ -407,7 +407,9 @@ def get_offers_summary(asin: str) -> Dict[str, Any]:
     prices = summary.get("BuyBoxPrices") or []
     fba = [float(p["ListingPrice"]["Amount"]) for p in summary.get("LowestPrices", []) if p.get("fulfillmentChannel") == "Amazon"]
     return {
-        "buy_box": float(prices[0]["ListingPrice"]["Amount"]) if prices else None,
+        # 送料込み(LandedPrice)。自己発送の出品者は商品価格を安くして送料を$20取ることがあり、
+        # ListingPriceだけだと実際のカート価格よりずっと安く見える(2026-11-15、ステンレスボトルで$43.63 vs 実際$64.31)
+        "buy_box": float((prices[0].get("LandedPrice") or prices[0]["ListingPrice"])["Amount"]) if prices else None,
         "lowest_fba": min(fba) if fba else None,
         "offers": sum(int(n.get("OfferCount", 0)) for n in summary.get("NumberOfOffers", [])),
     }
