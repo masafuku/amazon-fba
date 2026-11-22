@@ -21,6 +21,11 @@ keepa-csv-dashboard/node_modules/
 keepa-csv-dashboard/dist/
 keepa-csv-dashboard/.env
 
+# run_all_day.sh runtime state (touched/removed at runtime, not code)
+.scan_loop_stop_requested
+.scan_loop_mode_override
+logs/
+
 # Dropbox and macOS metadata
 .DS_Store
 .dropbox/
@@ -29,3 +34,30 @@ keepa-csv-dashboard/.env
 .dropbox.attr
 **/.~*
 **/~$*
+.netsea_catalog_synced_at
+
+# --- 2026-11-22: 作業用・バックアップ・データファイルを除外（サーバーのチェックアウト）
+.env.bak-*
+Dockerfile
+docker-compose.yml
+analyze_downgrade.py
+backfill_priority_tier.py
+backfill_sales_rank_drops.py
+backfill_sales_rank_drops_2.py
+daily_report.py
+dashboard_keepa.json
+dashboard_keepa_backfill.py
+insert_nakabayashi.py
+keepa-csv-dashboard/KeepaExport-*.csv
+keepa-csv-dashboard/keepa_imports.sqlite3-shm
+keepa-csv-dashboard/keepa_imports.sqlite3-wal
+keepa-csv-dashboard/keepa_imports.sqlite3.bak-*
+keepa_update_*.csv
+keepa_update_oct.py
+seed_history.py
+setup_history.py
+sp_api_sync.py.bak-*
+test_kw.py
+update_from_keepa.py
+/"*
+{r[[]2]}*

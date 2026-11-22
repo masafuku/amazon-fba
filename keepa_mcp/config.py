@@ -42,6 +42,9 @@ class Settings:
     cache_ttl_finder_hours: float
     # Category trees barely change; safe to cache much longer.
     cache_ttl_category_hours: float
+    # Seller storefronts (who sells what) change slower than prices/ranks
+    # but faster than category trees; 24h default.
+    cache_ttl_seller_hours: float
 
     @classmethod
     def load(cls) -> "Settings":
@@ -53,6 +56,7 @@ class Settings:
             cache_ttl_product_hours=float(os.getenv("KEEPA_CACHE_TTL_PRODUCT_HOURS", "6")),
             cache_ttl_finder_hours=float(os.getenv("KEEPA_CACHE_TTL_FINDER_HOURS", "6")),
             cache_ttl_category_hours=float(os.getenv("KEEPA_CACHE_TTL_CATEGORY_HOURS", "720")),
+            cache_ttl_seller_hours=float(os.getenv("KEEPA_CACHE_TTL_SELLER_HOURS", "24")),
         )
 
 

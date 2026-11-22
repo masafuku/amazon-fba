@@ -5,7 +5,7 @@ from config import Settings
 from fetch_keepa import fetch_keepa_products, map_keepa_product
 from jp_amazon import search_jp_by_asin
 from notify_email import send_email, build_email_body
-from notify_line import send_line_notify, build_line_message
+from notify_line import send_line_message, build_line_message
 from us_amazon import search_us_asins
 
 
@@ -100,11 +100,11 @@ def main() -> None:
         print("メール通知を送信しました。")
 
     if args.notify_line:
-        if not settings.line_notify_token:
-            raise ValueError("LINE_NOTIFY_TOKEN is required for LINE notification.")
+        if not settings.line_channel_access_token:
+            raise ValueError("LINE_CHANNEL_ACCESS_TOKEN is required for LINE notification.")
 
         line_message = build_line_message(results)
-        send_line_notify(settings.line_notify_token, line_message)
+        send_line_message(settings.line_channel_access_token, line_message, user_id=settings.line_user_id or None)
         print("LINE通知を送信しました。")
 
 
