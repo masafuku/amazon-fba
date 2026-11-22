@@ -1,20 +1,20 @@
 import { useEffect, useMemo, useState } from 'react';
 import { loadStockBreakdown } from './db';
 
-// 色はartifact「FBA在庫と販売」の「商品ごとの内訳」と同じ(ダークテーマの値)。
-// 売れた・販売可能 = デザインシステムのグラフ色1・2(blue-400 / orange-400)、
-// 倉庫間移動中・FC受領中・調査中 = artifactが直接指定している色、
-// その他 = chart-muted(gray-550)、紛失 = danger(ダークの文字色)。
+// 色はartifact「FBA在庫と販売」の「商品ごとの内訳」の見た目(ライトテーマ)と同じにする。
+// 売れた・販売可能 = デザインシステムのグラフ色1・2(blue-450 / orange-350)、
+// 倉庫間移動中・FC受領中・調査中 = artifactのページが直接指定している色、
+// その他 = chart-muted(gray-200)、紛失 = danger(text-danger)。
 const SEGMENTS = [
-    { key: 'sold', label: '売れた', color: '#3987e5' },
-    { key: 'sellable', label: '販売可能', color: '#d95926' },
+    { key: 'sold', label: '売れた', color: '#2a78d6' },
+    { key: 'sellable', label: '販売可能', color: '#eb6834' },
     { key: 'transship', label: '倉庫間移動中', color: '#ef9f27' },
     { key: 'receiving', label: 'FC受領中', color: '#fac775' },
     { key: 'research', label: '調査中', color: '#ba7517' },
-    { key: 'other', label: 'その他(内訳のずれ)', color: '#5f5e5a' },
-    { key: 'lost', label: '紛失', color: '#fa8080' },
+    { key: 'other', label: 'その他(内訳のずれ)', color: '#c3c2b7' },
+    { key: 'lost', label: '紛失', color: '#a42528' },
 ];
-const HOME_COLOR = '#e49c06'; // artifactの「自宅」の枠(warning)
+const HOME_COLOR = '#e49c06'; // artifactの「自宅」の枠(warning)。暗い背景で見えるよう明るいほうの値
 const INCOMING_COLOR = 'rgba(255, 255, 255, 0.57)'; // 「入荷中」の点線(text-secondary)
 
 // 商品ごとの内訳。棒の長さ=送った数。点線の枠=自宅(まだ送っていない)と入荷中。
