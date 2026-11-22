@@ -1965,6 +1965,28 @@ SHIPMENT_INTL_COSTS_DDL = '''
 '''
 
 
+DASHBOARD_OUT_DIR = Path(os.environ.get('DASHBOARD_OUT_DIR', '/home/ubuntu/dashboard_out'))
+
+
+def load_sales_trend():
+    """日ごとの売上・利益と累計。毎朝の dashboard_snapshot.py が書く sales_trend.csv を読む。
+    profit_pre / cum_profit_pre = 送料前利益(手取り − 原価。国際送料・関税を引かない。AWS側の利益の定義)。"""
+    import csv
+    path = DASHBOARD_OUT_DIR / 'sales_trend.csv'
+    if not path.exists():
+        return {'rows': [], 'generatedAt': None}
+    rows = []
+    with path.open(encoding='utf-8', newline='') as f:
+        for r in csv.DictReader(f):
+            row = {'date': r['date']}
+            for k in ('qty', 'sales', 'profit', 'cum_sales', 'cum_profit', 'cum_cash', 'profit_pre', 'cum_profit_pre'):
+                v = r.get(k)
+                row[k] = float(v) if v not in (None, '') else None
+            rows.append(row)
+    generated = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
+    return {'rows': rows, 'generatedAt': generated}
+
+
 def load_finance_shipments(usd_to_jpy: float = 150.0):
     """FBA納品便(sp_inbound_shipments)ごとのP&L概算。ops_finance.pyのget_shipment_pnl()
     と同一ロジック(二つのPythonエントリポイントはお互いをimportしないという既存方針
@@ -3092,6 +3114,13 @@ class Handler(BaseHTTPRequestHandler):
             days = to_int_or_default((params.get('days') or [None])[0], 30)
             try:
                 self._send_json(200, {'ok': True, **load_finance_summary(days=days)})
+            except Exception as exc:
+                self._send_json(500, {'error': str(exc)})
+            return
+
+        if parsed.path == '/api/finance/sales-trend':
+            try:
+                self._send_json(200, {'ok': True, **load_sales_trend()})
             except Exception as exc:
                 self._send_json(500, {'error': str(exc)})
             return

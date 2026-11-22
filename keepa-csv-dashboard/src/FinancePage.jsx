@@ -20,6 +20,7 @@ import {
     loadFinanceSummary,
 } from './db';
 import { formatDateTime } from './formatters';
+import SalesTrendSection from './SalesTrendSection';
 
 const API_BASE = import.meta.env.VITE_API_BASE || '';
 
@@ -270,6 +271,8 @@ export default function FinancePage() {
                     ここに実績が表示されます。
                 </div>
             )}
+
+            <SalesTrendSection />
 
             {summary && (
                 <>
