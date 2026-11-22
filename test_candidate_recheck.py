@@ -73,7 +73,7 @@ class TestCandidateRecheck(unittest.TestCase):
         candidate = next(c for c in cr.load_candidates() if c['asin'] == 'J1')
         self.assertEqual(candidate['monthly_sold'], 50)
         new = cr.recompute(candidate, 30.0, {'referral': 4.5, 'fba': 3.5, 'other': 0.0})
-        self.assertEqual(new['tier'], 'A+')    # 実売ありのまま。Dにはならない
+        self.assertIn(new['tier'], ('A+', 'A-'))    # 実売ありのまま。Dにはならない(国際送料を引くとROIは100%を切る)
 
     def test_reclassify_saved_recomputes_without_api(self):
         with mock.patch.object(client, 'get_offers_summary', return_value={'buy_box': 30.0, 'lowest_fba': 30.0, 'offers': 3}), \
@@ -84,7 +84,8 @@ class TestCandidateRecheck(unittest.TestCase):
         with mock.patch.object(client, 'get_offers_summary', side_effect=AssertionError('APIは呼ばない')):
             self.assertEqual(cr.reclassify_saved(), 2)
         with sqlite3.connect(ops_finance.DB_PATH) as conn:
-            self.assertEqual({r[0] for r in conn.execute("SELECT tier_after FROM candidate_rechecks")}, {'S', 'A+'})
+            # 国際送料(重さ・容積で按分、2026-11-15〜)を引くとROIが100%を切るので S→A+、A+→A-
+            self.assertEqual({r[0] for r in conn.execute("SELECT tier_after FROM candidate_rechecks")}, {'A+', 'A-'})
 
     def test_recompute_matches_original_formula(self):
         candidate = {'jp_cost_jpy': 1500, 'weight_kg': 0.1, 'monthly_sold': 150}

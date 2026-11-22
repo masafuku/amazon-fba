@@ -80,12 +80,15 @@ def send_request(order_id: str) -> None:
                        {'marketplaceIds': settings.marketplace_id}, 'POST')
 
 
-def run(dry_run: bool = False, now: datetime | None = None) -> dict:
+def run(dry_run: bool = False, now: datetime | None = None, only: set | None = None) -> dict:
+    """only を渡すと、その注文番号だけを対象にする(ほかは送らず、記録もしない)。"""
     now = now or datetime.now(timezone.utc)
     done = _state()
     sent, refunded = [], []
     for order in shipped_orders(now):
         order_id = order['order_id']
+        if only is not None and order_id not in only:
+            continue
         if order_id in done or not can_request(order_id):
             continue
         if has_refund(order_id):
@@ -171,12 +174,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description='出荷済みの注文にレビューとセラー評価のお願いを送る')
     parser.add_argument('--dry-run', action='store_true', help='送れる注文の一覧だけ(送らない・記録しない)')
     parser.add_argument('--json', action='store_true', help='--dry-run の結果をJSONで出す')
+    parser.add_argument('--only', nargs='+', metavar='注文番号', help='指定した注文番号だけに送る(CEOが一部を見送るとき)')
     args = parser.parse_args()
     if args.dry_run:
         res = preview()
         print(json.dumps(res, ensure_ascii=False) if args.json else format_preview(res))
     else:
-        print(json.dumps(run(), ensure_ascii=False))
+        print(json.dumps(run(only=set(args.only) if args.only else None), ensure_ascii=False))
 
 
 if __name__ == '__main__':

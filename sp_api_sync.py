@@ -38,6 +38,7 @@ logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 logger = logging.getLogger("sp_api_sync")
 
 DEFAULT_LOOKBACK_DAYS = 7
+ORDERS_SYNC_OVERLAP_HOURS = 1
 
 
 def sync_orders(since_iso: str) -> list:
@@ -224,9 +225,16 @@ def run_once(lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> None:
         return
 
     state = of.get_sp_sync_state()
-    since_iso = state["ordersSyncedAt"] or (
-        datetime.now(timezone.utc) - timedelta(days=lookback_days)
-    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if state["ordersSyncedAt"]:
+        # Amazon側でLastUpdateDateの反映が遅れることがあり、前回の開始時刻ちょうどから取ると
+        # 境目で更新された注文を取りこぼす(2026-11-09 23:58に出荷済みになった注文が保留中のまま残った)。
+        # 1時間重ねて取り直す(upsertなので重複は無害)。
+        since_iso = (
+            datetime.strptime(state["ordersSyncedAt"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            - timedelta(hours=ORDERS_SYNC_OVERLAP_HOURS)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    else:
+        since_iso = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     logger.info(f"Orders同期開始(LastUpdatedAfter={since_iso})")

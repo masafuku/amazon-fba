@@ -97,8 +97,8 @@ class TestOrderWatch(unittest.TestCase):
         self.items = {'A-2': [item(qty=2, price='29.78')]}
         with mock.patch.object(order_watch, 'fetch_fees', return_value=6.0):
             self.run_watch()
-        # 1個: 14.89 - 6.00 - (715/150)*1.125 = 3.5275 → 2個で 7.06
-        self.assertEqual(self.sent[0], '【売れた 10/26 02:01】Sanrio FriXion Ball Knock Set ×2 $29.78 利益$7.06')
+        # 原価は税込(CEO 2026-11-16)。1個: 14.89 - 6.00 - (715*1.1/150)*1.125 = 2.99 → 2個で 5.98
+        self.assertEqual(self.sent[0], '【売れた 10/26 02:01】Sanrio FriXion Ball Knock Set ×2 $29.78 利益$5.98')
 
     def test_shipped_is_silent_but_cancel_is_notified(self):
         self.orders = [order('A-1', 'Pending')]

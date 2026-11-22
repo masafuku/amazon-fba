@@ -102,7 +102,7 @@ class TestAddManualSupplier(unittest.TestCase):
         self.assertTrue(result['recalculated'])
         # 免税事業者(IS_JCT_REGISTERED=False)は税込に揃える: 276 * 1.1
         self.assertAlmostEqual(jp_cost, 276 * 1.1, places=1)
-        self.assertGreater(profit, 3.0)
+        self.assertGreater(profit, 1.5)   # 国際送料(重さ・容積で按分)を引いた後
         self.assertEqual(data['jp_cost_jpy_before_wholesale'], 600.0)
         self.assertIn('roi_after', result)
         self.assertIn('tier_after', result)

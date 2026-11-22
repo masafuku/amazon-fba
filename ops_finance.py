@@ -644,6 +644,45 @@ _SHIPPING_COST_SCALE_FACTOR = _FORWARDER_QUOTE_COST_JPY / _EMS_RATE_AT_QUOTE_WEI
 # 通常関税（12.5％）が定義」)。商品のHSコード次第で実際の税率は変わりうるため
 # あくまで概算値。
 DEFAULT_IMPORT_DUTY_RATE = 0.125
+# 国際送料(TNK経由・FedEx)。CEO 2026-11-15: $5前後の安い商品が送料抜きでS判定になっていたため、自動判定(Tier)にも
+# 送料を入れる。FedExは箱の実重量と容積重量(縦×横×高さcm÷5000)の大きいほうで請求される
+# (CEO:「どちらかというと大きさで送料の値段が決まってる」)。
+# CEO 2026-11-16: 「その商品だけを容積重量20kgの箱で送った場合」で按分する。実際の便は20kgより小さく割高だが、
+# 補正はしない(CEO「補正しないでよい」)。1個あたり =
+#   20kg箱1つの送料 × max(体積 ÷ 箱の容積100,000cm³(満杯まで詰める、CEO 11/16), 重さ ÷ 中身の上限19kg)
+# 20kg箱1つの送料: FedEx Economy 米国東側(U.S.A Rest of country、納品先HIA1/HGR6)20kg ¥16,728(2026-10-10〜)
+#   × 燃油サーチャージ1.47(仮定) + 発送代行¥1,500 + 国内送料(自宅→TNK、20kg)約¥2,000 ≒ ¥28,090。
+INTL_SHIP_BOX_FREIGHT_JPY = 16728
+INTL_SHIP_FUEL_FACTOR = 1.47
+INTL_SHIP_HANDLING_JPY = 1500
+INTL_SHIP_DOMESTIC_JPY = 2000
+INTL_SHIP_BOX_JPY = INTL_SHIP_BOX_FREIGHT_JPY * INTL_SHIP_FUEL_FACTOR + INTL_SHIP_HANDLING_JPY + INTL_SHIP_DOMESTIC_JPY
+INTL_SHIP_VOLUMETRIC_DIVISOR = 5000
+INTL_SHIP_BOX_CM3 = 20 * INTL_SHIP_VOLUMETRIC_DIVISOR   # 容積重量20kgの箱
+INTL_SHIP_FILL_RATIO = 1.0                              # 満杯まで詰める(CEO 2026-11-16。8割はやめた)
+INTL_SHIP_BOX_MAX_KG = 19.0                             # 箱の重さを除いた中身の上限
+# 重さも寸法も分からない商品の一律額: 第1便の実額 ¥10,017 ÷ 90個 ÷ ¥150 (pricing_rule.INTL_SHIPPING_USD と同じ)
+INTL_SHIPPING_PER_UNIT_USD = round(10017 / 90 / 150.0, 3)
+
+
+def estimate_intl_shipping_usd(weight_kg: float | None, dims_cm=None, exchange_rate: float = 150.0,
+                               volume_cm3: float | None = None) -> dict:
+    """1個あたりの国際送料(ドル)。その商品だけを容積重量20kgの箱に詰めたとして、箱の送料を
+    大きさ(体積)と重さのうち先に上限に達するほうで按分する。どちらも無ければ一律額。
+    戻り値: {'usd', 'billable_kg'(容積重量と重さの大きいほう), 'basis'('volume'/'weight'/'flat')}"""
+    if dims_cm and all(d and d > 0 for d in dims_cm):
+        volume_cm3 = dims_cm[0] * dims_cm[1] * dims_cm[2]
+    if not (volume_cm3 and volume_cm3 > 0):
+        volume_cm3 = None
+    if not weight_kg and volume_cm3 is None:
+        return {'usd': INTL_SHIPPING_PER_UNIT_USD, 'billable_kg': None, 'basis': 'flat'}
+    by_volume = (volume_cm3 or 0.0) / (INTL_SHIP_BOX_CM3 * INTL_SHIP_FILL_RATIO)
+    by_weight = (weight_kg or 0.0) / INTL_SHIP_BOX_MAX_KG
+    share = max(by_volume, by_weight)
+    jpy = INTL_SHIP_BOX_JPY * share
+    vol_kg = (volume_cm3 or 0.0) / INTL_SHIP_VOLUMETRIC_DIVISOR
+    basis = 'volume' if by_volume > by_weight else 'weight'
+    return {'usd': round(jpy / exchange_rate, 3), 'billable_kg': round(max(weight_kg or 0.0, vol_kg), 4), 'basis': basis}
 
 
 def _shipping_cost_jpy_for_weight(total_weight_kg: float) -> float:
@@ -746,6 +785,10 @@ def calc_unit_profit(
     fba_fee_usd: float = 3.5,          # FBAピック&パック手数料(サイズ依存、要調整)
     shipment_budget_jpy: float = 50_000.0,      # 1回にまとめて仕入れる想定総額
     import_duty_rate: float = DEFAULT_IMPORT_DUTY_RATE,  # 米国関税(概算、商品カテゴリにより変動)
+    intl_shipping_usd: float | None = None,  # 1個あたりの国際送料。省略時は重さ・寸法から estimate_intl_shipping_usd()
+    dims_cm=None,                            # 箱の寸法(cm)。容積重量に使う
+    volume_cm3: float | None = None,         # 箱の体積(cm³、KeepaのCSV)。寸法が無いときに使う
+    weight_known: bool = True,               # weight_kg が仮値(DEFAULT_WEIGHT_KG_FALLBACK)ならFalse
 ) -> dict:
     """1個あたりの利益・利益率を計算する。
 
@@ -767,9 +810,12 @@ def calc_unit_profit(
     """
     jp_cost_usd = jp_cost_jpy / exchange_rate
     amazon_fee_usd = us_price_usd * amazon_fee_rate
-    # CEO指示(2026-09-22): 想定輸送費が妥当でないため0円とする。重量連動モデル
-    # (_shipping_cost_jpy_for_weight)は残してあるが、利益計算では使わない。
-    shipping_cost_usd = 0.0
+    # 国際送料: 2026-09-22〜11-15は0円(見積もりが妥当でなかったため)。2026-11-15からは重さ・容積で按分した
+    # 1個あたりの額を引く(CEO承認、estimate_intl_shipping_usd)。重さが仮値で寸法も無ければ一律額。
+    # 古いEMS表の重量連動モデル(_shipping_cost_jpy_for_weight)は使わない。
+    if intl_shipping_usd is None:
+        intl_shipping_usd = estimate_intl_shipping_usd(weight_kg if weight_known else None, dims_cm, exchange_rate, volume_cm3)['usd']
+    shipping_cost_usd = intl_shipping_usd
     import_duty_usd = jp_cost_usd * import_duty_rate
 
     unit_profit_usd = (
@@ -1495,6 +1541,8 @@ def evaluate_mcp_candidates(
             jp_cost_jpy=cost['price'],
             weight_kg=weight_kg,
             exchange_rate=exchange_rate,
+            dims_cm=sell.get('dims_cm'),
+            weight_known=not used_fallback_weight,
             **fee_kwargs,
         )
 
@@ -1516,6 +1564,7 @@ def evaluate_mcp_candidates(
             'price_diff_rate_gross': candidate.get('price_diff_rate'),  # 手数料・送料考慮前
             'price_volatility_90d': candidate.get('price_volatility_90d'),
             'weight_kg': weight_kg,
+            'dims_cm': sell.get('dims_cm'),
             'weight_estimated': used_fallback_weight,
             'fee_estimated': used_fallback_fee,
             # 既に取得済み(追加のKeepaトークン消費なし)だが、これまで
@@ -1620,10 +1669,12 @@ def evaluate_mcp_candidates(
 
             profit = calc_unit_profit(
                 us_price_usd=us_price, jp_cost_jpy=jp_price,
-                weight_kg=weight_kg, exchange_rate=exchange_rate, **fee_kwargs,
+                weight_kg=weight_kg, exchange_rate=exchange_rate,
+                dims_cm=skip.get('dims_cm'), weight_known=not used_fallback_weight, **fee_kwargs,
             )
             entry.update(profit)  # unit_profit_usd, margin_pct など
             entry['weight_kg'] = weight_kg
+            entry['dims_cm'] = skip.get('dims_cm')
             entry['weight_estimated'] = used_fallback_weight
             entry['fee_estimated'] = used_fallback_fee
 
@@ -1941,7 +1992,7 @@ def _recompute_cost_and_tier(
     exchange_rate = old_cost_jpy / data['jp_cost_usd']
     profit = calc_unit_profit(
         us_price_usd=data['us_price_usd'], jp_cost_jpy=new_cost_jpy, weight_kg=data['weight_kg'],
-        exchange_rate=exchange_rate,
+        exchange_rate=exchange_rate, dims_cm=data.get('dims_cm'), weight_known=not data.get('weight_estimated'),
         amazon_fee_rate=data['amazon_fee_usd'] / data['us_price_usd'],
         fba_fee_usd=data['fba_fee_usd'],
     )

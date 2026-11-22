@@ -8,15 +8,15 @@ from sp_api import client
 class TestComputeBounds(unittest.TestCase):
     def test_min_price_includes_target_roi(self):
         minimum, _ = pricing_rule.compute_bounds(unit_cost_jpy=300, current_price_usd=9.99)
-        cost_usd = 300 / 150
+        cost_usd = 300 * pricing_rule.JP_CONSUMPTION_TAX_FACTOR / 150
         profit_at_min = minimum * (1 - 0.15) - 3.5 - pricing_rule.INTL_SHIPPING_USD - cost_usd * 0.125 - cost_usd
-        self.assertGreaterEqual(profit_at_min / cost_usd, pricing_rule.MIN_ROI)
+        self.assertGreaterEqual(profit_at_min / cost_usd, pricing_rule.MIN_ROI - 1e-9)
         self.assertLess(profit_at_min / cost_usd, pricing_rule.MIN_ROI + 0.02)
 
     @mock.patch.object(pricing_rule, "MIN_ROI", 0.0)
     def test_min_price_is_break_even_when_roi_is_zero(self):
         minimum, maximum = pricing_rule.compute_bounds(unit_cost_jpy=300, current_price_usd=9.99)
-        cost_usd = 300 / 150
+        cost_usd = 300 * pricing_rule.JP_CONSUMPTION_TAX_FACTOR / 150
         profit_at_min = minimum * (1 - 0.15) - 3.5 - pricing_rule.INTL_SHIPPING_USD - cost_usd * 0.125 - cost_usd
         self.assertGreaterEqual(profit_at_min, 0)
         self.assertLess(profit_at_min, 0.02)
@@ -34,7 +34,7 @@ class TestActualFees(unittest.TestCase):
     def test_uses_actual_fba_fee_and_reaches_break_even(self):
         fee_fn = lambda price: {"referral": price * 0.15, "fba": 2.52, "other": 0.0}
         minimum, _ = pricing_rule.compute_bounds(326, 7.49, fee_fn)
-        cost_usd = 326 / 150
+        cost_usd = 326 * pricing_rule.JP_CONSUMPTION_TAX_FACTOR / 150
         other = pricing_rule.INTL_SHIPPING_USD + cost_usd * 0.125 + cost_usd
         self.assertAlmostEqual(minimum, (2.52 + other) / 0.85, delta=0.011)
         self.assertGreaterEqual(minimum - minimum * 0.15 - 2.52 - other, 0)
@@ -42,7 +42,7 @@ class TestActualFees(unittest.TestCase):
     def test_follows_price_dependent_fba_fee(self):
         # 10ドル以下はFBA手数料が安く、超えると高くなる想定
         fee_fn = lambda price: {"referral": price * 0.15, "fba": 2.0 if price <= 10 else 5.0, "other": 0.0}
-        minimum, _ = pricing_rule.compute_bounds(300, 20.0, fee_fn)
+        minimum, _ = pricing_rule.compute_bounds(250, 20.0, fee_fn)   # 原価は税込(×1.1)で計算される
         self.assertLessEqual(minimum, 10)
 
 

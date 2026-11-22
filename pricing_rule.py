@@ -26,6 +26,7 @@ EXCHANGE_RATE = 150.0
 REFERRAL_FEE_RATE = 0.15
 FBA_FEE_USD = 3.5
 IMPORT_DUTY_RATE = 0.125
+JP_CONSUMPTION_TAX_FACTOR = 1.1  # 免税事業者は仕入れの消費税を取り戻せないので、原価(台帳は税抜)を税込にする(CEO 2026-11-15)
 INTL_SHIPPING_USD = round(10017 / 90 / EXCHANGE_RATE, 3)  # 1個あたり物流費。第一便の実額 (TNK請求書202610-2996 ¥9,267+国内送料約750)÷90個。関税は後日請求の可能性あり
 MIN_ROI = 0.20  # 損益分岐点に原価の20%分の利益を上乗せ(価格競争に巻き込まれすぎないため。Tier合格ライン ROI20% と同じ)
 MAX_MULTIPLE = 2.0
@@ -50,7 +51,7 @@ def compute_bounds(unit_cost_jpy: float, current_price_usd: float, fee_fn=None, 
     手数料は価格に連動する(販売手数料率・FBAの価格帯)ので、価格を動かしながら収束させ、
     最後にその価格で利益が0以上であることを確かめる。min_roi省略時はMIN_ROI。"""
     fee_fn = fee_fn or _estimated_fees
-    cost_usd = unit_cost_jpy / EXCHANGE_RATE
+    cost_usd = unit_cost_jpy * JP_CONSUMPTION_TAX_FACTOR / EXCHANGE_RATE
     roi = MIN_ROI if min_roi is None else min_roi
     other_costs = INTL_SHIPPING_USD + cost_usd * IMPORT_DUTY_RATE + cost_usd * (1 + roi)
 
@@ -121,6 +122,13 @@ def list_listings() -> list:
             return rows
 
 
+# サンスター文具の知的財産の申し立て(2026-11-17・11-19)で出品を止めた7SKU。価格を付けると出品が復活するので、
+# 自動価格設定の対象から外す(CEO 2026-11-20「異議申し立てはしない。出品は停止のまま」)。再開するときはここから外す。
+STOPPED_SKUS = frozenset({
+    "KADOMARU-PRO-1", "8F-QTEQ-C12Z", "UE-OV76-X4YC", "KP-ZVF5-Z7K0", "RJ-HH0F-RQC0", "UKANMURI-718736", "UKANMURI-718767",
+})
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="全SKUを自動価格設定ルールに紐付ける")
     parser.add_argument("--costs", required=True, help="{asin: 1個あたり原価(円)}のJSON")
@@ -144,6 +152,9 @@ def main() -> None:
     for l in sorted(listings, key=lambda x: x["sku"]):
         label = f"{l['sku']} {l['asin']}"
         cost = costs.get(l["asin"])
+        if l["sku"] in STOPPED_SKUS:
+            print(f"SKIP {label}: 出品停止中(サンスターの申し立て)")
+            continue
         if l["sku"] in args.skip_sku:
             print(f"SKIP {label}: 最低価格を固定中")
             continue

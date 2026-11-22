@@ -45,10 +45,10 @@ class TestDailyReport(unittest.TestCase):
     def test_pending_orders_use_the_listing_price_and_estimated_fees(self):
         [item] = dr.sales(self.conn, SINCE)
         self.assertEqual((item['qty'], round(item['revenue'], 2)), (2, 13.98))
-        # 6.99 - (1.05/7*6.99 + 3.00) - 0.75 - 0.125 - 1.00 = 1.07 / 個
-        self.assertAlmostEqual(item['profit'], 2 * 1.07, places=1)
+        # 国際送料は引かず、原価は税込(CEO 2026-11-16): 6.99 - (1.05/7*6.99 + 3.00) - 1.10*0.125 - 1.10 = 1.70 / 個
+        self.assertAlmostEqual(item['profit'], 2 * 1.70, places=1)
         lines = dr.sales_lines([item], {'A1': '【ナカバヤシ】パタップ ブルー'})
-        self.assertTrue(lines[0].startswith('売上: 2個 $13.98 / 利益 $2.1'))
+        self.assertTrue(lines[0].startswith('売上: 2個 $13.98 / 利益 $3.4'))
         self.assertIn('パタップ ブルー  $6.99×2 = $13.98', lines[1])
         self.assertNotIn('見込み', '\n'.join(lines))
 
@@ -84,6 +84,12 @@ class TestDailyReport(unittest.TestCase):
         with mock.patch.object(sl, 'alerts', return_value=[]):
             text, _ = dr.build_report('2026-11-11T00:00:00+00:00', evening=True, now=NOW)
         self.assertIsNone(text)
+
+    def test_noon_heading_uses_label(self):
+        with mock.patch.object(sl, 'alerts', return_value=[]):
+            text, _ = dr.build_report(SINCE, evening=True, now=NOW, label='昼')
+        self.assertIn('【昼のまとめ 11/12】', text)
+        self.assertNotIn('価格（ドライラン', text)
 
     def test_short_alert_drops_cli_hints(self):
         self.assertEqual(dr.short_alert('ASIN未紐付け: パタップ クリア（受付番号94655926）。出品するならmap-sdで紐付け'),
