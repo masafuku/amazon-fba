@@ -172,6 +172,20 @@ def received_by_sku(confirmation_id: str) -> dict:
     return {it['SellerSKU']: it.get('QuantityReceived') or 0 for it in (r.get('payload') or {}).get('ItemData') or []}
 
 
+def next_shipping_per_unit(asins) -> dict:
+    """次の便の商品ごとの1個あたり国際送料(本番の送料モデル: ops_finance.estimate_intl_shipping_usd)。
+    重さ・寸法は候補の記録(agent_candidates.data_json)から取る。無ければ一律額になる。"""
+    out = {}
+    with sqlite3.connect(of.DB_PATH) as conn:
+        for asin in asins:
+            row = conn.execute(
+                'SELECT data_json FROM agent_candidates WHERE asin = ? AND data_json IS NOT NULL '
+                'ORDER BY created_at DESC LIMIT 1', (asin,)).fetchone()
+            data = json.loads(row[0]) if row and row[0] else {}
+            out[asin] = of.estimate_intl_shipping_usd(data.get('weight_kg'), data.get('dims_cm'))['usd']
+    return out
+
+
 def build(meta: dict, fees: Fees, today: str, targets: dict) -> tuple[list, list, list]:
     orig_prices = meta.get('orig_prices') or {}
     intl_est = float(meta.get('intl_per_unit_estimate_usd', 0.742))
@@ -324,10 +338,11 @@ def build(meta: dict, fees: Fees, today: str, targets: dict) -> tuple[list, list
         x['qty'] += p['quantity'] or 0
         x['home'] += (p['quantity'] or 0) if p['received_at'] else 0
         x['amount'] += p['amount_jpy'] or 0
+    next_ipu = next_shipping_per_unit(next_by_asin.keys())
     for a, x in next_by_asin.items():
         item_rows.append(dict(ship=f'第{next_n}便', n=next_n, cid='', asin=a, product=names.get(a, a), sent=x['qty'],
                               received=None, sold=0, pending=0, revenue=0.0, fees=0.0,
-                              cost_jpy=x['amount'] / x['qty'] if x['qty'] else 0, ipu=intl_est, lost=0, sku=None))
+                              cost_jpy=x['amount'] / x['qty'] if x['qty'] else 0, ipu=next_ipu.get(a, intl_est), lost=0, sku=None))
 
     # SKUの対応(ASIN -> 出品SKU)。次の便の商品は出品一覧から
     asin_skus = defaultdict(set)
