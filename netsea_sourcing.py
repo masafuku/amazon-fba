@@ -47,8 +47,8 @@ from ops_finance import (
 
 # CEO: 「トークンは使い切らないで」— 対話的なKeepa調査で既に確立している
 # 「常に約10トークンを残す」方針([[keepa-token-reserve-policy]])を、この
-# NETSEAバッチパイプラインにも適用する。daily_scan.py側の同様のロジック
-# (keepa_mcp/server.py の _wait_for_budget())は対象外、このファイルのみ。
+# NETSEAバッチパイプラインにも適用する。daily_scan.py側は keepa_mcp/server.py の
+# _wait_for_budget() が同じ予備(server.TOKEN_RESERVE)を残す(2026-11-11から)。
 TOKEN_RESERVE = 10
 
 
@@ -312,6 +312,8 @@ def find_jan_matched_candidates(
             jp_cost_jpy=effective_cost_jpy,
             weight_kg=weight_kg,
             exchange_rate=exchange_rate,
+            weight_known=not weight_estimated,
+            dims_cm=analysis.package_dims_cm(product),
             **fee_kwargs,
         )
 

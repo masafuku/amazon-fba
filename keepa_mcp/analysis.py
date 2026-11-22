@@ -352,6 +352,15 @@ def package_weight_kg(product: Dict[str, Any]) -> Optional[float]:
     return None
 
 
+def package_dims_cm(product: Dict[str, Any]) -> Optional[tuple]:
+    """箱の寸法(cm)の (長さ, 幅, 高さ)。Keepaの packageLength/Width/Height はmm。
+    どれか1つでも無ければNone(国際送料の容積重量に使う)。"""
+    vals = [product.get(f) for f in ("packageLength", "packageWidth", "packageHeight")]
+    if any(v is None or v <= 0 for v in vals):
+        return None
+    return tuple(round(v / 10, 2) for v in vals)
+
+
 def product_image_url(product: Dict[str, Any]) -> Optional[str]:
     """Primary product thumbnail URL.
 

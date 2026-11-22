@@ -26,7 +26,16 @@ export function mergeSuppliers(data) {
         source: s.source, shopName: s.shop_name, url: s.url ?? null, priceJpy: s.price_jpy ?? null,
         minQty: s.min_qty ?? null, note: s.note ?? null, checkedAt: s.checked_at ?? null,
     }));
-    return [netseaSupplier, ...manualSuppliers]
+    // supplier_pipeline.py(SD業者からの候補探し・原価の付け替え)で登録した行は、仕入れ先名を data.supplier に、
+    // 卸価格(税抜)を data.wholesale_raw_jpy に持つが manual_suppliers には入らない。他に仕入れ先が無いときだけ補う。
+    const pipelineSupplier = !netseaSupplier && manualSuppliers.length === 0 && data?.supplier && data?.wholesale_raw_jpy != null
+        ? [{
+              source: 'sd', shopName: String(data.supplier).replace('Zoomy_BUNGU', 'Zoomy BUNGU'),
+              url: /superdelivery/.test(data?.jp_url ?? '') ? data.jp_url : null,
+              priceJpy: data.wholesale_raw_jpy, minQty: null, note: null, checkedAt: null,
+          }]
+        : [];
+    return [netseaSupplier, ...manualSuppliers, ...pipelineSupplier]
         .filter((s) => s && s.priceJpy != null)
         .sort((a, b) => a.priceJpy - b.priceJpy);
 }

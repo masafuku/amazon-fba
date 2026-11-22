@@ -73,18 +73,26 @@ def _wait_estimate(shortfall: float, refill_rate_per_minute: Optional[int]) -> s
 _WAIT_MODE_BATCH_SIZE = 20
 
 
-def _wait_for_budget(api_key: str, needed: int, current_budget: int) -> int:
-    """Block until at least `needed` live-call tokens are available, polling
-    the real balance (check_token_balance costs nothing) and sleeping
-    between checks. Returns the fresh real balance once satisfied. Only
-    call this when the caller has opted into wait_for_tokens=True - it can
-    block for a long time on a slow-refill plan."""
+# CEO: 「トークンはすべて使い切らず、常に10トークンぐらいは残してください」(2026-08-22)。この予備は
+# 手動の調査用なので、手を止めるのはバックグラウンド側(wait_for_tokens=True で動く daily_scan.py の
+# 検索ループ)。待つときは「必要数+予備」が貯まるまで待ち、予備を引いた残高を使える予算として返す
+# (以前はここに予備が無く、検索ループが残高を0近くまで使い切っていた。2026-11-11に確認)。
+TOKEN_RESERVE = 10
+
+
+def _wait_for_budget(api_key: str, needed: int, current_budget: int, reserve: int = TOKEN_RESERVE) -> int:
+    """Block until at least `needed` live-call tokens are available on top of
+    `reserve`, polling the real balance (check_token_balance costs nothing)
+    and sleeping between checks. Returns the spendable budget (fresh real
+    balance minus the reserve) once satisfied. Only call this when the caller
+    has opted into wait_for_tokens=True - it can block for a long time on a
+    slow-refill plan."""
     budget = current_budget
     if budget >= needed:
         return budget
     while True:
         status = get_token_status(api_key)
-        budget = status["tokens_left"] or 0
+        budget = (status["tokens_left"] or 0) - reserve
         if budget >= needed:
             return budget
         refill_rate = status["refill_rate_per_minute"] or 1
@@ -131,6 +139,7 @@ def _summarize_product(product: Dict[str, Any], domain: str, cache_info: Optiona
         "price_volatility_90d": analysis.price_volatility_ratio(product, domain),
         "image_url": analysis.product_image_url(product),
         "weight_kg": analysis.package_weight_kg(product),
+        "dims_cm": analysis.package_dims_cm(product),
         "referral_fee_percent": analysis.referral_fee_percent(product),
         "fba_pickpack_fee": analysis.fba_pickpack_fee(product, domain),
         "upc": (product.get("upcList") or [None])[0],

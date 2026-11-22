@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -37,6 +38,7 @@ logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 logger = logging.getLogger("sp_api_sync")
 
 DEFAULT_LOOKBACK_DAYS = 7
+ORDERS_SYNC_OVERLAP_HOURS = 1
 
 
 def sync_orders(since_iso: str) -> list:
@@ -96,7 +98,7 @@ def sync_order_items(order_ids: list) -> None:
         time.sleep(0.5)
 
 
-def sync_inbound_shipments() -> None:
+def sync_inbound_shipments() -> list:
     """Fulfillment Inbound API(v2024-03-20)。全納品プランを取得し、プランごとに
     埋め込みのshipments一覧・商品明細(items)・便ごとの詳細(destination/納品期間/
     FBA Shipment ID)を取得してsp_inbound_shipments/sp_inbound_shipment_itemsに
@@ -111,37 +113,102 @@ def sync_inbound_shipments() -> None:
         if not next_token:
             break
 
+    failed_plans = []
     for plan_id in plan_ids:
-        plan = sp_client.get_inbound_plan(plan_id)
-        items_payload = sp_client.get_inbound_plan_items(plan_id)
-        items = [
-            {"asin": i.get("asin"), "sku": i.get("msku"), "quantity": i.get("quantity")}
-            for i in items_payload.get("items", [])
-        ]
-        for shipment_summary in plan.get("shipments", []) or []:
-            shipment_id = shipment_summary["shipmentId"]
-            detail = sp_client.get_inbound_shipment(plan_id, shipment_id)
-            window = detail.get("selectedDeliveryWindow", {}) or {}
-            destination = detail.get("destination", {}) or {}
-            of.upsert_sp_inbound_shipment(
-                {
-                    "shipmentId": shipment_id,
-                    "planId": plan_id,
-                    "shipmentConfirmationId": detail.get("shipmentConfirmationId"),
-                    "status": detail.get("status"),
-                    "destinationFc": destination.get("warehouseId"),
-                    "deliveryWindowStart": window.get("startDate"),
-                    "deliveryWindowEnd": window.get("endDate"),
-                    "createdAt": plan.get("createdAt"),
-                },
-                items,
-            )
+        try:
+            plan = sp_client.get_inbound_plan(plan_id)
+            items_payload = sp_client.get_inbound_plan_items(plan_id)
+            items = [
+                {"asin": i.get("asin"), "sku": i.get("msku"), "quantity": i.get("quantity")}
+                for i in items_payload.get("items", [])
+            ]
+            for shipment_summary in plan.get("shipments", []) or []:
+                shipment_id = shipment_summary["shipmentId"]
+                detail = sp_client.get_inbound_shipment(plan_id, shipment_id)
+                status = detail.get("status")
+                if detail.get("shipmentConfirmationId") and status in ("SHIPPED", "IN_TRANSIT", "DELIVERED", "CHECKED_IN", "RECEIVING"):
+                    # 2024-03-20のstatusはFC受領後もSHIPPEDのまま進まないため、旧API(v0)で補う
+                    try:
+                        status = sp_client.get_inbound_shipment_status_v0(detail["shipmentConfirmationId"]) or status
+                    except Exception as exc:
+                        logger.warning(f"v0のShipmentStatus取得に失敗({detail['shipmentConfirmationId']}): {exc}")
+                window = detail.get("selectedDeliveryWindow", {}) or {}
+                destination = detail.get("destination", {}) or {}
+                of.upsert_sp_inbound_shipment(
+                    {
+                        "shipmentId": shipment_id,
+                        "planId": plan_id,
+                        "shipmentConfirmationId": detail.get("shipmentConfirmationId"),
+                        "status": status,
+                        "destinationFc": destination.get("warehouseId"),
+                        "deliveryWindowStart": window.get("startDate"),
+                        "deliveryWindowEnd": window.get("endDate"),
+                        "createdAt": plan.get("createdAt"),
+                    },
+                    items,
+                )
+        except sp_client.SpApiError as exc:
+            # AWD(Amazon Warehousing and Distribution)のプランはこのAPIの操作に対応していない。
+            # 本アプリはAWDを使わないので同期の対象外とし、失敗扱いにしない。
+            if "Amazon Warehousing and Distribution" in str(exc):
+                logger.info(f"AWDの納品プランは同期対象外(スキップ): {plan_id}")
+                continue
+            # 1つのプランが失敗しても残りは同期する(失敗プランは次回の同期で再試行)
+            failed_plans.append(plan_id)
+            logger.warning(f"納品プランの同期に失敗({plan_id}): {exc}")
+            continue
         time.sleep(0.5)
+    if failed_plans:
+        logger.warning(f"納品プラン: {len(failed_plans)}件が失敗(次回再試行)")
+    refresh_shipped_statuses()
+    return failed_plans
 
 
-def sync_finances(order_ids: list) -> None:
+def refresh_shipped_statuses() -> None:
+    """listInboundPlansはACTIVEなプランしか返さず、発送済みの便は一覧から外れて状態が
+    止まる。取消(CANCELLED)も同様に一覧から消えるため、WORKING/READY_TO_SHIPの便も含め、
+    FC受領・取消まで進む便のstatusを旧API(v0)で直接更新する。"""
+    with sqlite3.connect(of.DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT shipment_id, shipment_confirmation_id, status FROM sp_inbound_shipments "
+            "WHERE shipment_confirmation_id IS NOT NULL AND UPPER(IFNULL(status, '')) IN "
+            "('WORKING', 'READY_TO_SHIP', 'SHIPPED', 'IN_TRANSIT', 'DELIVERED', 'CHECKED_IN', 'RECEIVING')"
+        ).fetchall()
+        for shipment_id, confirmation_id, status in rows:
+            try:
+                latest = sp_client.get_inbound_shipment_status_v0(confirmation_id)
+            except Exception as exc:
+                logger.warning(f"v0のShipmentStatus取得に失敗({confirmation_id}): {exc}")
+                continue
+            if latest and latest.upper() != status.upper():
+                conn.execute("UPDATE sp_inbound_shipments SET status = ? WHERE shipment_id = ?", (latest, shipment_id))
+                logger.info(f"納品便 {confirmation_id}: {status} -> {latest}")
+        conn.commit()
+
+
+def orders_without_fees(days: int = 60) -> set:
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with sqlite3.connect(of.DB_PATH) as conn:
+        return {r[0] for r in conn.execute(
+            "SELECT order_id FROM sp_orders WHERE purchase_date >= ? AND UPPER(IFNULL(order_status, '')) NOT IN ('CANCELED', 'CANCELLED') "
+            "AND order_id NOT IN (SELECT order_id FROM sp_financial_events)", (since,))}
+
+
+# Finances APIの注文ごとの呼び出しは短い間隔で叩くと429になるので、間隔を空ける。
+FINANCE_PACING_SECONDS = 1.5
+
+
+def sync_finances(order_ids: list) -> list:
+    """注文ごとに手数料を取得する。1件の失敗で止めず、失敗した注文IDのリストを返す(次回の同期で再試行)。"""
+    failed = []
     for order_id in order_ids:
-        payload = sp_client.list_financial_events_by_order(order_id)
+        time.sleep(FINANCE_PACING_SECONDS)
+        try:
+            payload = sp_client.list_financial_events_by_order(order_id)
+        except sp_client.SpApiError as exc:
+            failed.append(order_id)
+            logger.warning(f"手数料取得に失敗({order_id}): {exc}")
+            continue
         events_group = payload.get("payload", {}).get("FinancialEvents", {})
         events = []
         for shipment_event in events_group.get("ShipmentEventList", []) or []:
@@ -151,11 +218,12 @@ def sync_finances(order_ids: list) -> None:
                     if amount is not None:
                         events.append({
                             "eventType": fee.get("FeeType", "Unknown"),
-                            "amountUsd": float(amount),
+                            "amountUsd": -float(amount),  # Amazonは手数料をマイナスで返す。集計側は費用をプラスで扱うので反転して保存
                             "postedDate": shipment_event.get("PostedDate"),
                         })
         if events:
             of.upsert_sp_financial_events(order_id, events)
+    return failed
 
 
 def sync_inventory() -> None:
@@ -171,6 +239,7 @@ def sync_inventory() -> None:
                 "sku": s.get("sellerSku"),
                 "fnsku": s.get("fnSku"),
                 "fulfillableQuantity": details.get("fulfillableQuantity", 0),
+                "inboundReceivingQuantity": details.get("inboundReceivingQuantity", 0),
             })
         next_token = payload.get("payload", {}).get("nextToken")
         if not next_token:
@@ -184,9 +253,16 @@ def run_once(lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> None:
         return
 
     state = of.get_sp_sync_state()
-    since_iso = state["ordersSyncedAt"] or (
-        datetime.now(timezone.utc) - timedelta(days=lookback_days)
-    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if state["ordersSyncedAt"]:
+        # Amazon側でLastUpdateDateの反映が遅れることがあり、前回の開始時刻ちょうどから取ると
+        # 境目で更新された注文を取りこぼす(2026-11-09 23:58に出荷済みになった注文が保留中のまま残った)。
+        # 1時間重ねて取り直す(upsertなので重複は無害)。
+        since_iso = (
+            datetime.strptime(state["ordersSyncedAt"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            - timedelta(hours=ORDERS_SYNC_OVERLAP_HOURS)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    else:
+        since_iso = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     logger.info(f"Orders同期開始(LastUpdatedAfter={since_iso})")
@@ -199,9 +275,16 @@ def run_once(lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> None:
         sync_order_items(order_ids)
         logger.info("OrderItems同期完了")
 
-        logger.info("Finances同期開始")
-        sync_finances(order_ids)
-        of.set_sp_sync_state(finances_synced_at=now_iso)
+    # 手数料は出荷の数日後に確定する(注文が更新された直後は空)ので、取得済みの注文だけでなく、
+    # 手数料がまだ入っていない直近60日の注文も毎回取り直す。
+    fee_order_ids = sorted(set(order_ids) | orders_without_fees())
+    if fee_order_ids:
+        logger.info(f"Finances同期開始({len(fee_order_ids)}件)")
+        failed_fee_orders = sync_finances(fee_order_ids)
+        if failed_fee_orders:
+            logger.warning(f"Finances同期: {len(failed_fee_orders)}件が失敗(次回再試行)")
+        else:
+            of.set_sp_sync_state(finances_synced_at=now_iso)
         logger.info("Finances同期完了")
 
     logger.info("FBA在庫スナップショット取得開始")
@@ -210,8 +293,9 @@ def run_once(lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> None:
     logger.info("FBA在庫スナップショット取得完了")
 
     logger.info("FBA納品便(Inbound Shipments)同期開始")
-    sync_inbound_shipments()
-    of.set_sp_sync_state(inbound_synced_at=now_iso)
+    failed_plans = sync_inbound_shipments()
+    if not failed_plans:
+        of.set_sp_sync_state(inbound_synced_at=now_iso)
     logger.info("FBA納品便(Inbound Shipments)同期完了")
 
     changes = stock_ledger.record_sp_changes()

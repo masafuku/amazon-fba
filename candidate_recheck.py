@@ -73,6 +73,9 @@ def load_candidates(tiers=DEFAULT_TIERS) -> list:
         if candidate["monthly_sold"] is None:
             candidate["monthly_sold"] = detail.get("monthly_sold")
         candidate["sales_rank_drops_30"] = detail.get("sales_rank_drops_30")
+        candidate["dims_cm"] = detail.get("dims_cm")
+        if detail.get("weight_estimated"):
+            candidate["weight_kg"] = None   # 仮値の重さは送料計算に使わない(一律額にする)
         candidates.append(candidate)
     return candidates
 
@@ -83,6 +86,8 @@ def recompute(candidate: dict, buy_box: float, fees: dict) -> dict:
         us_price_usd=buy_box,
         jp_cost_jpy=candidate["jp_cost_jpy"],
         weight_kg=candidate["weight_kg"] or 0.0,
+        weight_known=bool(candidate["weight_kg"]),
+        dims_cm=candidate.get("dims_cm"),
         amazon_fee_rate=fees["referral"] / buy_box,
         fba_fee_usd=fees["fba"] + (fees.get("other") or 0.0),
     )

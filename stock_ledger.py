@@ -25,7 +25,6 @@ import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 
-import market_prices
 import ops_finance as of
 import sd_email_parser as sdp
 
@@ -39,6 +38,7 @@ TNK_ARRIVED = 'tnk_arrived'
 TNK_SHIPPED = 'tnk_shipped'
 BRAND_APPROVED = 'brand_approved'
 BRAND_REJECTED = 'brand_rejected'
+BRAND_DROPPED = 'brand_dropped'   # 却下のまま見送り(CEO判断)。要対応に出さない
 BRAND_PENDING = 'brand_pending'
 LISTING_CREATED = 'listing_created'
 FBA_CHECKED_IN = 'fba_checked_in'
@@ -411,7 +411,8 @@ def gmail_since(default_days: int = 14) -> str:
 
 def record_brand_status(brand: str, status: str, note: str = '', on: str | None = None) -> None:
     """再申請など、メール以外で分かったブランド状況を登録する。"""
-    event_type = {'approved': BRAND_APPROVED, 'rejected': BRAND_REJECTED, 'pending': BRAND_PENDING}[status]
+    event_type = {'approved': BRAND_APPROVED, 'rejected': BRAND_REJECTED, 'pending': BRAND_PENDING,
+                  'dropped': BRAND_DROPPED}[status]
     of.init_ops_tables()
     with sqlite3.connect(of.DB_PATH) as conn:
         _record_event(conn, f'manual:{_now()}', event_type, on or datetime.now(JST).date().isoformat(), brand, {'note': note})
@@ -464,10 +465,10 @@ def alerts(today: str | None = None) -> list:
 
         for brand, event_type, on in conn.execute(
             '''SELECT ref, event_type, occurred_on FROM ops_events e
-               WHERE event_type IN (?, ?, ?) AND id = (
-                   SELECT id FROM ops_events WHERE ref = e.ref AND event_type IN (?, ?, ?)
+               WHERE event_type IN (?, ?, ?, ?) AND id = (
+                   SELECT id FROM ops_events WHERE ref = e.ref AND event_type IN (?, ?, ?, ?)
                    ORDER BY occurred_on DESC, id DESC LIMIT 1)''',
-            (BRAND_APPROVED, BRAND_REJECTED, BRAND_PENDING) * 2,
+            (BRAND_APPROVED, BRAND_REJECTED, BRAND_PENDING, BRAND_DROPPED) * 2,
         ):
             if event_type == BRAND_REJECTED:
                 result.append(f'ブランド却下: {brand}（{on}）。仕入れ済み・発注予定があれば再申請か販路変更を判断')
@@ -515,7 +516,7 @@ def alerts(today: str | None = None) -> list:
     for m in payments_summary(today)['months']:
         if m['paid_on'] is None and m['month'] < this_month:
             result.append(f"SDの支払い未確認: {m['month']}分 ¥{m['total']:,.0f}（請求書は発行済み。払ったら paid --month {m['month']} で登録）")
-    result += market_prices.roi_alerts()
+    # 相場での利益低下(ROI)は価格戦略の話なので、要対応ではなく価格の提案(price_strategy.build_price_digest)に出す(CEO 2026-11-11)
     return result
 
 
@@ -550,7 +551,7 @@ def stock_pipeline(today: str | None = None) -> list:
     def row_for(asin, name=None):
         if asin not in rows:
             rows[asin] = {'asin': asin, 'name': name, 'awaiting_supplier': 0, 'domestic_transit': 0, 'received': 0,
-                          'planned': 0, 'at_tnk': 0, 'intl_transit': 0, 'fc_received_inbound': 0,
+                          'planned': 0, 'at_tnk': 0, 'intl_transit': 0, 'fc_received_inbound': 0, 'fc_arrived': 0,
                           'fba_available': 0, 'sold_30d': 0, 'shipments': []}
         if name and not rows[asin]['name']:
             rows[asin]['name'] = name
@@ -572,15 +573,23 @@ def stock_pipeline(today: str | None = None) -> list:
 
         for confirmation_id, sp_status, asin, sku, qty in conn.execute(
             '''SELECT s.shipment_confirmation_id, s.status, i.asin, i.sku, i.quantity
-               FROM sp_inbound_shipment_items i JOIN sp_inbound_shipments s ON s.shipment_id = i.shipment_id'''
+               FROM sp_inbound_shipment_items i JOIN sp_inbound_shipments s ON s.shipment_id = i.shipment_id
+               WHERE UPPER(IFNULL(s.status, '')) NOT IN ('CANCELLED', 'DELETED', 'ERROR')'''
         ):
             stage = _shipment_stage(conn, confirmation_id, sp_status)
             row = row_for(asin, sku)
-            row['fc_received_inbound' if stage == 'fc_received' else stage] += qty or 0
+            # FCに着いた便の数は足さない(受領済みの分はFBA在庫と二重になる)。受領中の数はAmazonの在庫データから取る
+            if stage == 'fc_received':
+                row['fc_arrived'] += qty or 0
+            else:
+                row[stage] += qty or 0
             row['shipments'].append({'id': confirmation_id, 'stage': stage, 'qty': qty})
 
-        for asin, sku, qty in conn.execute('SELECT asin, sku, fulfillable_quantity FROM sp_fba_inventory'):
-            row_for(asin, sku)['fba_available'] = qty or 0
+        for asin, sku, qty, receiving in conn.execute(
+                'SELECT asin, sku, fulfillable_quantity, inbound_receiving_quantity FROM sp_fba_inventory'):
+            row = row_for(asin, sku)
+            row['fba_available'] = qty or 0
+            row['fc_received_inbound'] = receiving or 0
 
         for asin, qty in conn.execute(
             '''SELECT i.asin, SUM(i.quantity) FROM sp_order_items i JOIN sp_orders o ON o.order_id = i.order_id
@@ -588,13 +597,19 @@ def stock_pipeline(today: str | None = None) -> list:
         ):
             row_for(asin)['sold_30d'] = qty or 0
 
+        in_stock_days = of.in_stock_days_by_asin(conn, since, today_date.isoformat())
+
     result = []
     for row in rows.values():
-        sent = row['planned'] + row['at_tnk'] + row['intl_transit'] + row['fc_received_inbound']
+        sent = row['planned'] + row['at_tnk'] + row['intl_transit'] + row['fc_arrived']
         row['at_home'] = max(row['received'] - sent, 0)
-        pipeline_total = row['at_home'] + row['planned'] + row['at_tnk'] + row['intl_transit'] + row['fba_available']
-        daily = row['sold_30d'] / 30
+        pipeline_total = (row['at_home'] + row['planned'] + row['at_tnk'] + row['intl_transit']
+                          + row['fc_received_inbound'] + row['fba_available'])
+        # 30日で割ると在庫切れの期間の分だけ販売ペースが低く出るので、在庫があった日数で割る
+        row['in_stock_days'] = in_stock_days.get(row['asin'], 0)
+        daily = row['sold_30d'] / row['in_stock_days'] if row['in_stock_days'] else 0   # 在庫0日=予約注文のみ
         row['days_of_cover'] = round(pipeline_total / daily, 1) if daily else None
+        row['cover_tentative'] = row['days_of_cover'] is not None and row['in_stock_days'] < of.MIN_IN_STOCK_DAYS
         result.append(row)
     result.sort(key=lambda r: (r['days_of_cover'] is None, r['days_of_cover'] or 0, r['asin']))
     return result
@@ -627,6 +642,11 @@ def record_sp_changes() -> list:
                 continue
             if _record_event(conn, source_id, event_type, today, cid, {'status': status}):
                 new_events.append(f'{event_type} {cid}')
+        # 売り切れて在庫一覧から消えたASINも在庫切れとして扱う
+        for asin in previous['inventory'].keys() - inventory.keys():
+            if previous['inventory'][asin] > 0 and _record_event(
+                    conn, source_id, FBA_STOCK_OUT, today, asin, {'before': previous['inventory'][asin]}):
+                new_events.append(f'{FBA_STOCK_OUT} {asin}')
         for asin, qty in inventory.items():
             before = previous['inventory'].get(asin, 0)
             if before > 0 and qty == 0:
@@ -645,12 +665,9 @@ def _short(name: str | None, length: int = 18) -> str:
     return name if len(name) <= length else name[:length] + '…'
 
 
-def build_ledger_digest(since_iso: str | None, today: str | None = None) -> str:
-    """LINEダイジェスト冒頭の「在庫・物流」欄。前回通知以降の動き・販売・要対応・在庫。"""
-    of.init_ops_tables()
-    since_iso = since_iso or (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-    pipeline = stock_pipeline(today=today)
-    names = {r['asin']: r['name'] for r in pipeline}
+def movements(since_iso: str, names: dict, include_stock_changes: bool = True) -> list:
+    """前回通知以降の動き(発注・出荷・入庫・ブランド等)を、便・企業ごとにまとめた1行ずつのリスト。
+    include_stock_changes=Falseなら、ASINごとのFBA在庫化・在庫切れは含めない(在庫の変化として別に書くとき)。"""
     groups = {}
 
     def add(key, label, qty=0, items=None):
@@ -687,9 +704,9 @@ def build_ledger_digest(since_iso: str | None, today: str | None = None) -> str:
                 add((event_type, ref), f'FBA受領開始 {ref}')
             elif event_type == FBA_CLOSED:
                 add((event_type, ref), f'FBA受領完了 {ref}')
-            elif event_type == FBA_IN_STOCK:
+            elif event_type == FBA_IN_STOCK and include_stock_changes:
                 add((event_type, ref), f"FBA在庫化 {_short(names.get(ref))} {detail.get('qty')}個")
-            elif event_type == FBA_STOCK_OUT:
+            elif event_type == FBA_STOCK_OUT and include_stock_changes:
                 add((event_type, ref), f'在庫切れ {_short(names.get(ref))}')
             elif event_type in (BRAND_APPROVED, BRAND_REJECTED, BRAND_PENDING):
                 label = {BRAND_APPROVED: '承認', BRAND_REJECTED: '却下', BRAND_PENDING: '審査中'}[event_type]
@@ -699,6 +716,25 @@ def build_ledger_digest(since_iso: str | None, today: str | None = None) -> str:
             elif event_type == PRICE_SUPPRESSED:
                 add((event_type, ref), f"価格誤設定で出品停止 {detail.get('marketplace')} {ref}")
 
+    result = []
+    for group in groups.values():
+        text = group['label']
+        if group['items']:
+            text += f" {len(group['items'])}品{group['qty']}個"
+        if group.get('amount'):
+            text += f" ¥{group['amount']:,.0f}"
+        result.append(text)
+    return result
+
+
+def build_ledger_digest(since_iso: str | None, today: str | None = None) -> str:
+    """LINEダイジェスト冒頭の「在庫・物流」欄。前回通知以降の動き・販売・要対応・在庫。"""
+    of.init_ops_tables()
+    since_iso = since_iso or (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    pipeline = stock_pipeline(today=today)
+    names = {r['asin']: r['name'] for r in pipeline}
+    moved = movements(since_iso, names)
+    with sqlite3.connect(of.DB_PATH) as conn:
         sales = conn.execute(
             '''SELECT i.asin, SUM(i.quantity), SUM(i.item_price_usd) FROM sp_order_items i
                JOIN sp_orders o ON o.order_id = i.order_id
@@ -706,16 +742,7 @@ def build_ledger_digest(since_iso: str | None, today: str | None = None) -> str:
                GROUP BY i.asin ORDER BY SUM(i.quantity) DESC''', (since_iso,)
         ).fetchall()
 
-    lines = ['【在庫・物流】', '■動き']
-    for group in groups.values():
-        text = group['label']
-        if group['items']:
-            text += f" {len(group['items'])}品{group['qty']}個"
-        if group.get('amount'):
-            text += f" ¥{group['amount']:,.0f}"
-        lines.append(f'・{text}')
-    if len(lines) == 2:
-        lines.append('・なし')
+    lines = ['【在庫・物流】', '■動き'] + [f'・{m}' for m in moved or ['なし']]
 
     if sales:
         units = sum(r[1] or 0 for r in sales)
@@ -742,7 +769,7 @@ def build_ledger_digest(since_iso: str | None, today: str | None = None) -> str:
             parts.append(f"自宅{row['at_home']}")
         cover = row['days_of_cover']
         mark = '▲発注目安 ' if cover is not None and cover < REORDER_COVER_DAYS else ''
-        cover_text = f' 在庫{cover}日' if cover is not None else ''
+        cover_text = f" 在庫{cover}日{'(参考)' if row['cover_tentative'] else ''}" if cover is not None else ''
         stock_lines.append(f"・{mark}{_short(row['name'])} {'/'.join(parts)}{cover_text}")
     if stock_lines:
         lines.append('■在庫')
@@ -757,7 +784,8 @@ def format_pipeline(rows: list) -> str:
     lines = []
     for row in rows:
         parts = [f'{label}{row[key]}' for key, label in columns if row[key]]
-        cover = f" 在庫日数{row['days_of_cover']}" if row['days_of_cover'] is not None else ''
+        cover = (f" 在庫日数{row['days_of_cover']}{'(参考)' if row['cover_tentative'] else ''}"
+                 f"(在庫あり{row['in_stock_days']}日)" if row['days_of_cover'] is not None else '')
         lines.append(f"{row['asin']} {row['name'] or ''}: {' / '.join(parts) or '在庫なし'}{cover}")
     return '\n'.join(lines)
 
@@ -830,7 +858,8 @@ def main() -> None:
     digest.add_argument('--since', help='ISO日時(省略時は前回のダイジェスト送信時刻)')
     brand = sub.add_parser('brand', help='メール以外で分かったブランド状況を登録')
     brand.add_argument('name')
-    brand.add_argument('status', choices=['approved', 'rejected', 'pending'])
+    brand.add_argument('status', choices=['approved', 'rejected', 'pending', 'dropped'],
+                       help='dropped=却下のまま見送り(要対応に出さない)')
     brand.add_argument('--note', default='')
     stock = sub.add_parser('stock')
     stock.add_argument('--json', action='store_true')

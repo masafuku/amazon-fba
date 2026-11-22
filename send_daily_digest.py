@@ -27,9 +27,9 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 
+import daily_report
 import stock_ledger
-from config import Settings
-from notify_line import send_line_message
+import notify
 from ops_finance import (
     build_daily_digest_message,
     check_budget_alert,
@@ -42,7 +42,7 @@ from ops_finance import (
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="前回送信以降の合格候補をまとめてLINEに通知する")
-    parser.add_argument("--period", type=str, default="", help="通知文の見出しに使うラベル(例: '朝の' / '夜の')")
+    parser.add_argument("--period", type=str, default="", help="通知文の見出しに使うラベル(例: '朝の' / '昼の' / '夜の')")
     parser.add_argument("--dry-run", action="store_true", help="送信せず、組み立てたメッセージを表示するだけ")
     args = parser.parse_args()
 
@@ -55,36 +55,43 @@ def main() -> None:
     budget_alerts = check_budget_alert(this_month)
 
     period_label = f"{args.period}候補" if args.period else "候補"
-    candidate_message = build_daily_digest_message(candidates, keywords, period_label, budget_alerts=budget_alerts)
-    # 在庫・物流と候補を別の吹き出しにする(1回の送信なので送信数は増えない)
-    messages = [stock_ledger.build_ledger_digest(since_iso), candidate_message]
+    # 朝だけ価格の欄を出す。昼・夜は短い版(新しいことが無ければ送らない)。CEO 2026-11-18 朝・昼・夜の3回
+    evening = bool(args.period) and not args.period.startswith("朝")
+    heading = args.period.rstrip("の") or None
+    # 1通目: 売上・やること・在庫の変化・動き・価格(daily_report.py。CEO 2026-11-11「要点を絞って」)。
+    # 夜は新しいことが無ければNone。壊れても候補のまとめは送れるよう、失敗時は従来の在庫・物流欄にする。
+    alerts_now = None
+    try:
+        report, alerts_now = daily_report.build_report(since_iso, evening=evening, label=heading)
+    except Exception as exc:
+        print(f"[WARN] まとめ本文を組み立てられませんでした(従来の形式で送ります): {exc}")
+        report = stock_ledger.build_ledger_digest(since_iso)
+    messages = [report] if report else []
+    # 2通目: 仕入れ候補(合格候補か予算アラートがあるときだけ)
+    if candidates or budget_alerts:
+        messages.append(build_daily_digest_message(candidates, keywords, period_label, budget_alerts=budget_alerts))
+    if not messages:
+        print("[INFO] 新しいことが無いので送りません(次のまとめにまとめて入ります)。")
+        return
 
     print(f"[INFO] 対象期間: {effective_since} 〜 現在 (前回送信: {since_iso or 'なし(初回)'})")
     print(f"[INFO] 検索キーワード: {len(keywords)}件 / 合格候補: {len(candidates)}件(重複除く)")
     print("--- 通知内容 ---")
-    print("\n\n----- (2通目) -----\n\n".join(messages))
+    print("\n\n----- (次の吹き出し) -----\n\n".join(messages))
 
     if args.dry_run:
         print("[INFO] --dry-run のため送信しません。")
         return
 
-    settings = Settings.load()
-    if not settings.line_channel_access_token:
-        print("[WARN] LINE_CHANNEL_ACCESS_TOKEN が未設定のため、送信をスキップしました。")
-        return
-
     try:
-        send_line_message(
-            channel_access_token=settings.line_channel_access_token,
-            message=messages,
-            user_id=settings.line_user_id or None,
-        )
-        target = settings.line_user_id or "友だち全員へbroadcast"
-        print(f"[INFO] LINEダイジェストを送信しました ({target})。")
-        set_last_digest_sent_at(datetime.now(timezone.utc).isoformat())
+        target = notify.send(messages, also_line=True)
     except Exception as exc:
-        print(f"[ERROR] LINE送信失敗: {exc}")
+        print(f"[ERROR] 送信失敗: {exc}")
         raise SystemExit(1)
+    print(f"[INFO] ダイジェストを送信しました ({target})。")
+    set_last_digest_sent_at(datetime.now(timezone.utc).isoformat())
+    if alerts_now is not None:
+        daily_report.mark_sent(alerts_now)
 
 
 if __name__ == "__main__":

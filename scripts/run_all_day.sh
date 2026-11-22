@@ -37,7 +37,7 @@
 #
 # Sellerエージェント(定期セラーマイニング、CEOの指示「夜中に一定時間
 # セラーマイニングの時間を使う」): JST の指定時間帯(デフォルト深夜1:00〜
-# 6:00)は、サイクルごとにキーワード検索の代わりにセラープールから1件選んで
+# 4:00。4:00〜は価格の競合調査、下記)は、サイクルごとにキーワード検索の代わりにセラープールから1件選んで
 # マイニングする(daily_scan.py --seller-mining)。日中はCEOがダッシュボードを
 # 見ながらキーワード検索の進捗を追う可能性があるため、キーワード検索を
 # 優先させる形。時間帯以外は従来通り。AWS(Lightsail)はシステム時刻が
@@ -74,7 +74,14 @@ MAX_CANDIDATES="${MAX_CANDIDATES:-12}"
 # 定期セラーマイニングの時間帯(JST、24時間表記、終了は排他的)。
 # start > end の場合は日をまたぐ範囲として扱う(例: 23〜4時)。
 SELLER_MINING_NIGHT_START_JST="${SELLER_MINING_NIGHT_START_JST:-1}"
-SELLER_MINING_NIGHT_END_JST="${SELLER_MINING_NIGHT_END_JST:-6}"
+SELLER_MINING_NIGHT_END_JST="${SELLER_MINING_NIGHT_END_JST:-4}"
+
+# 価格の提案用の競合調査(price_strategy.py fetch、約11トークン/ASIN→十数商品で約3時間分のトークン)。
+# 同じKeepaのトークンを使うので、cronで並行して動かさず、このループの1サイクルとして1日1回だけ行う
+# (CEO 2026-11-11「取り合いにならないよう時間分割」)。セラーマイニング(1〜4時)の後、朝7:30の提案づくりの前。
+# 時間帯の中で、その日(JST)の分が未取得ならキーワード検索より優先する。
+PRICE_FETCH_START_JST="${PRICE_FETCH_START_JST:-4}"
+PRICE_FETCH_END_JST="${PRICE_FETCH_END_JST:-8}"
 SELLER_MINING_MAX_CANDIDATES="${SELLER_MINING_MAX_CANDIDATES:-10}"
 
 LOG_DIR="$REPO_ROOT/logs"
@@ -138,6 +145,21 @@ while [ "$running" -eq 1 ]; do
   fi
 
   cycle=$((cycle + 1))
+
+  # 価格の競合調査(1日1回)。取得済みなら終了コード10ですぐ戻り、通常のサイクルに進む。
+  hour_jst=$((10#$(TZ='Asia/Tokyo' date '+%H')))
+  if [ "$hour_jst" -ge "$PRICE_FETCH_START_JST" ] && [ "$hour_jst" -lt "$PRICE_FETCH_END_JST" ]; then
+    "$VENV_PYTHON" price_strategy.py fetch --once-per-day >> "$LOG_DIR/price_strategy.log" 2>&1
+    fetch_status=$?
+    if [ "$fetch_status" -ne 10 ]; then
+      if [ "$fetch_status" -eq 0 ]; then
+        log "[INFO] サイクル $cycle: 価格の競合調査を完了。"
+        continue
+      fi
+      # 失敗したら通常のサイクルに進む(次のサイクルで再試行。すぐ繰り返してAPIを叩き続けないため)
+      log "[WARN] サイクル $cycle: 価格の競合調査が異常終了(終了コード $fetch_status)。詳細は logs/price_strategy.log"
+    fi
+  fi
 
   mode_override=$(get_mode_override)
   if [ "$mode_override" = "seller-mining" ]; then

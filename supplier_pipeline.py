@@ -5,7 +5,7 @@
 .claude/skills/supplier-search/SKILL.md の手順。ここでは、そのCSVから先を既存の自動判定と
 同じ計算式・同じ保存経路(ops_finance)で処理する:
 
-- 利益・ROI: ops_finance.calc_unit_profit(送料0円・関税12.5%・ROI=利益÷卸原価)をそのまま使う。
+- 利益・ROI: ops_finance.calc_unit_profit(国際送料は重さ・容積で按分、関税12.5%、ROI=利益÷卸原価)をそのまま使う。
 - 卸価格の税基準: ops_finance.normalize_jp_cost_for_tax で揃える(免税事業者の間は税込=SDの税抜価格×1.1)。
 - Tier: ops_finance._apply_priority_fields(S/A+/…/D、完全除外の判定も同じ)。
 - 保存: ops_finance.persist_agent_run(source_type='supplier')。既存ASINは調査の前に除外する。
@@ -140,13 +140,14 @@ def build_entry(map_row: dict, keepa_row: dict, supplier: str, rate: float = DEF
     if fba_fee is not None:
         kwargs['fba_fee_usd'] = fba_fee
     weight_kg = weight_g / 1000 if weight_g else of.DEFAULT_WEIGHT_KG_FALLBACK
+    volume_cm3 = _num(keepa_row.get('パッケージ: サイズ (cm³)'))
     profit = of.calc_unit_profit(us_price_usd=us_price, jp_cost_jpy=jp_cost, weight_kg=weight_kg,
-                                 exchange_rate=rate, **kwargs)
+                                 exchange_rate=rate, volume_cm3=volume_cm3, weight_known=bool(weight_g), **kwargs)
     entry = {
         **base, **profit,
         'url': f'https://www.amazon.com/dp/{asin}',
         'jp_url': f'https://www.superdelivery.com/p/r/pd_p/{map_row.get("sd_id")}/' if map_row.get('sd_id') else None,
-        'weight_kg': weight_kg,
+        'weight_kg': weight_kg, 'volume_cm3': volume_cm3,
         'weight_estimated': not weight_g,
         'fee_estimated': referral_pct is None or fba_fee is None,
         'competitor_seller_count': _num(keepa_row.get('新品アイテム数 FBA: 現在')),
@@ -235,7 +236,8 @@ def audit_supplier_rows(db_path: str | Path | None = None) -> list[dict]:
         cost = of.normalize_jp_cost_for_tax(raw, None)
         profit = of.calc_unit_profit(
             us_price_usd=r['us_price_usd'], jp_cost_jpy=cost, weight_kg=r['weight_kg'] or of.DEFAULT_WEIGHT_KG_FALLBACK,
-            amazon_fee_rate=data['ref_pct'], fba_fee_usd=data['fba_fee'])
+            amazon_fee_rate=data['ref_pct'], fba_fee_usd=data['fba_fee'], weight_known=bool(r['weight_kg']),
+            dims_cm=data.get('dims_cm'), volume_cm3=data.get('volume_cm3'))
         tier = of._classify_priority_tier(profit['roi_pct'], monthly, data.get('rank_drops_30'))
         out.append({'id': r['id'], 'asin': r['asin'], 'title': r['title'], 'tier_before': r['priority_tier'],
                     'tier_after': tier, 'roi_before': data.get('roi_pct'), 'roi_after': profit['roi_pct'],
@@ -257,7 +259,8 @@ def apply_audit(rows: list[dict], db_path: str | Path | None = None) -> int:
             raw = data.get('jp_cost') or row[2]
             profit = of.calc_unit_profit(
                 us_price_usd=row[0], jp_cost_jpy=r['jp_cost_after'], weight_kg=data.get('weight_kg') or of.DEFAULT_WEIGHT_KG_FALLBACK,
-                amazon_fee_rate=data['ref_pct'], fba_fee_usd=data['fba_fee'])
+                amazon_fee_rate=data['ref_pct'], fba_fee_usd=data['fba_fee'], weight_known=bool(data.get('weight_kg')),
+                dims_cm=data.get('dims_cm'), volume_cm3=data.get('volume_cm3'))
             data['audit_before'] = {'jp_cost_jpy': row[2], 'priority_tier': row[3], 'roi_pct': data.get('roi_pct'),
                                     'unit_profit_usd': row[5], 'margin_pct': row[4]}
             data.update(wholesale_raw_jpy=raw, roi_pct=profit['roi_pct'], unit_profit_jpy=round(profit['unit_profit_usd'] * DEFAULT_RATE))
@@ -347,7 +350,8 @@ def rebase_cost(asin: str, shop: str, price_jpy: float, url: str | None = None, 
         fee_rate = (data.get('amazon_fee_usd') / price) if data.get('amazon_fee_usd') is not None else 0.15
         fba = data.get('fba_fee_usd') if data.get('fba_fee_usd') is not None else 3.5
         profit = of.calc_unit_profit(us_price_usd=price, jp_cost_jpy=new_cost, weight_kg=row['weight_kg'] or of.DEFAULT_WEIGHT_KG_FALLBACK,
-                                     amazon_fee_rate=fee_rate, fba_fee_usd=fba)
+                                     amazon_fee_rate=fee_rate, fba_fee_usd=fba, weight_known=bool(row['weight_kg']),
+                                     dims_cm=data.get('dims_cm'), volume_cm3=data.get('volume_cm3'))
         drops = data.get('sales_rank_drops_30', data.get('rank_drops_30'))
         tier = None if row['excluded_kind'] else of._classify_priority_tier(profit['roi_pct'], row['monthly_sold'], drops)
         result = {'asin': asin, 'status': 'ok', 'title': row['title'], 'tier_before': row['priority_tier'], 'tier_after': tier,
@@ -415,7 +419,8 @@ def refresh_rows(asins, keepa: dict, db_path: str | Path | None = None, apply: b
             if fba is not None:
                 kwargs['fba_fee_usd'] = fba
             profit = of.calc_unit_profit(us_price_usd=price, jp_cost_jpy=row['jp_cost_jpy'],
-                                         weight_kg=row['weight_kg'] or of.DEFAULT_WEIGHT_KG_FALLBACK, exchange_rate=rate, **kwargs)
+                                         weight_kg=row['weight_kg'] or of.DEFAULT_WEIGHT_KG_FALLBACK, exchange_rate=rate,
+                                         weight_known=bool(row['weight_kg']), volume_cm3=_num(k.get('パッケージ: サイズ (cm³)')), **kwargs)
             drops_90 = _num(k.get('売れ筋ランキング: 過去90日間の減少'))
             drops_30 = round(drops_90 / 3, 1) if drops_90 is not None else None
             monthly = _num(k.get('月間売上トレンド: 先月の購入'))

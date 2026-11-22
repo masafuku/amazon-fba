@@ -388,6 +388,65 @@ def init_ops_tables():
                 fetched_at TEXT
             );
 
+            -- 価格の振り返り用(price_review.pyが1日1回。読み取りのみで価格は動かさない)。
+            -- SKUごとの1日1行: 自社の価格・最低/最高価格、その時点の相場(market_pricesの写し)と販売可能在庫。
+            CREATE TABLE IF NOT EXISTS price_snapshots (
+                snapshot_on TEXT NOT NULL,        -- YYYY-MM-DD(UTC)
+                sku TEXT NOT NULL,
+                asin TEXT,
+                item_name TEXT,
+                our_price REAL,
+                min_price REAL,
+                max_price REAL,
+                buy_box_usd REAL,
+                lowest_fba_usd REAL,
+                offer_count INTEGER,
+                fulfillable INTEGER,
+                PRIMARY KEY (snapshot_on, sku)
+            );
+
+            -- 価格の変更(最低価格か、自動価格設定に任せていない価格の変更)。前日のスナップショットとの
+            -- 差分で自動記録し、理由は price_review.py note で後から付ける。見込み利益は変更時の手数料の実額で出す。
+            CREATE TABLE IF NOT EXISTS price_changes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sku TEXT NOT NULL,
+                asin TEXT,
+                changed_on TEXT NOT NULL,         -- YYYY-MM-DD(この日から新しい価格)
+                old_price REAL,
+                new_price REAL,
+                old_min REAL,
+                new_min REAL,
+                old_unit_profit REAL,
+                new_unit_profit REAL,
+                reason TEXT,
+                recorded_at TEXT,
+                UNIQUE (sku, changed_on)
+            );
+
+            -- 競合の価格帯ごとの在庫(price_strategy.py fetch が1日1回Keepaから。自社の出品は除く)。
+            -- layers_json = [[価格, 出品者数, 在庫], ...] 価格の安い順。
+            CREATE TABLE IF NOT EXISTS competitor_layers (
+                fetched_on TEXT NOT NULL,
+                asin TEXT NOT NULL,
+                monthly_sold INTEGER,
+                layers_json TEXT,
+                PRIMARY KEY (fetched_on, asin)
+            );
+
+            -- 価格の提案(ドライラン。price_strategy.py propose が1日1回。価格は変更しない)。
+            CREATE TABLE IF NOT EXISTS price_proposals (
+                proposed_on TEXT NOT NULL,
+                sku TEXT NOT NULL,
+                asin TEXT,
+                action TEXT,                      -- raise / cut / feedback / keep
+                current_min REAL,
+                target REAL,
+                profit_now REAL,
+                profit_target REAL,
+                reason TEXT,
+                PRIMARY KEY (proposed_on, sku)
+            );
+
             -- SDの後払い(Paid)。出荷されるたびに届く「決済確定」メール1通=1行。ご利用月(settled_on)ごとに
             -- 月末締め・翌月初3営業日に請求書が出る。paid_onはその月の請求を払った日(入金確認メールには金額が
             -- 無いので、stock_ledger.py paid で月ごとに登録する)。
@@ -508,6 +567,11 @@ def init_ops_tables():
         if 'inbound_synced_at' not in sp_sync_state_columns:
             conn.execute('ALTER TABLE sp_sync_state ADD COLUMN inbound_synced_at TEXT')
 
+        sp_fba_inventory_columns = {row[1] for row in conn.execute('PRAGMA table_info(sp_fba_inventory)').fetchall()}
+        if 'inbound_receiving_quantity' not in sp_fba_inventory_columns:
+            # FCに着いて受領処理中の数(Amazonの数え方)。便の納品数から引き算すると受領済みの便を二重に数えるため
+            conn.execute('ALTER TABLE sp_fba_inventory ADD COLUMN inbound_receiving_quantity INTEGER')
+
         # seller_poolの一度きりの自動バックフィル: 既にsource_type='seller'の
         # 実績がagent_candidatesにある(過去のセラーマイニング結果)場合、
         # seller_poolがまだ空ならそこから再構築する。INSERT OR IGNOREなので
@@ -580,6 +644,39 @@ _SHIPPING_COST_SCALE_FACTOR = _FORWARDER_QUOTE_COST_JPY / _EMS_RATE_AT_QUOTE_WEI
 # 通常関税（12.5％）が定義」)。商品のHSコード次第で実際の税率は変わりうるため
 # あくまで概算値。
 DEFAULT_IMPORT_DUTY_RATE = 0.125
+# 国際送料(TNK経由・FedEx)。CEO 2026-11-15: $5前後の安い商品が送料抜きでS判定になっていたため、自動判定(Tier)にも
+# 送料を入れる(9/22・9/27の「送料0円」は見積もりが妥当でなかったため。今は第1便の実額がある)。
+# FedExは箱の実重量と容積重量(縦×横×高さcm÷5000)の大きいほうで請求され、第2・3便は容積で請求された
+# (CEO:「どちらかというと大きさで送料の値段が決まってる」)。1個あたり =
+#   1箱の基本料金 ÷ 1箱の個数 + max(重さ, 容積重量) × 詰め合わせ係数 × 1kgあたりの運賃
+# 基本料金: FedEx運賃の最低部分 ¥3,700 × 燃油サーチャージ1.47(仮定) + 発送代行¥1,500 + 国内送料(自宅→TNK)約¥750。
+# 1kgあたり: TNK運賃表の傾き 約¥750/kg × 1.47。詰め合わせ係数: 第1〜3便の実際の箱 ÷ 商品の合計 = 0.9〜1.35(平均約1.2)。
+# 第1便(90個・1.8kg)でこの式は¥9,674、実額¥10,017。第2・3便の請求書が来たら合わせ直す。
+INTL_SHIP_BASE_JPY_PER_SHIPMENT = 3700 * 1.47 + 1500 + 750
+INTL_SHIP_UNITS_PER_SHIPMENT = 150
+INTL_SHIP_RATE_JPY_PER_KG = 1100
+INTL_SHIP_PACKING_FACTOR = 1.2
+INTL_SHIP_VOLUMETRIC_DIVISOR = 5000
+# 重さも寸法も分からない商品の一律額: 第1便の実額 ¥10,017 ÷ 90個 ÷ ¥150 (pricing_rule.INTL_SHIPPING_USD と同じ)
+INTL_SHIPPING_PER_UNIT_USD = round(10017 / 90 / 150.0, 3)
+
+
+def estimate_intl_shipping_usd(weight_kg: float | None, dims_cm=None, exchange_rate: float = 150.0,
+                               volume_cm3: float | None = None) -> dict:
+    """1個あたりの国際送料(ドル)。重さと容積重量(箱の寸法cm、または体積cm³ ÷ 5000)の大きいほうで按分する。
+    どちらも無ければ一律額。戻り値: {'usd', 'billable_kg', 'basis'}"""
+    vol_kg = None
+    if dims_cm and all(d and d > 0 for d in dims_cm):
+        volume_cm3 = dims_cm[0] * dims_cm[1] * dims_cm[2]
+    if volume_cm3 and volume_cm3 > 0:
+        vol_kg = volume_cm3 / INTL_SHIP_VOLUMETRIC_DIVISOR
+    if not weight_kg and vol_kg is None:
+        return {'usd': INTL_SHIPPING_PER_UNIT_USD, 'billable_kg': None, 'basis': 'flat'}
+    billable = max(weight_kg or 0.0, vol_kg or 0.0)
+    jpy = (INTL_SHIP_BASE_JPY_PER_SHIPMENT / INTL_SHIP_UNITS_PER_SHIPMENT
+           + billable * INTL_SHIP_PACKING_FACTOR * INTL_SHIP_RATE_JPY_PER_KG)
+    basis = 'volume' if vol_kg is not None and vol_kg > (weight_kg or 0.0) else 'weight'
+    return {'usd': round(jpy / exchange_rate, 3), 'billable_kg': round(billable, 4), 'basis': basis}
 
 
 def _shipping_cost_jpy_for_weight(total_weight_kg: float) -> float:
@@ -682,6 +779,10 @@ def calc_unit_profit(
     fba_fee_usd: float = 3.5,          # FBAピック&パック手数料(サイズ依存、要調整)
     shipment_budget_jpy: float = 50_000.0,      # 1回にまとめて仕入れる想定総額
     import_duty_rate: float = DEFAULT_IMPORT_DUTY_RATE,  # 米国関税(概算、商品カテゴリにより変動)
+    intl_shipping_usd: float | None = None,  # 1個あたりの国際送料。省略時は重さ・寸法から estimate_intl_shipping_usd()
+    dims_cm=None,                            # 箱の寸法(cm)。容積重量に使う
+    volume_cm3: float | None = None,         # 箱の体積(cm³、KeepaのCSV)。寸法が無いときに使う
+    weight_known: bool = True,               # weight_kg が仮値(DEFAULT_WEIGHT_KG_FALLBACK)ならFalse
 ) -> dict:
     """1個あたりの利益・利益率を計算する。
 
@@ -703,9 +804,12 @@ def calc_unit_profit(
     """
     jp_cost_usd = jp_cost_jpy / exchange_rate
     amazon_fee_usd = us_price_usd * amazon_fee_rate
-    # CEO指示(2026-09-22): 想定輸送費が妥当でないため0円とする。重量連動モデル
-    # (_shipping_cost_jpy_for_weight)は残してあるが、利益計算では使わない。
-    shipping_cost_usd = 0.0
+    # 国際送料: 2026-09-22〜11-15は0円(見積もりが妥当でなかったため)。2026-11-15からは重さ・容積で按分した
+    # 1個あたりの額を引く(CEO承認、estimate_intl_shipping_usd)。重さが仮値で寸法も無ければ一律額。
+    # 古いEMS表の重量連動モデル(_shipping_cost_jpy_for_weight)は使わない。
+    if intl_shipping_usd is None:
+        intl_shipping_usd = estimate_intl_shipping_usd(weight_kg if weight_known else None, dims_cm, exchange_rate, volume_cm3)['usd']
+    shipping_cost_usd = intl_shipping_usd
     import_duty_usd = jp_cost_usd * import_duty_rate
 
     unit_profit_usd = (
@@ -1431,6 +1535,8 @@ def evaluate_mcp_candidates(
             jp_cost_jpy=cost['price'],
             weight_kg=weight_kg,
             exchange_rate=exchange_rate,
+            dims_cm=sell.get('dims_cm'),
+            weight_known=not used_fallback_weight,
             **fee_kwargs,
         )
 
@@ -1452,6 +1558,7 @@ def evaluate_mcp_candidates(
             'price_diff_rate_gross': candidate.get('price_diff_rate'),  # 手数料・送料考慮前
             'price_volatility_90d': candidate.get('price_volatility_90d'),
             'weight_kg': weight_kg,
+            'dims_cm': sell.get('dims_cm'),
             'weight_estimated': used_fallback_weight,
             'fee_estimated': used_fallback_fee,
             # 既に取得済み(追加のKeepaトークン消費なし)だが、これまで
@@ -1556,10 +1663,12 @@ def evaluate_mcp_candidates(
 
             profit = calc_unit_profit(
                 us_price_usd=us_price, jp_cost_jpy=jp_price,
-                weight_kg=weight_kg, exchange_rate=exchange_rate, **fee_kwargs,
+                weight_kg=weight_kg, exchange_rate=exchange_rate,
+                dims_cm=skip.get('dims_cm'), weight_known=not used_fallback_weight, **fee_kwargs,
             )
             entry.update(profit)  # unit_profit_usd, margin_pct など
             entry['weight_kg'] = weight_kg
+            entry['dims_cm'] = skip.get('dims_cm')
             entry['weight_estimated'] = used_fallback_weight
             entry['fee_estimated'] = used_fallback_fee
 
@@ -1877,7 +1986,7 @@ def _recompute_cost_and_tier(
     exchange_rate = old_cost_jpy / data['jp_cost_usd']
     profit = calc_unit_profit(
         us_price_usd=data['us_price_usd'], jp_cost_jpy=new_cost_jpy, weight_kg=data['weight_kg'],
-        exchange_rate=exchange_rate,
+        exchange_rate=exchange_rate, dims_cm=data.get('dims_cm'), weight_known=not data.get('weight_estimated'),
         amazon_fee_rate=data['amazon_fee_usd'] / data['us_price_usd'],
         fba_fee_usd=data['fba_fee_usd'],
     )
@@ -2886,17 +2995,17 @@ def upsert_sp_financial_events(order_id: str, events: list) -> int:
 
 
 def replace_sp_fba_inventory(items: list) -> int:
-    """items: [{asin, sku, fnsku, fulfillableQuantity}, ...]. 毎回スナップショット全洗い替え。"""
+    """items: [{asin, sku, fnsku, fulfillableQuantity, inboundReceivingQuantity}, ...]. 毎回スナップショット全洗い替え。"""
     init_ops_tables()
     now = datetime.now(timezone.utc).isoformat()
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute('DELETE FROM sp_fba_inventory')
         conn.executemany(
             '''
-            INSERT OR REPLACE INTO sp_fba_inventory (asin, sku, fnsku, fulfillable_quantity, snapshot_at)
-            VALUES (:asin, :sku, :fnsku, :fulfillableQuantity, :snapshotAt)
+            INSERT OR REPLACE INTO sp_fba_inventory (asin, sku, fnsku, fulfillable_quantity, inbound_receiving_quantity, snapshot_at)
+            VALUES (:asin, :sku, :fnsku, :fulfillableQuantity, :inboundReceivingQuantity, :snapshotAt)
             ''',
-            [{**i, 'snapshotAt': now} for i in items],
+            [{'inboundReceivingQuantity': 0, **i, 'snapshotAt': now} for i in items],
         )
     return len(items)
 
@@ -2975,6 +3084,23 @@ def list_sp_inbound_shipments() -> list:
 _UNSHIPPED_SHIPMENT_STATUSES = frozenset({'WORKING', 'READY_TO_SHIP', 'CANCELLED', 'DELETED', 'ERROR'})
 
 
+# 便ごとの収支に入れる国際送料・関税の見積り(TNK請求書が届くまで)。第一便の概算
+# (運賃4,373+燃油2,044+発送代行1,500=7,917円÷90個。国内送料は原価に入っているので除く)。
+# 関税は仕入れ単価の12.5%(pricing_rule.IMPORT_DUTY_RATEと同じ)。実額は shipment_intl_costs に
+# 入れると、その便だけ見積りを置き換える。
+INTL_SHIPPING_JPY_PER_UNIT_ESTIMATE = 7917 / 90
+IMPORT_DUTY_RATE_ESTIMATE = 0.125
+SHIPMENT_INTL_COSTS_DDL = '''
+    CREATE TABLE IF NOT EXISTS shipment_intl_costs (
+        shipment_confirmation_id TEXT PRIMARY KEY,
+        shipping_jpy REAL NOT NULL,
+        duty_jpy REAL NOT NULL DEFAULT 0,
+        note TEXT,
+        updated_at TEXT
+    )
+'''
+
+
 def get_shipment_pnl(usd_to_jpy: float = 150.0) -> list:
     """FBA納品便(sp_inbound_shipments)ごとのP&L概算。発送済みの便だけが対象
     (作成中・発送前・取消の納品プランは、原価も売上の割り当ても含めない)。
@@ -2982,7 +3108,8 @@ def get_shipment_pnl(usd_to_jpy: float = 150.0) -> list:
     原価: 便の各ASINの数量 × jp_purchase_recordsのその便に最も近い日付の仕入単価
     (+送料按分、既存のcost_by_asinロジックと同じ)。
 
-    売上は出荷済み(Shipped)の注文だけ。Pending・取消は実績ではないので数えない。
+    販売は出荷ではなく注文の時点で数える(CEO指示)。取消を除くPendingも含め、売価が未確定の
+    注文は相場のBuy Boxで見込む。
 
     売上: 正確なロット追跡はできない(Amazonはどの納品便由来の在庫が売れたかを
     教えない)ため、ASINごとに納品便を納品期間開始日の古い順に並べ、
@@ -3005,22 +3132,30 @@ def get_shipment_pnl(usd_to_jpy: float = 150.0) -> list:
         ).fetchall()
         sold_items = conn.execute(
             '''
-            SELECT oi.asin AS asin, oi.quantity AS quantity, oi.item_price_usd AS item_price_usd,
-                   o.purchase_date AS purchase_date
+            SELECT oi.order_id AS order_id, oi.asin AS asin, oi.quantity AS quantity,
+                   oi.item_price_usd AS item_price_usd, o.purchase_date AS purchase_date,
+                   o.order_status AS order_status
             FROM sp_order_items oi
             JOIN sp_orders o ON o.order_id = oi.order_id
-            WHERE oi.asin IS NOT NULL AND o.order_status = 'Shipped'
+            WHERE oi.asin IS NOT NULL AND UPPER(IFNULL(o.order_status, '')) NOT IN ('CANCELED', 'CANCELLED')
             ORDER BY o.purchase_date ASC
             '''
         ).fetchall()
+        buy_box_by_asin = {r[0]: r[1] for r in conn.execute('SELECT asin, buy_box_usd FROM market_prices')}
+        # 注文ごとの手数料: 確定分(sp_financial_events)があればそれ、無ければ見込み(相場の手数料)。
+        actual_fee_by_order = {r[0]: r[1] or 0.0 for r in conn.execute(
+            'SELECT order_id, SUM(amount_usd) FROM sp_financial_events GROUP BY order_id')}
+        estimated_fee_by_order = _estimated_fees_by_order(conn, '2000-01-01', set(actual_fee_by_order))
 
     # ASINごとの仕入単価履歴(着地原価)。便の納品期間開始日に最も近い(かつそれ以前の)
     # 仕入れ記録を使う。無ければ直近(最後)の記録にフォールバック。
     purchases_by_asin: dict = {}
+    domestic_by_asin: dict = {}
     for row in cost_by_asin_rows:
         shipping_per_unit = (row['shipping_cost_jpy'] / row['quantity']) if row['quantity'] else 0
         landed = (row['unit_price_jpy'] or 0) + shipping_per_unit
         purchases_by_asin.setdefault(row['asin'], []).append((row['order_date'] or '', landed))
+        domestic_by_asin.setdefault(row['asin'], []).append((row['order_date'] or '', shipping_per_unit))
 
     def landed_cost_for(asin: str, as_of_date: str | None) -> float:
         history = purchases_by_asin.get(asin)
@@ -3031,28 +3166,63 @@ def get_shipment_pnl(usd_to_jpy: float = 150.0) -> list:
         candidates = [cost for date, cost in history if date <= as_of_date]
         return candidates[-1] if candidates else history[0][1]
 
+    def domestic_shipping_for(asin: str, as_of_date: str | None) -> float:
+        # landed_cost_for と同じ仕入れの、1個あたり国内送料(仕入れ先→TNK倉庫)
+        history = domestic_by_asin.get(asin)
+        if not history:
+            return 0.0
+        if not as_of_date:
+            return history[-1][1]
+        candidates = [cost for date, cost in history if date <= as_of_date]
+        return candidates[-1] if candidates else history[0][1]
+
     # ASINごとの未消化販売キュー(FIFO)。(quantity, unit_revenue_usd)
     sales_queue: dict = {}
+    qty_by_order: dict = {}
     for row in sold_items:
-        sales_queue.setdefault(row['asin'], []).append(
-            {'qty': row['quantity'] or 0, 'unitRevenue': row['item_price_usd'] or 0}
-        )
+        qty_by_order[row['order_id']] = qty_by_order.get(row['order_id'], 0) + (row['quantity'] or 0)
+    for row in sold_items:
+        order_fee = actual_fee_by_order.get(row['order_id'], estimated_fee_by_order.get(row['order_id'], 0.0))
+        order_qty = qty_by_order.get(row['order_id']) or 0
+        price, _ = _estimated_price(row, buy_box_by_asin)
+        sales_queue.setdefault(row['asin'], []).append({
+            'qty': row['quantity'] or 0, 'unitRevenue': price or 0,
+            'unitFee': (order_fee / order_qty) if order_qty else 0.0,
+            'estimated': row['order_id'] not in actual_fee_by_order,
+        })
 
     # 便をASINごとに納品期間開始日の古い順で処理するため、まずASIN×便の一覧を作る
     shipments_sorted = sorted(shipments, key=lambda s: s['deliveryWindowStart'] or s['createdAt'] or '')
+
+    intl_costs = {}
+    try:
+        with sqlite3.connect(DB_PATH) as cost_conn:
+            cost_conn.execute(SHIPMENT_INTL_COSTS_DDL)
+            for sid, ship_jpy, duty_jpy in cost_conn.execute(
+                'SELECT shipment_confirmation_id, shipping_jpy, duty_jpy FROM shipment_intl_costs'
+            ):
+                intl_costs[sid] = (ship_jpy or 0, duty_jpy or 0)
+    except sqlite3.Error:
+        pass
 
     result = []
     for shipment in shipments_sorted:
         as_of = shipment['deliveryWindowStart'] or shipment['createdAt']
         total_cost_usd = 0.0
         total_revenue_usd = 0.0
+        total_fees_usd = 0.0
+        estimated_fees_usd = 0.0
         total_units_shipped = 0
         total_units_sold = 0
+        duty_estimate_usd = 0.0
+        domestic_shipping_usd = 0.0
         for item in shipment['items']:
             asin = item['asin']
             qty_shipped = item['quantity'] or 0
             total_units_shipped += qty_shipped
             total_cost_usd += (landed_cost_for(asin, as_of) / usd_to_jpy) * qty_shipped
+            domestic_shipping_usd += (domestic_shipping_for(asin, as_of) / usd_to_jpy) * qty_shipped
+            duty_estimate_usd += (landed_cost_for(asin, as_of) / usd_to_jpy) * qty_shipped * IMPORT_DUTY_RATE_ESTIMATE
 
             remaining = qty_shipped
             queue = sales_queue.get(asin, [])
@@ -3060,13 +3230,23 @@ def get_shipment_pnl(usd_to_jpy: float = 150.0) -> list:
                 sale = queue[0]
                 take = min(remaining, sale['qty'])
                 total_revenue_usd += take * sale['unitRevenue']
+                total_fees_usd += take * sale['unitFee']
+                if sale['estimated']:
+                    estimated_fees_usd += take * sale['unitFee']
                 total_units_sold += take
                 sale['qty'] -= take
                 remaining -= take
                 if sale['qty'] <= 0:
                     queue.pop(0)
 
-        net_profit_usd = total_revenue_usd - total_cost_usd
+        actual_intl = intl_costs.get(shipment['shipmentConfirmationId']) or intl_costs.get(shipment['shipmentId'])
+        if actual_intl:
+            intl_shipping_usd = actual_intl[0] / usd_to_jpy
+            duty_usd = actual_intl[1] / usd_to_jpy
+        else:
+            intl_shipping_usd = total_units_shipped * INTL_SHIPPING_JPY_PER_UNIT_ESTIMATE / usd_to_jpy
+            duty_usd = duty_estimate_usd
+        net_profit_usd = total_revenue_usd - total_fees_usd - total_cost_usd - intl_shipping_usd - duty_usd
         result.append({
             'shipmentId': shipment['shipmentId'],
             'shipmentConfirmationId': shipment['shipmentConfirmationId'],
@@ -3077,7 +3257,13 @@ def get_shipment_pnl(usd_to_jpy: float = 150.0) -> list:
             'unitsShipped': total_units_shipped,
             'unitsSold': total_units_sold,
             'costUsd': round(total_cost_usd, 2),
+            'domesticShippingUsd': round(domestic_shipping_usd, 2),
             'revenueUsd': round(total_revenue_usd, 2),
+            'feesUsd': round(total_fees_usd, 2),
+            'estimatedFeesUsd': round(estimated_fees_usd, 2),
+            'intlShippingUsd': round(intl_shipping_usd, 2),
+            'dutyUsd': round(duty_usd, 2),
+            'intlCostEstimated': not actual_intl,
             'netProfitUsd': round(net_profit_usd, 2),
             'items': shipment['items'],
         })
@@ -3374,6 +3560,45 @@ def list_fixed_costs() -> list:
     ]
 
 
+def _estimated_price(row, buy_box_by_asin: dict):
+    """売価が未確定(Pending等で注文明細にItemPriceが無い)の注文行の見込み売価。
+    取得済みなら(価格, False)、未取得でキャンセルでなければ相場のBuy Box(価格, True)。"""
+    if row['item_price_usd'] is not None:
+        return row['item_price_usd'], False
+    if str(row['order_status'] or '').upper() in ('CANCELED', 'CANCELLED'):
+        return None, False
+    price = buy_box_by_asin.get(row['asin'])
+    return (price, True) if price else (None, False)
+
+
+def _estimated_fees_by_order(conn, since: str, actual_order_ids) -> dict:
+    """実手数料(sp_financial_events)がまだ入っていない注文の手数料見込み。Amazonは出荷の数日後に
+    手数料を確定するので、それまでは相場取得(market_prices)の紹介料率×売価+FBA手数料で仮置きする。
+    確定した注文は含めない。キャンセル・売価なしの注文も除く。"""
+    market = {
+        r[0]: (r[1], r[2], r[3], r[4]) for r in conn.execute(
+            'SELECT asin, buy_box_usd, referral_fee_usd, fba_fee_usd, other_fee_usd FROM market_prices'
+        )
+    }
+    estimated: dict = {}
+    for order_id, asin, qty, price in conn.execute(
+        '''
+        SELECT oi.order_id, oi.asin, oi.quantity, oi.item_price_usd
+        FROM sp_order_items oi JOIN sp_orders o ON o.order_id = oi.order_id
+        WHERE o.purchase_date >= ? AND UPPER(IFNULL(o.order_status, '')) NOT IN ('CANCELED', 'CANCELLED')
+        ''', (since,),
+    ):
+        if order_id in actual_order_ids or asin not in market or not qty:
+            continue
+        buy_box, referral, fba, other = market[asin]
+        if referral is None or fba is None or not buy_box:
+            continue
+        if price is None:
+            price = buy_box
+        estimated[order_id] = estimated.get(order_id, 0.0) + (referral / buy_box * price + fba + (other or 0.0)) * qty
+    return estimated
+
+
 def compute_finance_summary(days: int = 30, usd_to_jpy: float = 150.0) -> dict:
     """収支ページ用の集計。売上(sp_orders)・COGS(jp_purchase_records、ASINごと
     直近仕入単価)・実手数料(sp_financial_events)・固定費(fixed_costs月額)・
@@ -3392,7 +3617,8 @@ def compute_finance_summary(days: int = 30, usd_to_jpy: float = 150.0) -> dict:
         # だった。同期が進めば自然に解消する)。
         orders = conn.execute(
             '''
-            SELECT oi.asin AS asin, oi.quantity AS quantity, oi.item_price_usd AS item_price_usd
+            SELECT oi.asin AS asin, oi.quantity AS quantity, oi.item_price_usd AS item_price_usd,
+                   o.order_status AS order_status
             FROM sp_order_items oi
             JOIN sp_orders o ON o.order_id = oi.order_id
             WHERE o.purchase_date >= ?
@@ -3410,6 +3636,8 @@ def compute_finance_summary(days: int = 30, usd_to_jpy: float = 150.0) -> dict:
             (since,),
         ):
             fees_by_order[row['order_id']] = row['total'] or 0.0
+        estimated_fees_by_order = _estimated_fees_by_order(conn, since, set(fees_by_order))
+        buy_box_by_asin = {r[0]: r[1] for r in conn.execute('SELECT asin, buy_box_usd FROM market_prices')}
         # 着地原価(landed cost) = 商品単価 + その行に配分された送料/数量
         # (CEO: 「送料は商品ごとに配分して」— allocate_order_shipping()が
         # shipping_cost_jpyに書き込む。未配分(NULL)ならCOALESCEで0扱い)。
@@ -3427,8 +3655,16 @@ def compute_finance_summary(days: int = 30, usd_to_jpy: float = 150.0) -> dict:
         fixed_cost_rows = list_fixed_costs()
         monthly_fixed_jpy = sum(r['monthlyAmountJpy'] for r in fixed_cost_rows)
 
-    revenue_usd = sum((o['item_price_usd'] or 0) * (o['quantity'] or 0) for o in orders)
-    fees_usd = sum(fees_by_order.values())
+    revenue_usd = 0.0
+    estimated_revenue_usd = 0.0
+    for o in orders:
+        price, is_estimate = _estimated_price(o, buy_box_by_asin)
+        amount = (price or 0) * (o['quantity'] or 0)
+        revenue_usd += amount
+        if is_estimate:
+            estimated_revenue_usd += amount
+    estimated_fees_usd = sum(estimated_fees_by_order.values())
+    fees_usd = sum(fees_by_order.values()) + estimated_fees_usd
     cogs_usd = sum(
         (cost_by_asin.get(o['asin'], 0) or 0) / usd_to_jpy * (o['quantity'] or 0) for o in orders
     )
@@ -3451,8 +3687,10 @@ def compute_finance_summary(days: int = 30, usd_to_jpy: float = 150.0) -> dict:
         'periodDays': days,
         'orderCount': order_count,
         'revenueUsd': round(revenue_usd, 2),
+        'estimatedRevenueUsd': round(estimated_revenue_usd, 2),
         'cogsUsd': round(cogs_usd, 2),
         'feesUsd': round(fees_usd, 2),
+        'estimatedFeesUsd': round(estimated_fees_usd, 2),
         'fixedCostUsd': round(fixed_cost_period_usd, 2),
         'fixedCosts': fixed_costs_breakdown,
         'netProfitUsd': round(net_profit_usd, 2),
@@ -3474,7 +3712,7 @@ def get_per_product_pnl(days: int = 30, usd_to_jpy: float = 150.0) -> list:
         items = conn.execute(
             '''
             SELECT oi.order_id AS order_id, oi.asin AS asin, oi.quantity AS quantity,
-                   oi.item_price_usd AS item_price_usd
+                   oi.item_price_usd AS item_price_usd, o.order_status AS order_status
             FROM sp_order_items oi
             JOIN sp_orders o ON o.order_id = oi.order_id
             WHERE o.purchase_date >= ? AND oi.asin IS NOT NULL
@@ -3492,6 +3730,8 @@ def get_per_product_pnl(days: int = 30, usd_to_jpy: float = 150.0) -> list:
             (since,),
         ):
             fees_by_order[row['order_id']] = row['total'] or 0.0
+        estimated_fees_by_order = _estimated_fees_by_order(conn, since, set(fees_by_order))
+        buy_box_by_asin = {r[0]: r[1] for r in conn.execute('SELECT asin, buy_box_usd FROM market_prices')}
         cost_by_asin = {}
         for row in conn.execute(
             '''
@@ -3513,11 +3753,17 @@ def get_per_product_pnl(days: int = 30, usd_to_jpy: float = 150.0) -> list:
         qty = it['quantity'] or 0
         order_total_qty = qty_by_order.get(it['order_id']) or 0
         order_fee = fees_by_order.get(it['order_id'], 0.0)
+        estimated_fee = estimated_fees_by_order.get(it['order_id'], 0.0)
         allocated_fee = (order_fee * qty / order_total_qty) if order_total_qty else 0.0
-        entry = by_asin.setdefault(asin, {'units': 0, 'revenueUsd': 0.0, 'feesUsd': 0.0})
+        allocated_estimate = (estimated_fee * qty / order_total_qty) if order_total_qty else 0.0
+        entry = by_asin.setdefault(asin, {'units': 0, 'revenueUsd': 0.0, 'estimatedRevenueUsd': 0.0, 'feesUsd': 0.0, 'estimatedFeesUsd': 0.0})
         entry['units'] += qty
-        entry['revenueUsd'] += (it['item_price_usd'] or 0) * qty
-        entry['feesUsd'] += allocated_fee
+        price, is_estimate = _estimated_price(it, buy_box_by_asin)
+        entry['revenueUsd'] += (price or 0) * qty
+        if is_estimate:
+            entry['estimatedRevenueUsd'] += (price or 0) * qty
+        entry['feesUsd'] += allocated_fee + allocated_estimate
+        entry['estimatedFeesUsd'] += allocated_estimate
 
     result = []
     for asin, entry in by_asin.items():
@@ -3528,7 +3774,9 @@ def get_per_product_pnl(days: int = 30, usd_to_jpy: float = 150.0) -> list:
             'asin': asin,
             'units': entry['units'],
             'revenueUsd': round(entry['revenueUsd'], 2),
+            'estimatedRevenueUsd': round(entry['estimatedRevenueUsd'], 2),
             'feesUsd': round(entry['feesUsd'], 2),
+            'estimatedFeesUsd': round(entry['estimatedFeesUsd'], 2),
             'cogsUsd': round(cogs_usd, 2),
             'netProfitUsd': round(net_profit_usd, 2),
             'marginPct': round(100.0 * net_profit_usd / entry['revenueUsd'], 1) if entry['revenueUsd'] else None,
@@ -3537,17 +3785,93 @@ def get_per_product_pnl(days: int = 30, usd_to_jpy: float = 150.0) -> list:
     return result
 
 
+MIN_IN_STOCK_DAYS = 7  # 在庫があった日数がこれ未満だと販売ペースがぶれるので、在庫日数は参考値扱い
+
+
+def in_stock_days_by_asin(conn: sqlite3.Connection, since: str, today: str) -> dict:
+    """ASINごとに、since〜today(両端含む)のうちFBAに販売可能在庫があった日数。
+    在庫切れの期間で割ると販売ペースが低く出る(=在庫日数が長く出る)ので、販売ペースはこの日数で割る。
+
+    根拠はstock_ledgerが記録するfba_in_stock/fba_stock_outイベント。ただし:
+    - 最初のイベントがfba_stock_outなら、それまではFC受領開始日(fba_checked_in/fba_receiving。無ければsince)から在庫ありとみなす。
+    - イベントが無いASINは、今在庫があれば受領開始日(無ければsince)から在庫ありとみなす。在庫が無ければ0日
+      (入荷前の予約注文だけ売れたASIN。イベントは販売開始より前の2026-10-22から記録しているので、それ以外の漏れは無い)。
+    - 在庫ありのまま終わっているのに今の販売可能在庫が0(在庫一覧から消えた等)なら、最後に売れた日で在庫切れとみなす。"""
+    since_d = datetime.fromisoformat(since).date() + timedelta(days=1)  # 30日分(sinceの翌日〜today)で数える
+    today_d = datetime.fromisoformat(today).date()
+    events: dict = {}
+    for event_type, occurred_on, asin in conn.execute(
+        """SELECT event_type, occurred_on, ref FROM ops_events
+           WHERE event_type IN ('fba_in_stock', 'fba_stock_out') ORDER BY occurred_on, id"""
+    ):
+        events.setdefault(asin, []).append((event_type, datetime.fromisoformat(occurred_on).date()))
+    received_on = {
+        asin: datetime.fromisoformat(day).date()
+        for asin, day in conn.execute(
+            """SELECT i.asin, MIN(e.occurred_on) FROM ops_events e
+               JOIN sp_inbound_shipments s ON s.shipment_confirmation_id = e.ref
+               JOIN sp_inbound_shipment_items i ON i.shipment_id = s.shipment_id
+               WHERE e.event_type IN ('fba_checked_in', 'fba_receiving') GROUP BY i.asin"""
+        )
+    }
+    current = {asin: qty or 0 for asin, qty in conn.execute('SELECT asin, fulfillable_quantity FROM sp_fba_inventory')}
+    last_sale = {
+        asin: datetime.fromisoformat(day[:10]).date()
+        for asin, day in conn.execute(
+            """SELECT oi.asin, MAX(o.purchase_date) FROM sp_order_items oi JOIN sp_orders o ON o.order_id = oi.order_id
+               WHERE IFNULL(o.order_status, '') != 'Canceled' GROUP BY oi.asin"""
+        )
+    }
+
+    result = {}
+    for asin in set(events) | set(current) | set(last_sale):
+        evs = events.get(asin, [])
+        intervals, start = [], None
+        if evs:
+            first_type, first_day = evs[0]
+            if first_type == 'fba_stock_out':
+                start = min(received_on.get(asin, since_d), first_day)
+        elif current.get(asin):
+            start = received_on.get(asin, since_d)
+        for event_type, day in evs:
+            if event_type == 'fba_in_stock' and start is None:
+                start = day
+            elif event_type == 'fba_stock_out' and start is not None:
+                intervals.append((start, day))
+                start = None
+        if start is not None:
+            intervals.append((start, today_d if current.get(asin) else last_sale.get(asin, today_d)))
+        result[asin] = sum(
+            max((min(end, today_d) - max(begin, since_d)).days + 1, 0) for begin, end in intervals
+        )
+    return result
+
+
 def get_sp_fba_inventory_with_days_of_stock(days_for_velocity: int = 30) -> list:
-    """在庫日数付きのFBA在庫一覧。直近days_for_velocity日の販売ペースから算出。"""
+    """在庫日数付きのFBA在庫一覧。直近days_for_velocity日のうち、在庫があった日の販売ペースから算出。"""
     init_ops_tables()
     since = (datetime.now(timezone.utc) - timedelta(days=days_for_velocity)).date().isoformat()
+    today = datetime.now(timezone.utc).date().isoformat()
     with sqlite3.connect(DB_PATH) as conn:
+        in_stock_days = in_stock_days_by_asin(conn, since, today)
         conn.row_factory = sqlite3.Row
         sold_by_asin = {
             row['asin']: row['total_qty']
             for row in conn.execute(
-                'SELECT asin, SUM(quantity) AS total_qty FROM sp_orders WHERE purchase_date >= ? GROUP BY asin',
+                '''SELECT oi.asin, SUM(oi.quantity) AS total_qty FROM sp_order_items oi
+                   JOIN sp_orders o ON o.order_id = oi.order_id
+                   WHERE o.purchase_date >= ? AND o.order_status != 'Canceled' GROUP BY oi.asin''',
                 (since,),
+            )
+        }
+        # アマゾンへ送付した数(未発送・取消の便は除く)
+        sent_by_asin = {
+            row[0]: row[1]
+            for row in conn.execute(
+                '''SELECT i.asin, SUM(i.quantity) FROM sp_inbound_shipment_items i
+                   JOIN sp_inbound_shipments s ON s.shipment_id = i.shipment_id
+                   WHERE UPPER(IFNULL(s.status, '')) NOT IN ('WORKING', 'READY_TO_SHIP', 'CANCELLED', 'DELETED', 'ERROR')
+                   GROUP BY i.asin'''
             )
         }
         inventory = conn.execute(
@@ -3557,17 +3881,21 @@ def get_sp_fba_inventory_with_days_of_stock(days_for_velocity: int = 30) -> list
     result = []
     for row in inventory:
         sold = sold_by_asin.get(row['asin'], 0) or 0
-        daily_rate = sold / days_for_velocity if days_for_velocity else 0
+        stocked_days = in_stock_days.get(row['asin'], days_for_velocity)
+        daily_rate = sold / stocked_days if stocked_days else 0   # 在庫0日=予約注文のみ。ペースは出さない
         days_of_stock = (row['fulfillable_quantity'] / daily_rate) if daily_rate > 0 else None
         result.append(
             {
                 'asin': row['asin'],
                 'sku': row['sku'],
                 'fnsku': row['fnsku'],
+                'sentQuantity': sent_by_asin.get(row['asin'], 0) or 0,
                 'fulfillableQuantity': row['fulfillable_quantity'],
                 'snapshotAt': row['snapshot_at'],
                 'soldLast30d': sold,
+                'inStockDays': stocked_days,
                 'daysOfStock': round(days_of_stock, 1) if days_of_stock is not None else None,
+                'daysOfStockTentative': days_of_stock is not None and stocked_days < MIN_IN_STOCK_DAYS,
             }
         )
     return result
