@@ -205,13 +205,23 @@ export default function FinancePage() {
     }, [summary]);
 
     const coveragePct = summary?.fixedCostCoveragePct;
-    const invS = useSort(inventory);
     // ROI = 純利益 ÷ 原価(原価に対する利益率。マージンは売上に対する率)
     const productsWithRoi = useMemo(
         () => products.map((row) => ({ ...row, roiPct: row.cogsUsd > 0 ? Math.round((row.netProfitUsd / row.cogsUsd) * 1000) / 10 : null })),
         [products],
     );
-    const prodS = useSort(productsWithRoi);
+    // 在庫(今の値)と損益(選んだ期間)をASINでひとつにまとめる。どちらかにしか無い商品は、無いほうの列を空欄にする。
+    const [showDetailCols, setShowDetailCols] = useState(false);
+    const mergedRows = useMemo(() => {
+        const byAsin = new Map();
+        inventory.forEach((item) => byAsin.set(item.asin, { ...item }));
+        productsWithRoi.forEach((row) => {
+            const prev = byAsin.get(row.asin) || {};
+            byAsin.set(row.asin, { ...prev, ...row, productName: prev.productName || row.productName });
+        });
+        return [...byAsin.values()];
+    }, [inventory, productsWithRoi]);
+    const mergedS = useSort(mergedRows, 'netProfitUsd', 'desc');
     const shipS = useSort(shipments);
     const poS = useSort(purchaseOrders);
     const ordS = useSort(orders);
@@ -391,79 +401,81 @@ export default function FinancePage() {
                     <Package size={16} /> FBA在庫・在庫日数
                 </h2>
                 <StockBreakdownChart />
-                {inventory.length === 0 ? (
-                    <p className="text-sm text-slate-500">在庫データがありません。</p>
-                ) : (
-                    <div className="overflow-x-auto">
-                        <table className="w-full text-left text-sm">
-                            <thead>
-                                <tr className="text-slate-400">
-                                    {invS.th('商品名', 'productName')}
-                                    {invS.th('SKU', 'sku')}
-                                    {invS.th('アマゾン送付数', 'sentQuantity')}{invS.th('在庫数', 'fulfillableQuantity')}
-                                    {invS.th('直近30日販売数', 'soldLast30d')}
-                                    {invS.th('うち在庫あり日数', 'inStockDays')}
-                                    {invS.th('在庫日数', 'daysOfStock')}
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {invS.rows.map((item) => (
-                                    <tr key={item.asin} className="border-t border-slate-800">
-                                        <td className="px-2 py-2"><NameLink asin={item.asin} name={item.productName} /></td>
-                                        <td className="px-2 py-2 text-xs">{item.sku}</td>
-                                        <td className="px-2 py-2">{item.sentQuantity}</td>
-                                        <td className="px-2 py-2">{item.fulfillableQuantity}</td>
-                                        <td className="px-2 py-2">{item.soldLast30d}</td>
-                                        <td className="px-2 py-2">{item.inStockDays}日</td>
-                                        <td className="px-2 py-2">
-                                            {item.daysOfStock === null ? '-' : `${item.daysOfStock}日`}
-                                            {item.daysOfStockTentative && <span className="ml-1 text-xs text-slate-500">(参考)</span>}
-                                        </td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    </div>
-                )}
             </div>
 
             <div className="rounded-xl bg-slate-900 p-4">
                 <h2 className="mb-3 text-sm font-semibold text-slate-300">商品別P&L(期間内)</h2>
                 <ProductPnlBars products={products} />
-                {products.length === 0 ? (
-                    <p className="text-sm text-slate-500">注文データがありません。</p>
+            </div>
+
+            <div className="rounded-xl bg-slate-900 p-4">
+                <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+                    <h2 className="text-sm font-semibold text-slate-300">商品別の在庫と損益</h2>
+                    <label className="flex items-center gap-1 text-xs text-slate-400">
+                        <input type="checkbox" checked={showDetailCols} onChange={(e) => setShowDetailCols(e.target.checked)} />
+                        SKU・手数料・在庫あり日数も表示
+                    </label>
+                </div>
+                <p className="mb-3 text-xs text-slate-500">
+                    在庫は今の値(直近30日販売数は固定)、損益は上で選んだ期間({days}日)の値です。利益は送料前(売上 − 手数料 − 原価)。
+                    * は売上・手数料に見込みを含みます。見出しを押すと並べ替えます。
+                </p>
+                {mergedRows.length === 0 ? (
+                    <p className="text-sm text-slate-500">データがありません。</p>
                 ) : (
                     <div className="overflow-x-auto">
                         <table className="w-full text-left text-sm">
                             <thead>
+                                <tr className="text-xs text-slate-500">
+                                    <th className="px-2 pt-1" />
+                                    <th className="px-2 pt-1" colSpan={showDetailCols ? 5 : 3}>在庫(今)</th>
+                                    <th className="px-2 pt-1" colSpan={showDetailCols ? 6 : 5}>損益(期間内)</th>
+                                </tr>
                                 <tr className="text-slate-400">
-                                    {prodS.th('商品名', 'productName')}
-                                    {prodS.th('数量', 'units')}
-                                    {prodS.th('売上', 'revenueUsd')}
-                                    {prodS.th('手数料', 'feesUsd')}
-                                    {prodS.th('原価', 'cogsUsd')}
-                                    {prodS.th('純利益', 'netProfitUsd')}
-                                    {prodS.th('利益率', 'marginPct')}
-                                    {prodS.th('ROI', 'roiPct')}
+                                    {mergedS.th('商品名', 'productName')}
+                                    {showDetailCols && mergedS.th('SKU', 'sku')}
+                                    {mergedS.th('送付数', 'sentQuantity')}
+                                    {mergedS.th('在庫数', 'fulfillableQuantity')}
+                                    {mergedS.th('30日販売', 'soldLast30d')}
+                                    {showDetailCols && mergedS.th('在庫あり日数', 'inStockDays')}
+                                    {mergedS.th('在庫日数', 'daysOfStock')}
+                                    {mergedS.th('数量', 'units')}
+                                    {mergedS.th('売上', 'revenueUsd')}
+                                    {showDetailCols && mergedS.th('手数料', 'feesUsd')}
+                                    {mergedS.th('原価', 'cogsUsd')}
+                                    {mergedS.th('純利益', 'netProfitUsd')}
+                                    {mergedS.th('利益率', 'marginPct')}
+                                    {mergedS.th('ROI', 'roiPct')}
                                 </tr>
                             </thead>
                             <tbody>
-                                {prodS.rows.map((row) => (
-                                    <tr key={row.asin} className="border-t border-slate-800">
-                                        <td className="px-2 py-2"><NameLink asin={row.asin} name={row.productName} /></td>
-                                        <td className="px-2 py-2">{row.units}</td>
-                                        <td className="px-2 py-2">{usd(row.revenueUsd)}{row.estimatedRevenueUsd > 0 ? ' *' : ''}</td>
-                                        <td className="px-2 py-2">{usd(row.feesUsd)}{row.estimatedFeesUsd > 0 ? ' *' : ''}</td>
-                                        <td className="px-2 py-2">{usd(row.cogsUsd)}</td>
-                                        <td className={`px-2 py-2 font-semibold ${row.netProfitUsd >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                                            {usd(row.netProfitUsd)}
-                                        </td>
-                                        <td className="px-2 py-2">
-                                            {row.marginPct === null || row.marginPct === undefined ? '-' : `${row.marginPct}%`}
-                                        </td>
-                                        <td className="px-2 py-2">{row.roiPct === null ? '-' : `${row.roiPct}%`}</td>
-                                    </tr>
-                                ))}
+                                {mergedS.rows.map((row) => {
+                                    const blank = <span className="text-slate-600">-</span>;
+                                    const has = (v) => v !== null && v !== undefined && v !== '';
+                                    return (
+                                        <tr key={row.asin} className="border-t border-slate-800">
+                                            <td className="px-2 py-2"><NameLink asin={row.asin} name={row.productName} /></td>
+                                            {showDetailCols && <td className="px-2 py-2 text-xs">{row.sku || blank}</td>}
+                                            <td className="px-2 py-2">{has(row.sentQuantity) ? row.sentQuantity : blank}</td>
+                                            <td className="px-2 py-2">{has(row.fulfillableQuantity) ? row.fulfillableQuantity : blank}</td>
+                                            <td className="px-2 py-2">{has(row.soldLast30d) ? row.soldLast30d : blank}</td>
+                                            {showDetailCols && <td className="px-2 py-2">{has(row.inStockDays) ? `${row.inStockDays}日` : blank}</td>}
+                                            <td className="px-2 py-2">
+                                                {has(row.daysOfStock) ? `${row.daysOfStock}日` : blank}
+                                                {row.daysOfStockTentative && <span className="ml-1 text-xs text-slate-500">(参考)</span>}
+                                            </td>
+                                            <td className="px-2 py-2">{has(row.units) ? row.units : blank}</td>
+                                            <td className="px-2 py-2">{has(row.revenueUsd) ? <>{usd(row.revenueUsd)}{row.estimatedRevenueUsd > 0 ? ' *' : ''}</> : blank}</td>
+                                            {showDetailCols && <td className="px-2 py-2">{has(row.feesUsd) ? <>{usd(row.feesUsd)}{row.estimatedFeesUsd > 0 ? ' *' : ''}</> : blank}</td>}
+                                            <td className="px-2 py-2">{has(row.cogsUsd) ? usd(row.cogsUsd) : blank}</td>
+                                            <td className={`px-2 py-2 font-semibold ${has(row.netProfitUsd) ? (row.netProfitUsd >= 0 ? 'text-emerald-400' : 'text-rose-400') : ''}`}>
+                                                {has(row.netProfitUsd) ? usd(row.netProfitUsd) : blank}
+                                            </td>
+                                            <td className="px-2 py-2">{has(row.marginPct) ? `${row.marginPct}%` : blank}</td>
+                                            <td className="px-2 py-2">{has(row.roiPct) ? `${row.roiPct}%` : blank}</td>
+                                        </tr>
+                                    );
+                                })}
                             </tbody>
                         </table>
                     </div>
