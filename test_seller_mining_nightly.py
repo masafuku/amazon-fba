@@ -9,11 +9,15 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
 import daily_scan
 import ops_finance
+
+# 直近48時間の窓に入る作成時刻(固定日付だと、窓がずれた時点でテストが壊れる)
+RECENT_CREATED_AT = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
 
 
 class TestDiscoverSellersForPendingCandidates(unittest.TestCase):
@@ -25,7 +29,7 @@ class TestDiscoverSellersForPendingCandidates(unittest.TestCase):
         return mock.patch.object(ops_finance, 'DB_PATH', db_path), mock.patch.object(daily_scan, 'DB_PATH', db_path), db_path
 
     def _insert_candidate(self, conn, asin, qualified, priority_tier, roi_pct=0.3, source_type='keyword',
-                          created_at='2026-09-27T00:00:00+00:00'):
+                          created_at=RECENT_CREATED_AT):
         conn.execute(
             "INSERT INTO agent_candidates (run_id, category, asin, qualified, priority_tier, margin_pct, "
             "unit_profit_usd, data_json, source_type, created_at) "

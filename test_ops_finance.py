@@ -645,8 +645,13 @@ class TestLoadDigestWindow(unittest.TestCase):
                     self._insert(conn, 'B0AAAAAAA9', 'Low Tier Thing', 'B-', 0.2)                   # 対象Tier外
                     self._insert(conn, 'B0AAAAAA10', 'C Tier Thing', 'C+', 9.0)                      # 対象Tier外
                 candidates, _keywords, _since = load_digest_window('2026-09-26T00:00:00+00:00')
-        self.assertEqual([c['asin'] for c in candidates], ['B0AAAAAAA2', 'B0AAAAAAA3', 'B0AAAAAAA4', 'B0AAAAAAA1'])
-        self.assertEqual([c['priority_tier'] for c in candidates], ['S', 'A+', 'A-', 'B+'])
+        # メディア・出品制限ブランドは検索段階で除外済みなので、ここでは落とさない。
+        # フィギュア(is_figure)と完全除外(excluded_kind)と対象外Tierは落とす。
+        self.assertEqual(
+            [c['asin'] for c in candidates],
+            ['B0AAAAAAA6', 'B0AAAAAAA2', 'B0AAAAAAA5', '4088737687', 'B0AAAAAAA3', 'B0AAAAAAA4', 'B0AAAAAAA1'],
+        )
+        self.assertEqual([c['priority_tier'] for c in candidates], ['S', 'S', 'A+', 'A+', 'A+', 'A-', 'B+'])
 
 
 class TestListingStatus(unittest.TestCase):

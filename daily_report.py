@@ -76,7 +76,8 @@ def sales(conn: sqlite3.Connection, since_iso: str) -> list:
         else:
             bb, referral, fba, other = market.get(asin, (None, None, None, None))
             fees = referral / bb * price + fba + (other or 0.0) if bb and referral is not None and fba is not None else None
-        unit = prv.unit_profit(price, {'total': fees}, costs.get(asin)) if fees is not None else None
+        # LINEのまとめ(CEO 2026-11-16): 国際送料は引かず、原価は税込
+        unit = prv.unit_profit(price, {'total': fees}, costs.get(asin), shipping=False, tax_included=True) if fees is not None else None
         item = by_asin.setdefault(asin, {'asin': asin, 'qty': 0, 'revenue': 0.0, 'profit': 0.0, 'prices': set(), 'profit_known': True})
         item['qty'] += qty
         item['revenue'] += price * qty
@@ -209,8 +210,10 @@ def price_lines(conn: sqlite3.Connection, names: dict) -> tuple[list, int]:
     return lines, len(proposals)
 
 
-def build_report(since_iso: str | None, evening: bool = False, now: datetime | None = None) -> tuple[str | None, list]:
-    """(本文, 今回の要対応)。夜は、売上・動き・在庫の変化・新しい要対応が何も無ければ None(送らない)。"""
+def build_report(since_iso: str | None, evening: bool = False, now: datetime | None = None,
+                 label: str | None = None) -> tuple[str | None, list]:
+    """(本文, 今回の要対応)。夜は、売上・動き・在庫の変化・新しい要対応が何も無ければ None(送らない)。
+    label は見出しの時間帯(朝・昼・夜)。省略時は evening から決める。"""
     of.init_ops_tables()
     now = now or datetime.now(timezone.utc)
     since_iso = since_iso or (now - timedelta(days=1)).isoformat()
@@ -226,7 +229,8 @@ def build_report(since_iso: str | None, evening: bool = False, now: datetime | N
     if evening and not (sold or moved or changes or set(alerts_now) - previous):
         return None, alerts_now
 
-    lines = [f"【{'夜' if evening else '朝'}のまとめ {now.astimezone(JST):%-m/%-d}】"]
+    heading = label or ('夜' if evening else '朝')
+    lines = [f"【{heading}のまとめ {now.astimezone(JST):%-m/%-d}】"]
     lines += sales_lines(sold, names)
     lines += ['', '★やること'] + (todo or ['なし'])
     lines += ['', '在庫の変化'] + (changes or ['・なし'])

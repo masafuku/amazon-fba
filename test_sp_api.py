@@ -8,10 +8,14 @@ import sqlite3
 import tempfile
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import ops_finance as of
+
+# 直近30日の窓に入る購入日(固定日付だと、窓がずれた時点でテストが壊れる)
+RECENT_PURCHASE_DATE = (datetime.now(timezone.utc) - timedelta(days=3)).strftime('%Y-%m-%d')
 import sd_email_parser
 import sp_api.client as sp_client
 import sp_api_sync
@@ -255,7 +259,7 @@ class TestAllocateOrderShipping(unittest.TestCase):
         })
         of.allocate_order_shipping("丸進", "2026-08-26", 500)  # -> 送料/個 = ¥50
         of.upsert_sp_orders([{
-            "orderId": "O1", "purchaseDate": "2026-09-01", "asin": "B0TEST", "sku": "SKU1",
+            "orderId": "O1", "purchaseDate": RECENT_PURCHASE_DATE, "asin": "B0TEST", "sku": "SKU1",
             "quantity": 2, "itemPriceUsd": 10.0, "orderStatus": "Shipped",
         }])
         of.upsert_sp_order_items("O1", [{
@@ -288,7 +292,7 @@ class TestPerProductPnl(unittest.TestCase):
         })
         of.set_asin_jan_map("B0RULER", "JAN1")
         of.upsert_sp_orders([{
-            "orderId": "O1", "purchaseDate": "2026-09-01", "asin": None, "sku": None,
+            "orderId": "O1", "purchaseDate": RECENT_PURCHASE_DATE, "asin": None, "sku": None,
             "quantity": None, "itemPriceUsd": None, "orderStatus": "Shipped",
         }])
         of.upsert_sp_order_items("O1", [{
@@ -308,7 +312,7 @@ class TestPerProductPnl(unittest.TestCase):
 
     def test_multi_asin_order_splits_fees_by_quantity(self):
         of.upsert_sp_orders([{
-            "orderId": "O2", "purchaseDate": "2026-09-01", "asin": None, "sku": None,
+            "orderId": "O2", "purchaseDate": RECENT_PURCHASE_DATE, "asin": None, "sku": None,
             "quantity": None, "itemPriceUsd": None, "orderStatus": "Shipped",
         }])
         of.upsert_sp_order_items("O2", [
