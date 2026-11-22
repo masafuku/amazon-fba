@@ -23,6 +23,8 @@ import { formatDateTime } from './formatters';
 import SalesTrendSection from './SalesTrendSection';
 import PlanComparisonSection from './PlanComparisonSection';
 import ShipStatusSection from './ShipStatusSection';
+import StockBreakdownChart from './StockBreakdownChart';
+import ProductPnlBars from './ProductPnlBars';
 
 const API_BASE = import.meta.env.VITE_API_BASE || '';
 
@@ -388,6 +390,7 @@ export default function FinancePage() {
                 <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-300">
                     <Package size={16} /> FBA在庫・在庫日数
                 </h2>
+                <StockBreakdownChart />
                 {inventory.length === 0 ? (
                     <p className="text-sm text-slate-500">在庫データがありません。</p>
                 ) : (
@@ -426,6 +429,7 @@ export default function FinancePage() {
 
             <div className="rounded-xl bg-slate-900 p-4">
                 <h2 className="mb-3 text-sm font-semibold text-slate-300">商品別P&L(期間内)</h2>
+                <ProductPnlBars products={products} />
                 {products.length === 0 ? (
                     <p className="text-sm text-slate-500">注文データがありません。</p>
                 ) : (
