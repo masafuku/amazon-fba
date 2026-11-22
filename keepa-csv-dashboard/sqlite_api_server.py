@@ -1987,6 +1987,37 @@ def load_sales_trend():
     return {'rows': rows, 'generatedAt': generated}
 
 
+def _read_out_csv(name: str):
+    import csv
+    path = DASHBOARD_OUT_DIR / name
+    if not path.exists():
+        return [], None
+    with path.open(encoding='utf-8', newline='') as f:
+        rows = list(csv.DictReader(f))
+    return rows, datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
+
+
+def _num(v):
+    try:
+        return float(v) if v not in (None, '') else None
+    except ValueError:
+        return None
+
+
+def load_plan_comparison():
+    """便ごとの価格プラン比較。毎朝の dashboard_snapshot.py が書く plans_pre.csv / ship_trend_pre.csv を読む。
+    利益は送料前(手取り − 原価 − 保管料。国際送料・関税は引かない。AWS側の定義)。"""
+    plans, generated = _read_out_csv('plans_pre.csv')
+    trend, _ = _read_out_csv('ship_trend_pre.csv')
+    for r in plans:
+        for k in ('final_profit', 'final_lo', 'final_hi', 'roi', 'target_profit', 'diff_target', 'horizon_days'):
+            r[k] = _num(r.get(k))
+    for r in trend:
+        for k in ('profit', 'profit_lo', 'profit_hi', 'projected'):
+            r[k] = _num(r.get(k))
+    return {'plans': plans, 'shipTrend': trend, 'generatedAt': generated}
+
+
 def load_finance_shipments(usd_to_jpy: float = 150.0):
     """FBA納品便(sp_inbound_shipments)ごとのP&L概算。ops_finance.pyのget_shipment_pnl()
     と同一ロジック(二つのPythonエントリポイントはお互いをimportしないという既存方針
@@ -3121,6 +3152,13 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == '/api/finance/sales-trend':
             try:
                 self._send_json(200, {'ok': True, **load_sales_trend()})
+            except Exception as exc:
+                self._send_json(500, {'error': str(exc)})
+            return
+
+        if parsed.path == '/api/finance/plans':
+            try:
+                self._send_json(200, {'ok': True, **load_plan_comparison()})
             except Exception as exc:
                 self._send_json(500, {'error': str(exc)})
             return
