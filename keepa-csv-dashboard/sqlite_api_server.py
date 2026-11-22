@@ -2012,6 +2012,21 @@ SHIP_ITEM_NUM = ('sent', 'sold', 'pending', 'left', 'sellable', 'lost', 'cost_us
                  'unit_profit', 'proj_before', 'proj_after', 'target_price', 'price_now', 'var_price', 'var_fee', 'var_lost')
 
 
+STOCK_NUM = ('bought', 'sent', 'sold', 'sold_pending', 'sellable', 'home', 'incoming', 'lost', 'transship', 'receiving', 'research')
+
+
+def load_stock_breakdown():
+    """商品ごとの内訳(送った・売れた・販売可能・受領中・移動中・調査中・紛失・自宅・入荷中)。毎朝の dashboard_snapshot.py が書く stock.csv を読む。"""
+    rows, generated = _read_out_csv('stock.csv')
+    out = []
+    for r in rows:
+        row = {'product': r['product']}
+        for k in STOCK_NUM:
+            row[k] = _num(r.get(k)) or 0
+        out.append(row)
+    return {'rows': out, 'generatedAt': generated}
+
+
 def load_ship_status():
     """便ごとの状況と収支。shipments.csv(進み具合・数量・原価・売上・送料後の数字)に、shipments_pre.csv(送料前の利益・見込み・目標)を重ね、
     ship_items.csv(商品ごとの内訳。profit_now・proj_before・unit_profit は元から送料前)を添える。毎朝の dashboard_snapshot.py が書く。"""
@@ -3179,6 +3194,13 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == '/api/finance/sales-trend':
             try:
                 self._send_json(200, {'ok': True, **load_sales_trend()})
+            except Exception as exc:
+                self._send_json(500, {'error': str(exc)})
+            return
+
+        if parsed.path == '/api/finance/stock-breakdown':
+            try:
+                self._send_json(200, {'ok': True, **load_stock_breakdown()})
             except Exception as exc:
                 self._send_json(500, {'error': str(exc)})
             return

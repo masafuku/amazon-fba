@@ -375,6 +375,12 @@ export const loadSalesTrend = async () => {
     return response.json();
 };
 
+export const loadStockBreakdown = async () => {
+    const response = await fetch(`${API_BASE}/api/finance/stock-breakdown`);
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    return response.json();
+};
+
 export const loadShipStatus = async () => {
     const response = await fetch(`${API_BASE}/api/finance/ship-status`);
     if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
