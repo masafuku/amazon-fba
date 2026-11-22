@@ -22,6 +22,7 @@ import {
 import { formatDateTime } from './formatters';
 import SalesTrendSection from './SalesTrendSection';
 import PlanComparisonSection from './PlanComparisonSection';
+import ShipStatusSection from './ShipStatusSection';
 
 const API_BASE = import.meta.env.VITE_API_BASE || '';
 
@@ -525,6 +526,8 @@ export default function FinancePage() {
                     </div>
                 )}
             </div>
+
+            <ShipStatusSection />
 
             <div className="rounded-xl bg-slate-900 p-4">
                 <h2 className="mb-1 flex items-center gap-2 text-sm font-semibold text-slate-300">

@@ -2004,6 +2004,33 @@ def _num(v):
         return None
 
 
+SHIP_STATUS_NUM = ('stage', 'items', 'units', 'received', 'sold', 'sellable', 'lost', 'cost_usd', 'intl_usd', 'proceeds_usd',
+                   'projected', 'proj_before', 'kg', 'vol_kg', 'target_profit', 'proj_roi', 'var_price', 'var_fee', 'var_lost',
+                   'var_ship', 'intl_only', 'duty', 'profit_pre', 'recovery_pre', 'projected_pre', 'proj_roi_pre',
+                   'target_profit_pre', 'diff_target_pre')
+SHIP_ITEM_NUM = ('sent', 'sold', 'pending', 'left', 'sellable', 'lost', 'cost_usd', 'proceeds_usd', 'profit_now', 'ship_usd',
+                 'unit_profit', 'proj_before', 'proj_after', 'target_price', 'price_now', 'var_price', 'var_fee', 'var_lost')
+
+
+def load_ship_status():
+    """便ごとの状況と収支。shipments.csv(進み具合・数量・原価・売上・送料後の数字)に、shipments_pre.csv(送料前の利益・見込み・目標)を重ね、
+    ship_items.csv(商品ごとの内訳。profit_now・proj_before・unit_profit は元から送料前)を添える。毎朝の dashboard_snapshot.py が書く。"""
+    ships, generated = _read_out_csv('shipments.csv')
+    pre, _ = _read_out_csv('shipments_pre.csv')
+    items, _ = _read_out_csv('ship_items.csv')
+    pre_by = {r['ship']: r for r in pre}
+    for r in ships:
+        r.update({k: v for k, v in (pre_by.get(r['ship']) or {}).items() if k != 'ship'})
+        for k in SHIP_STATUS_NUM:
+            if k in r:
+                r[k] = _num(r[k])
+    for r in items:
+        for k in SHIP_ITEM_NUM:
+            if k in r:
+                r[k] = _num(r[k])
+    return {'shipments': ships, 'items': items, 'generatedAt': generated}
+
+
 def load_plan_comparison():
     """便ごとの価格プラン比較。毎朝の dashboard_snapshot.py が書く plans_pre.csv / ship_trend_pre.csv を読む。
     利益は送料前(手取り − 原価 − 保管料。国際送料・関税は引かない。AWS側の定義)。"""
@@ -3152,6 +3179,13 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == '/api/finance/sales-trend':
             try:
                 self._send_json(200, {'ok': True, **load_sales_trend()})
+            except Exception as exc:
+                self._send_json(500, {'error': str(exc)})
+            return
+
+        if parsed.path == '/api/finance/ship-status':
+            try:
+                self._send_json(200, {'ok': True, **load_ship_status()})
             except Exception as exc:
                 self._send_json(500, {'error': str(exc)})
             return

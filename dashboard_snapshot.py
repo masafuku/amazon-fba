@@ -697,6 +697,27 @@ def build(meta: dict, fees: Fees, today: str, targets: dict) -> tuple[list, list
     return stock_out, shipments_out, items_out, ctx
 
 
+def shipments_pre(ships: list, targets: dict) -> list:
+    """便ごとの「送料前」の収支(国際送料・関税を引かない。AWS側の定義)。shipments.csv(送料後)は変えず、別CSVにする。
+    目標は記録済みの利益に、その時の送料・関税を戻す。"""
+    out = []
+    for s in ships:
+        cost, proceeds = s['cost_usd'] or 0, s['proceeds_usd'] or 0
+        proj = s['proj_before']
+        t = targets.get(s['fba_id']) if s['fba_id'] else None
+        tgt = round(t['profit_usd'] + (t.get('ship_usd') or 0), 2) if t else ''
+        out.append(dict(
+            ship=s['ship'],
+            profit_pre='' if s['profit_now'] == '' else r2(proceeds - cost),
+            recovery_pre=round(proceeds / cost, 3) if cost and s['profit_now'] != '' else '',
+            projected_pre='' if proj is None else proj,
+            proj_roi_pre=round(proj / cost, 4) if proj is not None and cost else '',
+            target_profit_pre=tgt,
+            diff_target_pre=r2(proj - tgt) if tgt != '' and proj is not None else '',
+        ))
+    return out
+
+
 def write_csv(path: Path, rows: list):
     with open(path, 'w', newline='') as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
@@ -762,6 +783,7 @@ def main():
     write_csv(out / 'ship_items.csv', items)
     for name, rows in trend.items():
         write_csv(out / f'{name}.csv', rows)
+    write_csv(out / 'shipments_pre.csv', shipments_pre(ships, targets))
     for name in ('ship_trend', 'price_trend', 'plans'):   # 送料前の版。artifact(送料後)は読まない。AWSの画面用
         write_csv(out / f'{name}_pre.csv', trend_pre[name])
     write_embeds(out)
