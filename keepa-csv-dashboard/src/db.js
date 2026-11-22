@@ -369,6 +369,12 @@ export const loadFinanceSummary = async (days = 30) => {
     return response.json();
 };
 
+export const loadSalesTrend = async () => {
+    const response = await fetch(`${API_BASE}/api/finance/sales-trend`);
+    if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    return response.json();
+};
+
 export const loadFinanceInventory = async () => {
     const response = await fetch(`${API_BASE}/api/finance/inventory`);
     if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);

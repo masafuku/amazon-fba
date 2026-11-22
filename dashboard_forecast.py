@@ -347,12 +347,13 @@ def build_sales_trend(ctx: dict, ship_trend: list) -> list:
     profit = 売れた分だけの利益(手取り − 原価 − 国際送料・関税。1個ずつ)。cash = 便ごとの累計利益(ship_trend)の合計で、
     発送した分の原価・送料を全部引いた「投下コスト込み」。"""
     from dashboard_snapshot import DUTY_RATE, USD_JPY
-    unit = {}
+    unit, unit_pre = {}, {}
     for r in ctx['item_rows']:
         if r['cid']:
             c = (r['cost_jpy'] or 0) / USD_JPY
+            unit_pre[(r['n'], r['asin'])] = c   # 送料前の利益用(国際送料・関税を引かない。AWS側の定義)
             unit[(r['n'], r['asin'])] = c + ctx['intl_est'] + c * DUTY_RATE   # ストックの表と同じ見積もり(1個$0.742＋原価の12.5%)
-    day = defaultdict(lambda: [0, 0.0, 0.0, 0.0])   # 個数, 売上, 手取り, 利益
+    day = defaultdict(lambda: [0, 0.0, 0.0, 0.0, 0.0])   # 個数, 売上, 手取り, 利益(送料後), 利益(送料前)
     for a in ctx['alloc']:
         if not a['date']:
             continue
@@ -361,6 +362,7 @@ def build_sales_trend(ctx: dict, ship_trend: list) -> list:
         x[1] += a['rev']
         x[2] += a['net']
         x[3] += a['net'] - a['qty'] * unit.get((a['n'], a['asin']), 0.0)
+        x[4] += a['net'] - a['qty'] * unit_pre.get((a['n'], a['asin']), 0.0)
     cash_by = defaultdict(dict)
     for r in ship_trend:
         if r['kind'] == 'actual':
@@ -368,15 +370,17 @@ def build_sales_trend(ctx: dict, ship_trend: list) -> list:
     first = min([k for k in day] + [k for v in cash_by.values() for k in v], default=None)
     if not first:
         return []
-    out, cs, cp = [], 0.0, 0.0
+    out, cs, cp, cpp = [], 0.0, 0.0, 0.0
     cur, end = d(first), d(ctx['today'])
     while cur <= end:
         ds = cur.isoformat()
-        q, rev, net, pr = day.get(ds, [0, 0.0, 0.0, 0.0])
+        q, rev, net, pr, pre = day.get(ds, [0, 0.0, 0.0, 0.0, 0.0])
         cs += rev
         cp += pr
+        cpp += pre
         cash = sum(v[max(k for k in v if k <= ds)] for v in cash_by.values() if any(k <= ds for k in v))
-        out.append(dict(date=ds, qty=q, sales=r2(rev), profit=r2(pr), cum_sales=r2(cs), cum_profit=r2(cp), cum_cash=r2(cash)))
+        out.append(dict(date=ds, qty=q, sales=r2(rev), profit=r2(pr), cum_sales=r2(cs), cum_profit=r2(cp), cum_cash=r2(cash),
+                        profit_pre=r2(pre), cum_profit_pre=r2(cpp)))
         cur += timedelta(days=1)
     return out
 
