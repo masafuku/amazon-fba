@@ -1,0 +1,22 @@
+{
+  "_説明": "dashboard_snapshot.py の手入力の設定。orig_prices=入荷前に値上げしたSKUの元の価格(CEO 11/11)、価格を戻したら自然に効かなくなる。shipments=過去の便の発注日・自宅着日と補足メモ",
+  "intl_per_unit_estimate_usd": 0.742,
+  "orig_prices": {},
+  "shipments": {
+    "FBA19RGV6RMN": {
+      "d_order": "8/26〜",
+      "d_home": "〜10/1"
+    },
+    "FBA19TRVZBZ7": {
+      "d_order": "9/30〜",
+      "d_home": "〜10/20",
+      "note": "10/31にAmazonが78個の受け取りを取り消した。11/25以降に受領差異の照会をする予定"
+    },
+    "FBA19W0N5X6T": {
+      "d_order": "10/15〜",
+      "d_home": "〜10/31",
+      "d_fc": "11/13"
+    }
+  },
+  "orig_prices_note": "2026-11-16 全商品をカート価格に合わせたため、入荷前の値上げ一覧(28件)を空にした(CEO承認)"
+}
