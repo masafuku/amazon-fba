@@ -1,16 +1,21 @@
 import { useEffect, useMemo, useState } from 'react';
 import { loadStockBreakdown } from './db';
 
-// 色はartifactの「商品ごとの内訳」に合わせる(売れた・販売可能・倉庫間移動中・FC受領中・調査中・その他・紛失)
+// 色はartifact「FBA在庫と販売」の「商品ごとの内訳」と同じ(ダークテーマの値)。
+// 売れた・販売可能 = デザインシステムのグラフ色1・2(blue-400 / orange-400)、
+// 倉庫間移動中・FC受領中・調査中 = artifactが直接指定している色、
+// その他 = chart-muted(gray-550)、紛失 = danger(ダークの文字色)。
 const SEGMENTS = [
-    { key: 'sold', label: '売れた', color: '#38bdf8' },
-    { key: 'sellable', label: '販売可能', color: '#34d399' },
-    { key: 'transship', label: '倉庫間移動中', color: '#f59e0b' },
-    { key: 'receiving', label: 'FC受領中', color: '#fcd34d' },
-    { key: 'research', label: '調査中', color: '#b45309' },
-    { key: 'other', label: 'その他(内訳のずれ)', color: '#475569' },
-    { key: 'lost', label: '紛失', color: '#f43f5e' },
+    { key: 'sold', label: '売れた', color: '#3987e5' },
+    { key: 'sellable', label: '販売可能', color: '#d95926' },
+    { key: 'transship', label: '倉庫間移動中', color: '#ef9f27' },
+    { key: 'receiving', label: 'FC受領中', color: '#fac775' },
+    { key: 'research', label: '調査中', color: '#ba7517' },
+    { key: 'other', label: 'その他(内訳のずれ)', color: '#5f5e5a' },
+    { key: 'lost', label: '紛失', color: '#fa8080' },
 ];
+const HOME_COLOR = '#e49c06'; // artifactの「自宅」の枠(warning)
+const INCOMING_COLOR = 'rgba(255, 255, 255, 0.57)'; // 「入荷中」の点線(text-secondary)
 
 // 商品ごとの内訳。棒の長さ=送った数。点線の枠=自宅(まだ送っていない)と入荷中。
 export default function StockBreakdownChart() {
@@ -51,10 +56,10 @@ export default function StockBreakdownChart() {
                     </span>
                 ))}
                 <span className="inline-flex items-center gap-1">
-                    <i className="inline-block h-2.5 w-2.5 rounded-sm border border-amber-400" />自宅(まだ送っていない)
+                    <i className="inline-block h-2.5 w-2.5 rounded-sm" style={{ border: `1px solid ${HOME_COLOR}` }} />自宅(まだ送っていない)
                 </span>
                 <span className="inline-flex items-center gap-1">
-                    <i className="inline-block h-2.5 w-2.5 rounded-sm border border-dashed border-slate-400" />入荷中
+                    <i className="inline-block h-2.5 w-2.5 rounded-sm" style={{ border: `1px dashed ${INCOMING_COLOR}` }} />入荷中
                 </span>
             </div>
             <div className="space-y-1">
@@ -80,10 +85,10 @@ export default function StockBreakdownChart() {
                                     ) : null))}
                                 </div>
                                 {r.home > 0 && (
-                                    <div className="absolute inset-y-0 rounded-sm border border-amber-400" style={{ left: pct(r.sent), width: pct(r.home) }} />
+                                    <div className="absolute inset-y-0 rounded-sm" style={{ left: pct(r.sent), width: pct(r.home), border: `1px solid ${HOME_COLOR}` }} />
                                 )}
                                 {r.incoming > 0 && (
-                                    <div className="absolute inset-y-0 rounded-sm border border-dashed border-slate-400" style={{ left: pct(r.sent + r.home), width: pct(r.incoming) }} />
+                                    <div className="absolute inset-y-0 rounded-sm" style={{ left: pct(r.sent + r.home), width: pct(r.incoming), border: `1px dashed ${INCOMING_COLOR}` }} />
                                 )}
                             </div>
                             <div className="w-24 shrink-0 text-slate-400 sm:w-36">{note}</div>
