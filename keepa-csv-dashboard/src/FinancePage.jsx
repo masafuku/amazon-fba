@@ -21,6 +21,7 @@ import {
 } from './db';
 import { formatDateTime } from './formatters';
 import SalesTrendSection from './SalesTrendSection';
+import PlanComparisonSection from './PlanComparisonSection';
 
 const API_BASE = import.meta.env.VITE_API_BASE || '';
 
@@ -273,6 +274,8 @@ export default function FinancePage() {
             )}
 
             <SalesTrendSection />
+
+            <PlanComparisonSection />
 
             {summary && (
                 <>

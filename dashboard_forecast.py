@@ -59,14 +59,19 @@ def r2(x):
     return None if x is None else round(x, 2)
 
 
-def compute(ctx: dict, meta: dict) -> dict:
+def compute(ctx: dict, meta: dict, pre_shipping: bool = False) -> dict:
+    """pre_shipping=True なら利益を「送料前」で数える(国際送料・関税を引かない。AWS側の定義)。
+    損益分岐の価格・累計利益・目標(記録済みの利益に送料・関税を戻す)が全部この定義に揃う。"""
     today = d(ctx['today'])
     item_rows = [r for r in ctx['item_rows'] if r['cid']]
     ships = {x['n']: x for x in ctx['ship_rows']}
     targets = ctx['targets']
+    if pre_shipping:
+        targets = {k: {**v, 'profit_usd': round(v['profit_usd'] + (v.get('ship_usd') or 0), 2)} for k, v in targets.items()}
+    duty_rate = 0.0 if pre_shipping else DUTY_RATE
     events = ctx['events']
     fees = ctx['fees']
-    intl_unit = ctx['intl_est']
+    intl_unit = 0.0 if pre_shipping else ctx['intl_est']
     keepa = json.loads(KEEPA_FILE.read_text()) if KEEPA_FILE.exists() else {}
     elasticity = float(meta.get('forecast_elasticity', ELASTICITY))
 
@@ -107,7 +112,7 @@ def compute(ctx: dict, meta: dict) -> dict:
     def breakeven_price(asin):
         p0, f0 = base.get(asin, (None, None))
         c = cost_unit[asin]
-        need = c + intl_unit + c * DUTY_RATE
+        need = c + intl_unit + c * duty_rate
         if p0 is None or f0 is None:
             return need / 0.55
         return (need + f0 - REFERRAL * p0) / (1 - REFERRAL)
@@ -150,7 +155,7 @@ def compute(ctx: dict, meta: dict) -> dict:
         if not so:
             continue
         shipped_on[n] = d(so)
-        total_cost[n] = (s['costUsd'] or 0) + (s['intlShippingUsd'] or 0) + (s['dutyUsd'] or 0)
+        total_cost[n] = (s['costUsd'] or 0) + (0 if pre_shipping else (s['intlShippingUsd'] or 0) + (s['dutyUsd'] or 0))
     alloc_by_n = defaultdict(list)
     for a in ctx['alloc']:
         alloc_by_n[a['n']].append(a)

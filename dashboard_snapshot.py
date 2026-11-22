@@ -750,6 +750,7 @@ def main():
         stock, ships, items, ctx = build(meta, fees, args.today, targets)
         import dashboard_forecast
         trend = dashboard_forecast.compute(ctx, meta)
+        trend_pre = dashboard_forecast.compute(ctx, meta, pre_shipping=True)   # AWS側の定義(送料前)
     finally:
         fees.save()
     if len(targets) != n_before:   # 目標は追記だけ(一度記録した便は書き換えない)
@@ -761,6 +762,8 @@ def main():
     write_csv(out / 'ship_items.csv', items)
     for name, rows in trend.items():
         write_csv(out / f'{name}.csv', rows)
+    for name in ('ship_trend', 'price_trend', 'plans'):   # 送料前の版。artifact(送料後)は読まない。AWSの画面用
+        write_csv(out / f'{name}_pre.csv', trend_pre[name])
     write_embeds(out)
     print(json.dumps({'today': args.today, 'products': len(stock), 'shipments': len(ships), 'items': len(items),
                       'fee_api_calls': fees.calls, 'out': str(out)}, ensure_ascii=False))
