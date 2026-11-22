@@ -57,8 +57,8 @@ class TestCalcUnitProfitShipping(unittest.TestCase):
         # $4.99・原価¥91.3・FBA$2.86(トンボのダストキャッチ消しゴム、19g・5.5×2.3×1.1cm): 送料抜きでは+$0.70だった
         result = calc_unit_profit(us_price_usd=4.99, jp_cost_jpy=91.3, weight_kg=0.019, fba_fee_usd=2.86, dims_cm=(5.5, 2.3, 1.1))
         self.assertAlmostEqual(result['unit_profit_usd'], 0.70 - result['shipping_cost_usd'], places=2)
-        # CEO 2026-11-16: 20kg箱で按分(19g ÷ 19kg × ¥28,090 ≒ ¥28 = $0.19)
-        self.assertAlmostEqual(result['shipping_cost_usd'], 0.19, places=2)
+        # 本番の送料モデル: 基本料金÷150個(≒¥51) + 0.019kg × 1.2 × ¥1,100/kg(≒¥25) ≒ ¥76 = $0.51
+        self.assertAlmostEqual(result['shipping_cost_usd'], 0.51, places=2)
         zero = calc_unit_profit(us_price_usd=4.99, jp_cost_jpy=91.3, weight_kg=0.019, fba_fee_usd=2.86, intl_shipping_usd=0.0)
         self.assertAlmostEqual(zero['unit_profit_usd'], 0.70, places=2)
 

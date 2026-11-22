@@ -645,44 +645,38 @@ _SHIPPING_COST_SCALE_FACTOR = _FORWARDER_QUOTE_COST_JPY / _EMS_RATE_AT_QUOTE_WEI
 # あくまで概算値。
 DEFAULT_IMPORT_DUTY_RATE = 0.125
 # 国際送料(TNK経由・FedEx)。CEO 2026-11-15: $5前後の安い商品が送料抜きでS判定になっていたため、自動判定(Tier)にも
-# 送料を入れる。FedExは箱の実重量と容積重量(縦×横×高さcm÷5000)の大きいほうで請求される
-# (CEO:「どちらかというと大きさで送料の値段が決まってる」)。
-# CEO 2026-11-16: 「その商品だけを容積重量20kgの箱で送った場合」で按分する。実際の便は20kgより小さく割高だが、
-# 補正はしない(CEO「補正しないでよい」)。1個あたり =
-#   20kg箱1つの送料 × max(体積 ÷ 箱の容積100,000cm³(満杯まで詰める、CEO 11/16), 重さ ÷ 中身の上限19kg)
-# 20kg箱1つの送料: FedEx Economy 米国東側(U.S.A Rest of country、納品先HIA1/HGR6)20kg ¥16,728(2026-10-10〜)
-#   × 燃油サーチャージ1.47(仮定) + 発送代行¥1,500 + 国内送料(自宅→TNK、20kg)約¥2,000 ≒ ¥28,090。
-INTL_SHIP_BOX_FREIGHT_JPY = 16728
-INTL_SHIP_FUEL_FACTOR = 1.47
-INTL_SHIP_HANDLING_JPY = 1500
-INTL_SHIP_DOMESTIC_JPY = 2000
-INTL_SHIP_BOX_JPY = INTL_SHIP_BOX_FREIGHT_JPY * INTL_SHIP_FUEL_FACTOR + INTL_SHIP_HANDLING_JPY + INTL_SHIP_DOMESTIC_JPY
+# 送料を入れる(9/22・9/27の「送料0円」は見積もりが妥当でなかったため。今は第1便の実額がある)。
+# FedExは箱の実重量と容積重量(縦×横×高さcm÷5000)の大きいほうで請求され、第2・3便は容積で請求された
+# (CEO:「どちらかというと大きさで送料の値段が決まってる」)。1個あたり =
+#   1箱の基本料金 ÷ 1箱の個数 + max(重さ, 容積重量) × 詰め合わせ係数 × 1kgあたりの運賃
+# 基本料金: FedEx運賃の最低部分 ¥3,700 × 燃油サーチャージ1.47(仮定) + 発送代行¥1,500 + 国内送料(自宅→TNK)約¥750。
+# 1kgあたり: TNK運賃表の傾き 約¥750/kg × 1.47。詰め合わせ係数: 第1〜3便の実際の箱 ÷ 商品の合計 = 0.9〜1.35(平均約1.2)。
+# 第1便(90個・1.8kg)でこの式は¥9,674、実額¥10,017。第2・3便の請求書が来たら合わせ直す。
+INTL_SHIP_BASE_JPY_PER_SHIPMENT = 3700 * 1.47 + 1500 + 750
+INTL_SHIP_UNITS_PER_SHIPMENT = 150
+INTL_SHIP_RATE_JPY_PER_KG = 1100
+INTL_SHIP_PACKING_FACTOR = 1.2
 INTL_SHIP_VOLUMETRIC_DIVISOR = 5000
-INTL_SHIP_BOX_CM3 = 20 * INTL_SHIP_VOLUMETRIC_DIVISOR   # 容積重量20kgの箱
-INTL_SHIP_FILL_RATIO = 1.0                              # 満杯まで詰める(CEO 2026-11-16。8割はやめた)
-INTL_SHIP_BOX_MAX_KG = 19.0                             # 箱の重さを除いた中身の上限
 # 重さも寸法も分からない商品の一律額: 第1便の実額 ¥10,017 ÷ 90個 ÷ ¥150 (pricing_rule.INTL_SHIPPING_USD と同じ)
 INTL_SHIPPING_PER_UNIT_USD = round(10017 / 90 / 150.0, 3)
 
 
 def estimate_intl_shipping_usd(weight_kg: float | None, dims_cm=None, exchange_rate: float = 150.0,
                                volume_cm3: float | None = None) -> dict:
-    """1個あたりの国際送料(ドル)。その商品だけを容積重量20kgの箱に詰めたとして、箱の送料を
-    大きさ(体積)と重さのうち先に上限に達するほうで按分する。どちらも無ければ一律額。
-    戻り値: {'usd', 'billable_kg'(容積重量と重さの大きいほう), 'basis'('volume'/'weight'/'flat')}"""
+    """1個あたりの国際送料(ドル)。重さと容積重量(箱の寸法cm、または体積cm³ ÷ 5000)の大きいほうで按分する。
+    どちらも無ければ一律額。戻り値: {'usd', 'billable_kg', 'basis'}"""
+    vol_kg = None
     if dims_cm and all(d and d > 0 for d in dims_cm):
         volume_cm3 = dims_cm[0] * dims_cm[1] * dims_cm[2]
-    if not (volume_cm3 and volume_cm3 > 0):
-        volume_cm3 = None
-    if not weight_kg and volume_cm3 is None:
+    if volume_cm3 and volume_cm3 > 0:
+        vol_kg = volume_cm3 / INTL_SHIP_VOLUMETRIC_DIVISOR
+    if not weight_kg and vol_kg is None:
         return {'usd': INTL_SHIPPING_PER_UNIT_USD, 'billable_kg': None, 'basis': 'flat'}
-    by_volume = (volume_cm3 or 0.0) / (INTL_SHIP_BOX_CM3 * INTL_SHIP_FILL_RATIO)
-    by_weight = (weight_kg or 0.0) / INTL_SHIP_BOX_MAX_KG
-    share = max(by_volume, by_weight)
-    jpy = INTL_SHIP_BOX_JPY * share
-    vol_kg = (volume_cm3 or 0.0) / INTL_SHIP_VOLUMETRIC_DIVISOR
-    basis = 'volume' if by_volume > by_weight else 'weight'
-    return {'usd': round(jpy / exchange_rate, 3), 'billable_kg': round(max(weight_kg or 0.0, vol_kg), 4), 'basis': basis}
+    billable = max(weight_kg or 0.0, vol_kg or 0.0)
+    jpy = (INTL_SHIP_BASE_JPY_PER_SHIPMENT / INTL_SHIP_UNITS_PER_SHIPMENT
+           + billable * INTL_SHIP_PACKING_FACTOR * INTL_SHIP_RATE_JPY_PER_KG)
+    basis = 'volume' if vol_kg is not None and vol_kg > (weight_kg or 0.0) else 'weight'
+    return {'usd': round(jpy / exchange_rate, 3), 'billable_kg': round(billable, 4), 'basis': basis}
 
 
 def _shipping_cost_jpy_for_weight(total_weight_kg: float) -> float:
