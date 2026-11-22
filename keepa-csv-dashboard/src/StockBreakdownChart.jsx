@@ -49,6 +49,9 @@ export default function StockBreakdownChart() {
 
     return (
         <div className="mb-4">
+            <div className="mb-2 text-xs text-slate-400">
+                棒の長さが送った数(売れた数と販売可能は、古い便から順に割り振った概算)。右に、送った数／仕入れた数と、自宅・入荷中の数を出しています。
+            </div>
             <div className="mb-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-slate-400">
                 {SEGMENTS.map((s) => (
                     <span key={s.key} className="inline-flex items-center gap-1">
@@ -65,11 +68,12 @@ export default function StockBreakdownChart() {
             <div className="space-y-1">
                 {rows.map((r) => {
                     const pct = (v) => `${(v / max) * 100}%`;
-                    const note = [
+                    const parts = [
                         r.sent ? (r.bought > r.sent ? `${r.sent}／${r.bought}` : String(r.sent)) : null,
                         r.home ? `自宅${r.home}` : null,
                         r.incoming ? `入荷中${r.incoming}` : null,
-                    ].filter(Boolean).join(' ・ ');
+                    ].filter(Boolean);
+                    const [primary, ...rest] = parts;
                     const tip = [
                         r.product,
                         `仕入れた ${r.bought}`, `送った ${r.sent}`, `売れた ${r.sold}`, `販売可能 ${r.sellable}`,
@@ -79,24 +83,26 @@ export default function StockBreakdownChart() {
                         <div key={r.product} className="flex items-center gap-2 text-xs" title={tip}>
                             <div className="w-28 shrink-0 truncate text-right text-slate-200 sm:w-48">{r.product}</div>
                             <div className="relative h-5 flex-1">
-                                <div className="absolute inset-y-0 flex" style={{ left: 0, width: pct(r.sent) }}>
+                                <div className="absolute inset-y-0 w-px bg-slate-600" style={{ left: 0 }} />
+                                <div className="absolute inset-y-0.5 flex overflow-hidden rounded-sm" style={{ left: 0, width: pct(r.sent) }}>
                                     {SEGMENTS.map((s) => (r[s.key] ? (
                                         <div key={s.key} style={{ width: `${(r[s.key] / (r.sent || 1)) * 100}%`, background: s.color, minWidth: 1 }} />
                                     ) : null))}
                                 </div>
                                 {r.home > 0 && (
-                                    <div className="absolute inset-y-0 rounded-sm" style={{ left: pct(r.sent), width: pct(r.home), border: `1px solid ${HOME_COLOR}` }} />
+                                    <div className="absolute inset-y-0.5 rounded-sm" style={{ left: pct(r.sent), width: pct(r.home), border: `1px solid ${HOME_COLOR}` }} />
                                 )}
                                 {r.incoming > 0 && (
-                                    <div className="absolute inset-y-0 rounded-sm" style={{ left: pct(r.sent + r.home), width: pct(r.incoming), border: `1px dashed ${INCOMING_COLOR}` }} />
+                                    <div className="absolute inset-y-0.5 rounded-sm" style={{ left: pct(r.sent + r.home), width: pct(r.incoming), border: `1px dashed ${INCOMING_COLOR}` }} />
                                 )}
                             </div>
-                            <div className="w-24 shrink-0 text-slate-400 sm:w-36">{note}</div>
+                            <div className="w-36 shrink-0 text-slate-300 sm:w-44">
+                                {primary} <span className="text-slate-500">{rest.join(' ・ ')}</span>
+                            </div>
                         </div>
                     );
                 })}
             </div>
-            <div className="mt-1 text-xs text-slate-500">棒の長さが送った数。売れた数と販売可能は、古い便から順に割り振った概算です。</div>
         </div>
     );
 }
