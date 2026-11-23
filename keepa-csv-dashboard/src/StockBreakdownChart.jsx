@@ -1,16 +1,21 @@
 import { useEffect, useMemo, useState } from 'react';
 import { loadStockBreakdown } from './db';
 
-// 色はartifactの「商品ごとの内訳」に合わせる(売れた・販売可能・倉庫間移動中・FC受領中・調査中・その他・紛失)
+// 色はartifact「FBA在庫と販売」の「商品ごとの内訳」の見た目(ライトテーマ)と同じにする。
+// 売れた・販売可能 = デザインシステムのグラフ色1・2(blue-450 / orange-350)、
+// 倉庫間移動中・FC受領中・調査中 = artifactのページが直接指定している色、
+// その他 = chart-muted(gray-200)、紛失 = danger(text-danger)。
 const SEGMENTS = [
-    { key: 'sold', label: '売れた', color: '#38bdf8' },
-    { key: 'sellable', label: '販売可能', color: '#34d399' },
-    { key: 'transship', label: '倉庫間移動中', color: '#f59e0b' },
-    { key: 'receiving', label: 'FC受領中', color: '#fcd34d' },
-    { key: 'research', label: '調査中', color: '#b45309' },
-    { key: 'other', label: 'その他(内訳のずれ)', color: '#475569' },
-    { key: 'lost', label: '紛失', color: '#f43f5e' },
+    { key: 'sold', label: '売れた', color: '#2a78d6' },
+    { key: 'sellable', label: '販売可能', color: '#eb6834' },
+    { key: 'transship', label: '倉庫間移動中', color: '#ef9f27' },
+    { key: 'receiving', label: 'FC受領中', color: '#fac775' },
+    { key: 'research', label: '調査中', color: '#ba7517' },
+    { key: 'other', label: 'その他(内訳のずれ)', color: '#c3c2b7' },
+    { key: 'lost', label: '紛失', color: '#a42528' },
 ];
+const HOME_COLOR = '#e49c06'; // artifactの「自宅」の枠(warning)。暗い背景で見えるよう明るいほうの値
+const INCOMING_COLOR = 'rgba(255, 255, 255, 0.57)'; // 「入荷中」の点線(text-secondary)
 
 // 商品ごとの内訳。棒の長さ=送った数。点線の枠=自宅(まだ送っていない)と入荷中。
 export default function StockBreakdownChart() {
@@ -44,6 +49,9 @@ export default function StockBreakdownChart() {
 
     return (
         <div className="mb-4">
+            <div className="mb-2 text-xs text-slate-400">
+                棒の長さが送った数(売れた数と販売可能は、古い便から順に割り振った概算)。右に、送った数／仕入れた数と、自宅・入荷中の数を出しています。
+            </div>
             <div className="mb-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-slate-400">
                 {SEGMENTS.map((s) => (
                     <span key={s.key} className="inline-flex items-center gap-1">
@@ -51,20 +59,21 @@ export default function StockBreakdownChart() {
                     </span>
                 ))}
                 <span className="inline-flex items-center gap-1">
-                    <i className="inline-block h-2.5 w-2.5 rounded-sm border border-amber-400" />自宅(まだ送っていない)
+                    <i className="inline-block h-2.5 w-2.5 rounded-sm" style={{ border: `1px solid ${HOME_COLOR}` }} />自宅(まだ送っていない)
                 </span>
                 <span className="inline-flex items-center gap-1">
-                    <i className="inline-block h-2.5 w-2.5 rounded-sm border border-dashed border-slate-400" />入荷中
+                    <i className="inline-block h-2.5 w-2.5 rounded-sm" style={{ border: `1px dashed ${INCOMING_COLOR}` }} />入荷中
                 </span>
             </div>
             <div className="space-y-1">
                 {rows.map((r) => {
                     const pct = (v) => `${(v / max) * 100}%`;
-                    const note = [
+                    const parts = [
                         r.sent ? (r.bought > r.sent ? `${r.sent}／${r.bought}` : String(r.sent)) : null,
                         r.home ? `自宅${r.home}` : null,
                         r.incoming ? `入荷中${r.incoming}` : null,
-                    ].filter(Boolean).join(' ・ ');
+                    ].filter(Boolean);
+                    const [primary, ...rest] = parts;
                     const tip = [
                         r.product,
                         `仕入れた ${r.bought}`, `送った ${r.sent}`, `売れた ${r.sold}`, `販売可能 ${r.sellable}`,
@@ -74,24 +83,26 @@ export default function StockBreakdownChart() {
                         <div key={r.product} className="flex items-center gap-2 text-xs" title={tip}>
                             <div className="w-28 shrink-0 truncate text-right text-slate-200 sm:w-48">{r.product}</div>
                             <div className="relative h-5 flex-1">
-                                <div className="absolute inset-y-0 flex" style={{ left: 0, width: pct(r.sent) }}>
+                                <div className="absolute inset-y-0 w-px bg-slate-600" style={{ left: 0 }} />
+                                <div className="absolute inset-y-0.5 flex overflow-hidden rounded-sm" style={{ left: 0, width: pct(r.sent) }}>
                                     {SEGMENTS.map((s) => (r[s.key] ? (
                                         <div key={s.key} style={{ width: `${(r[s.key] / (r.sent || 1)) * 100}%`, background: s.color, minWidth: 1 }} />
                                     ) : null))}
                                 </div>
                                 {r.home > 0 && (
-                                    <div className="absolute inset-y-0 rounded-sm border border-amber-400" style={{ left: pct(r.sent), width: pct(r.home) }} />
+                                    <div className="absolute inset-y-0.5 rounded-sm" style={{ left: pct(r.sent), width: pct(r.home), border: `1px solid ${HOME_COLOR}` }} />
                                 )}
                                 {r.incoming > 0 && (
-                                    <div className="absolute inset-y-0 rounded-sm border border-dashed border-slate-400" style={{ left: pct(r.sent + r.home), width: pct(r.incoming) }} />
+                                    <div className="absolute inset-y-0.5 rounded-sm" style={{ left: pct(r.sent + r.home), width: pct(r.incoming), border: `1px dashed ${INCOMING_COLOR}` }} />
                                 )}
                             </div>
-                            <div className="w-24 shrink-0 text-slate-400 sm:w-36">{note}</div>
+                            <div className="w-36 shrink-0 text-slate-300 sm:w-44">
+                                {primary} <span className="text-slate-500">{rest.join(' ・ ')}</span>
+                            </div>
                         </div>
                     );
                 })}
             </div>
-            <div className="mt-1 text-xs text-slate-500">棒の長さが送った数。売れた数と販売可能は、古い便から順に割り振った概算です。</div>
         </div>
     );
 }
