@@ -30,9 +30,12 @@ class TestOrderWatch(unittest.TestCase):
         self.sent = []
         self.orders = []
         self.items = {}
+        self.live = {}
+        self.pipeline = []
         for name, value in [
             ('fetch_orders', lambda since: self.orders),
             ('fetch_items', lambda order_id: self.items.get(order_id, [item()])),
+            ('fetch_live_fulfillable', lambda sku: self.live.get(sku)),
         ]:
             p = mock.patch.object(order_watch, name, value)
             p.start()
@@ -98,7 +101,28 @@ class TestOrderWatch(unittest.TestCase):
         with mock.patch.object(order_watch, 'fetch_fees', return_value=6.0):
             self.run_watch()
         # 原価は税込(CEO 2026-11-16)。1個: 14.89 - 6.00 - (715*1.1/150)*1.125 = 2.99 → 2個で 5.98
-        self.assertEqual(self.sent[0], '【売れた 10/26 02:01】Sanrio FriXion Ball Knock Set ×2 $29.78 利益$5.98')
+        # 残り在庫は売れた通知の末尾に付く(別のテストで確認)。ここでは利益までを見る
+        self.assertTrue(self.sent[0].startswith('【売れた 10/26 02:01】Sanrio FriXion Ball Knock Set ×2 $29.78 利益$5.98'))
+
+    def test_sold_message_ends_with_remaining_stock_but_cancel_does_not(self):
+        self.orders = [order('A-1', 'Shipped')]
+        self.run_watch()
+        self.orders = [order('A-1', 'Shipped'), order('A-2')]
+        with mock.patch.object(order_watch, 'stock_text', lambda it, rows=None: ' → 残り12個（約6日分）'):
+            self.run_watch()
+        self.assertEqual(self.sent, ['【売れた 10/26 02:01】Sanrio FriXion Ball Knock Set → 残り12個（約6日分）'])
+        self.orders = [order('A-1', 'Shipped'), order('A-2', 'Canceled')]
+        with mock.patch.object(order_watch, 'stock_text', lambda it, rows=None: ' → 残り12個（約6日分）'):
+            self.run_watch()
+        self.assertNotIn('残り', self.sent[1])
+
+    def test_sold_message_is_still_sent_when_stock_lookup_fails(self):
+        self.orders = [order('A-1', 'Shipped')]
+        self.run_watch()
+        self.orders = [order('A-1', 'Shipped'), order('A-2')]
+        with mock.patch.object(order_watch.stock_ledger, 'stock_pipeline', side_effect=RuntimeError('db')):
+            self.run_watch()
+        self.assertEqual(self.sent, ['【売れた 10/26 02:01】Sanrio FriXion Ball Knock Set'])
 
     def test_shipped_is_silent_but_cancel_is_notified(self):
         self.orders = [order('A-1', 'Pending')]
@@ -141,6 +165,37 @@ class TestOrderWatch(unittest.TestCase):
         self.assertEqual(result['new'], ['A-2'])
         self.assertEqual(self.sent, [])
         self.assertNotIn('A-2', order_watch._state())
+
+
+def pipe_row(asin='B0FKTF2XVZ', fba=0, receiving=0, transit=0, sold_30d=0, in_stock_days=0):
+    return {'asin': asin, 'fba_available': fba, 'fc_received_inbound': receiving, 'at_home': 0, 'planned': 0,
+            'at_tnk': 0, 'intl_transit': transit, 'sold_30d': sold_30d, 'in_stock_days': in_stock_days}
+
+
+class TestStockText(unittest.TestCase):
+    def text(self, row, live, sku='SKU-1', asin='B0FKTF2XVZ'):
+        with mock.patch.object(order_watch, 'fetch_live_fulfillable', lambda s: live):
+            return order_watch.stock_text({'ASIN': asin, 'SellerSKU': sku}, {asin: row} if row else {})
+
+    def test_remaining_uses_live_count_plus_receiving_and_shows_days(self):
+        row = pipe_row(fba=99, receiving=2, sold_30d=20, in_stock_days=10)   # 1日2個
+        self.assertEqual(self.text(row, live=10), ' → 残り12個（約6日分）')   # 在庫データの99は使わない
+
+    def test_falls_back_to_snapshot_and_says_approximately(self):
+        self.assertEqual(self.text(pipe_row(fba=8), live=None), ' → 残り約8個')
+
+    def test_low_stock_gets_warning_mark(self):
+        self.assertEqual(self.text(pipe_row(fba=3), live=3), ' → ⚠ 残り3個')
+        self.assertEqual(self.text(pipe_row(fba=4), live=4), ' → 残り4個')
+
+    def test_zero_stock_shows_transit_or_warns_when_none(self):
+        self.assertEqual(self.text(pipe_row(transit=10), live=0), ' → 在庫は輸送中（10個）')
+        self.assertEqual(self.text(pipe_row(), live=0), ' → ⚠ 在庫0（輸送中なし）')
+
+    def test_unknown_product_or_error_gives_empty_text(self):
+        self.assertEqual(self.text(None, live=5), '')
+        with mock.patch.object(order_watch, 'fetch_live_fulfillable', side_effect=RuntimeError('x')):
+            self.assertEqual(order_watch.stock_text({'ASIN': 'A', 'SellerSKU': 'S'}, {'A': pipe_row()}), '')
 
 
 if __name__ == '__main__':
