@@ -165,8 +165,9 @@ def list_financial_events_by_order(order_id: str) -> Dict[str, Any]:
     return _request(f"/finances/v0/orders/{order_id}/financialEvents")
 
 
-def get_inventory_summaries(next_token: Optional[str] = None) -> Dict[str, Any]:
-    """FBA Inventory API: getInventorySummaries - current fulfillable quantity per ASIN."""
+def get_inventory_summaries(next_token: Optional[str] = None, seller_skus: Optional[list] = None) -> Dict[str, Any]:
+    """FBA Inventory API: getInventorySummaries - current fulfillable quantity per ASIN.
+    seller_skus を渡すと、そのSKUだけに絞る(最大50件)。"""
     if next_token:
         params = {"NextToken": next_token, "granularityType": "Marketplace", "granularityId": settings.marketplace_id, "marketplaceIds": settings.marketplace_id}
     else:
@@ -176,6 +177,8 @@ def get_inventory_summaries(next_token: Optional[str] = None) -> Dict[str, Any]:
             "marketplaceIds": settings.marketplace_id,
             "details": "true",
         }
+        if seller_skus:
+            params["sellerSkus"] = ",".join(seller_skus)
     return _request("/fba/inventory/v1/summaries", params)
 
 

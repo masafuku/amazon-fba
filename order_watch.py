@@ -31,6 +31,8 @@ LOOKBACK_DAYS = 2  # LastUpdatedAfter。5分ごとに動かしても、取りこ
 BASELINE_DAYS = 14
 MAX_SEEN = 2000
 TITLE_LENGTH = 44
+STOCK_CHECKS: list = []  # 通知に使った残りの数(ライブと在庫データ)。減るタイミングの確認用に、実行ログに出す
+LOW_STOCK_UNITS = 3  # 売れた後の残りがこの個数以下なら「⚠」を付ける(CEO 2026-11-23: 残りわずかの目印)
 # 新規注文以外で通知する状態の表示名(これ以外の状態への変化は、通知せずに記録だけする。出荷は通知しない)
 STATUS_LABEL = {
     'Unshipped': '支払い確定',
@@ -94,6 +96,42 @@ def fetch_fees(asin: str, unit_price: float) -> float | None:
         return None
 
 
+def fetch_live_fulfillable(sku: str) -> int | None:
+    """FBA在庫APIで、そのSKUの「販売可能」の今の数を取る。在庫データ(3時間おき)は古いことがあるので、通知の直前に1件だけ取る。取れなければNone。"""
+    try:
+        summaries = sp_client.get_inventory_summaries(seller_skus=[sku]).get('payload', {}).get('inventorySummaries', [])
+        if not summaries:
+            return None
+        return int(summaries[0].get('inventoryDetails', {}).get('fulfillableQuantity', 0))
+    except Exception:
+        return None
+
+
+def stock_text(item: dict, rows: dict | None = None) -> str:
+    """売れた商品の残り在庫を「 → 残り12個（約18日分）」の形で返す。分からないとき・失敗したときは空(通知は止めない)。
+    残り = 販売可能の今の数 + FC受領中。ライブで取れなければ在庫データの数を使い、「残り約」と出す。
+    残り0のときは、輸送中の数を出す(予約注文)。残りが LOW_STOCK_UNITS 以下なら「⚠」を付ける。"""
+    try:
+        row = (rows if rows is not None else {r['asin']: r for r in stock_ledger.stock_pipeline()}).get(item.get('ASIN'))
+        if not row:
+            return ''
+        live = fetch_live_fulfillable(item['SellerSKU']) if item.get('SellerSKU') else None
+        STOCK_CHECKS.append((item.get('ASIN'), live, row['fba_available']))
+        available = live if live is not None else row['fba_available']
+        left = available + row['fc_received_inbound']
+        transit = row['at_home'] + row['planned'] + row['at_tnk'] + row['intl_transit']
+        if left <= 0:
+            body = f'在庫は輸送中（{transit}個）' if transit else '在庫0（輸送中なし）'
+            return f" → ⚠ {body}" if not transit else f" → {body}"
+        daily = row['sold_30d'] / row['in_stock_days'] if row.get('in_stock_days') else 0
+        cover = f'（約{(transit + left) / daily:.0f}日分）' if daily else ''
+        approx = '' if live is not None else '約'
+        mark = '⚠ ' if left <= LOW_STOCK_UNITS else ''
+        return f' → {mark}残り{approx}{left}個{cover}'
+    except Exception:
+        return ''
+
+
 def _unit_cost_jpy(asin: str | None) -> float | None:
     """仕入れ金額(税抜)の平均。pricing_rule と同じ考え方。"""
     if not asin:
@@ -127,13 +165,19 @@ def _price_text(item: dict) -> str:
     return f" 予定${unit * qty:.2f}" + _profit_text(item, unit, qty)
 
 
-def _names(items: list[dict]) -> str:
+def _names(items: list[dict], with_stock: bool = False) -> str:
+    rows = None
+    if with_stock:
+        try:
+            rows = {r['asin']: r for r in stock_ledger.stock_pipeline()}
+        except Exception:   # 在庫が取れなくても、売れた通知は必ず出す
+            rows = {}
     parts = []
     for item in items:
         qty = int(item.get('QuantityOrdered') or 1)
         title = (item.get('Title') or item.get('ASIN') or '')[:TITLE_LENGTH]
         text = f'{title} ×{qty}' if qty > 1 else title
-        parts.append(text + _price_text(item))
+        parts.append(text + _price_text(item) + (stock_text(item, rows) if with_stock else ''))
     return ' / '.join(parts)
 
 
@@ -145,7 +189,7 @@ def _jst(raw: str | None) -> str:
 
 
 def format_new(order: dict, items: list[dict]) -> str:
-    return f"【売れた {_jst(order.get('PurchaseDate'))}】{_names(items)}"
+    return f"【売れた {_jst(order.get('PurchaseDate'))}】{_names(items, with_stock=True)}"
 
 
 def format_change(order: dict, items: list[dict], now: datetime) -> str:
@@ -208,6 +252,8 @@ def main(argv=None) -> int:
     result = run(dry_run=args.dry_run, baseline=args.baseline)
     print(f"[INFO] 取得 {result['fetched']}件 / 新規 {len(result['new'])}件 / 状態変化 {len(result['changed'])}件 / "
           f"通知 {result['sent']}件{' (基準登録)' if result['baseline'] else ''}")
+    for asin, live, snapshot in STOCK_CHECKS:
+        print(f"[INFO] 在庫確認 {asin}: 販売可能 ライブ{'取得失敗' if live is None else f'{live}個'} / 在庫データ{snapshot}個")
     for message in result.get('messages', []):
         print(message)
         print('---')

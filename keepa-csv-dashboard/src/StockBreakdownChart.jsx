@@ -32,7 +32,7 @@ export default function StockBreakdownChart() {
 
     const rows = useMemo(() => {
         const list = (data?.rows ?? [])
-            .filter((r) => r.sent > 0 || r.home > 0)
+            .filter((r) => r.sent > 0 || r.home > 0 || r.incoming > 0)
             .map((r) => ({
                 ...r,
                 other: Math.max(0, r.sent - r.sold - r.sellable - r.lost - r.transship - r.receiving - r.research),
@@ -50,7 +50,7 @@ export default function StockBreakdownChart() {
     return (
         <div className="mb-4">
             <div className="mb-2 text-xs text-slate-400">
-                棒の長さが送った数(売れた数と販売可能は、古い便から順に割り振った概算)。右に、送った数／仕入れた数と、自宅・入荷中の数を出しています。
+                棒の長さが送った数(売れた数と販売可能は、古い便から順に割り振った概算)。点線は入荷中(仕入れ先に発注済みで、まだ自宅に届いていない分)で、まだ何も送っていない商品も、発注済みなら出ています。右に、送った数／仕入れた数と、自宅・入荷中の数を出しています。
             </div>
             <div className="mb-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-slate-400">
                 {SEGMENTS.map((s) => (
@@ -62,7 +62,7 @@ export default function StockBreakdownChart() {
                     <i className="inline-block h-2.5 w-2.5 rounded-sm" style={{ border: `1px solid ${HOME_COLOR}` }} />自宅(まだ送っていない)
                 </span>
                 <span className="inline-flex items-center gap-1">
-                    <i className="inline-block h-2.5 w-2.5 rounded-sm" style={{ border: `1px dashed ${INCOMING_COLOR}` }} />入荷中
+                    <i className="inline-block h-2.5 w-2.5 rounded-sm" style={{ border: `1px dashed ${INCOMING_COLOR}` }} />入荷中(発注済み)
                 </span>
             </div>
             <div className="space-y-1">
